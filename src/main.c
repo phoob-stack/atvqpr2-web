@@ -536,7 +536,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 4: Set game directory for file I/O path translation */
     {
         extern void xbox_path_init(const char *game_dir, const char *save_dir);
-        xbox_path_init(YOUR_GAME_DIR, NULL);
+        /* RECOMP_SAVE_DIR also takes the partition images and the
+         * Cache/SystemData/TitleData/UserData folders, so a test run with its
+         * own save dir leaves %LOCALAPPDATA%\xboxrecomp alone entirely. */
+        const char *sd = getenv("RECOMP_SAVE_DIR");
+        xbox_path_init(YOUR_GAME_DIR, sd && sd[0] ? sd : NULL);
     }
 
     /* Step 5: Initialize kernel bridge (thunk table in Xbox memory) */
