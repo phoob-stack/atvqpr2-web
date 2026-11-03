@@ -22,6 +22,7 @@
 #include "d3d8_swizzle.h"
 #include "gpu_proto.h"
 #include "gpu_shadergen.h"
+#include "gpu_shadergen_wgsl.h"   /* WebGPU tap (gpu_wgsl_tap.c) */
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -397,6 +398,7 @@ static uint32_t vs_get(const uint32_t (*prog)[4], uint32_t len)
             s_vs[i].key = key;
             s_vs[i].id = s_next_id++;
             q_cmd(GP_SHADER_VS, s_vs[i].id, len, 0, 0, 0, 0, s_hlsl, (uint32_t)n + 1);
+            gp_wgsl_note_vs(s_vs[i].id, prog, len);
             return s_vs[i].id;
         }
     }
@@ -417,6 +419,7 @@ static uint32_t ps_get(const GpPsKey *k)
             s_ps[i].key = key;
             s_ps[i].id = s_next_id++;
             q_cmd(GP_SHADER_PS, s_ps[i].id, 0, 0, 0, 0, 0, s_hlsl, (uint32_t)n + 1);
+            gp_wgsl_note_ps(s_ps[i].id, k);
             return s_ps[i].id;
         }
     }
@@ -674,7 +677,7 @@ static void rec_flip(void)
     f.idx = (const uint32_t *)s_idx.p; f.idx_count = s_idx.n / 4;
     f.consts = s_consts.p; f.const_bytes = s_consts.n;
     f.frame = s_frame;
-    gp_d3d11_consume(&f);
+    gp_backend_flip(&f);          /* D3D11, or wgpu; captures (gpu_wgsl_tap.c) */
     /* The consumer wrote this frame's targets back: remember what the guest
      * now holds, so a later CPU write to them can be told apart. */
     for (i = 0; i < s_nrt; i++)

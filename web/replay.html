@@ -1,0 +1,85 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Frame replay</title>
+<!--
+  Replays a frame capture (cap_<n>.gpf, written with RECOMP_GPU_CAPTURE) with
+  the WebGPU encoder and diffs it against what D3D11 drew (cap_<n>.ref).
+  Captures are game-derived: they stay on this PC (served from localhost by
+  web/tools/replay.mjs, never committed).
+  replay.html?cap=/data/cap_3000  or  window.replay('/data/cap_3000')
+-->
+<style>
+  body { background: #222; color: #ddd; font: 13px monospace; margin: 8px; }
+  canvas { image-rendering: pixelated; margin-right: 4px; }
+</style>
+<pre id="out">loading…</pre>
+<div><canvas id="gpu"></canvas><canvas id="ref"></canvas><canvas id="diff"></canvas></div>
+<script type="module">
+import { parseCapture } from './gpu/proto.js';
+import { requestDevice } from './gpu/layout.js';
+import { GpEncoder } from './gpu/encoder.js';
+
+const out = document.getElementById('out');
+
+function paint(id, w, h, bgra, f = (i, d) => d) {
+  const cv = document.getElementById(id);
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(w, h);
+  for (let i = 0; i < w * h; i++) {
+    const p = f(i, [bgra[i * 4 + 2], bgra[i * 4 + 1], bgra[i * 4]]);
+    img.data.set([p[0], p[1], p[2], 255], i * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+window.replay = async function replay(base) {
+  const gpf = await (await fetch(`${base}.gpf`)).arrayBuffer();
+  const frame = parseCapture(gpf);
+  const { device, features, adapterName } = await requestDevice();
+  const errors = [];
+  device.addEventListener('uncapturederror', (e) => errors.push(e.error.message));
+  device.pushErrorScope('validation');
+  const enc = new GpEncoder(device, features);
+  const t0 = performance.now();
+  enc.consume(frame);
+  const got = await enc.readTarget(frame.refTarget);
+  const ms = performance.now() - t0;
+  const scopeErr = await device.popErrorScope();
+  if (scopeErr) errors.unshift(scopeErr.message);
+
+  const r = { frame: frame.frame, draws: frame.drawCount, adapterName, ms: Math.round(ms),
+    stats: enc.stats, errors: errors.slice(0, 10), errorCount: errors.length };
+  const refRes = await fetch(`${base}.ref`);
+  if (got && refRes.ok) {
+    const ref = await refRes.arrayBuffer(), hdr = new Uint32Array(ref, 0, 4);
+    const w = hdr[2], h = hdr[3], rp = new Uint8Array(ref, 16);
+    paint('gpu', got.w, got.h, got.px);
+    paint('ref', w, h, rp);
+    let sum = 0, big = 0;
+    const n = Math.min(w * h, got.w * got.h);
+    const dpx = new Uint8Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      let m = 0;
+      for (let c = 0; c < 3; c++) {
+        const d = Math.abs(got.px[i * 4 + c] - rp[i * 4 + c]);
+        sum += d; m = Math.max(m, d); dpx[i * 4 + c] = Math.min(255, d * 4);
+      }
+      if (m > 16) big++;
+    }
+    paint('diff', w, h, dpx);
+    Object.assign(r, { w, h, meanAbsDiff: +(sum / (n * 3)).toFixed(3), pctPixelsOver16: +(100 * big / n).toFixed(3) });
+    // One composite PNG: WebGPU | D3D11 | diff x4.
+    const comp = document.createElement('canvas');
+    comp.width = w * 3; comp.height = h;
+    const cx = comp.getContext('2d');
+    ['gpu', 'ref', 'diff'].forEach((id, k) => cx.drawImage(document.getElementById(id), k * w, 0));
+    r.png = comp.toDataURL('image/png');
+  }
+  out.textContent = JSON.stringify({ ...r, png: r.png ? '(png)' : undefined }, null, 1);
+  return r;
+};
+window.ready = {};
+const q = new URLSearchParams(location.search).get('cap');
+if (q) window.replay(q).catch((e) => { out.textContent = String(e.stack ?? e); });
+else out.textContent = 'ready';
+</script>
