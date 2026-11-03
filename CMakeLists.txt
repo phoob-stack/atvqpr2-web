@@ -56,6 +56,10 @@ set(GAME_SOURCES
     src/gpu/gpu_rec.c
     src/gpu/gpu_shadergen.c
     src/gpu/gpu_d3d11.c
+    # WebGPU path: WGSL twin of the shader generator, the tap (WGSL dump,
+    # frame captures for web/replay.html, back-end selector at the flip)
+    src/gpu/gpu_shadergen_wgsl.c
+    src/gpu/gpu_wgsl_tap.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
     # src/custom_renderer.c
@@ -71,6 +75,19 @@ add_executable(${PROJECT_NAME} WIN32
     ${GAME_SOURCES}
     ${RECOMP_GEN_SOURCES}
 )
+
+# Optional native WebGPU back end (RECOMP_GPU_BACKEND=wgpu). OFF by default:
+# it needs a webgpu.h implementation (wgpu-native or Dawn) that is not in the
+# tree. See WEBGPU.md for the exact download.
+option(ATV2_WGPU "Build the WebGPU back end (src/gpu/gpu_wgpu.c) against wgpu-native" OFF)
+set(WGPU_NATIVE_DIR "" CACHE PATH "wgpu-native release folder (include/webgpu/webgpu.h, lib/wgpu_native.dll.lib)")
+if(ATV2_WGPU)
+    target_sources(${PROJECT_NAME} PRIVATE src/gpu/gpu_wgpu.c)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE ATV2_WGPU=1)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${WGPU_NATIVE_DIR}/include)
+    find_library(WGPU_NATIVE_LIB NAMES wgpu_native.dll.lib wgpu_native PATHS ${WGPU_NATIVE_DIR}/lib REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${WGPU_NATIVE_LIB})
+endif()
 
 # Link against the xboxrecomp umbrella target (all 6 runtime libraries)
 target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)

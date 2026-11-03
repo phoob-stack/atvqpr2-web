@@ -1,0 +1,76 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WGSL validator</title>
+<!--
+  Compiles WGSL modules with the browser's WebGPU (Dawn/Tint) and builds a
+  render pipeline for each against the shared bind-group layout. Driven by
+  web/tools/validate-wgsl.mjs over the DevTools protocol; can also be opened
+  by hand (serve web/ on localhost) and fed with window.validate([...]).
+-->
+<pre id="out">loading…</pre>
+<script type="module">
+import { makeLayouts, cubeMaskOf, vertexLayout, requestDevice } from './gpu/layout.js';
+
+const out = document.getElementById('out');
+const TRIVIAL_FS = '@fragment fn main() -> @location(0) vec4f { return vec4f(1.0); }';
+
+async function compile(device, name, code) {
+  const module = device.createShaderModule({ label: name, code });
+  const info = await module.getCompilationInfo();
+  const messages = info.messages.map((m) => `${m.type} ${m.lineNum}:${m.linePos} ${m.message}`);
+  return { module, ok: !info.messages.some((m) => m.type === 'error'), messages };
+}
+
+window.validate = async function validate(mods) {
+  const { device, features, adapterName } = await requestDevice();
+  const L = makeLayouts(device);
+  const byName = new Map(mods.map((m) => [m.name, m]));
+  const cache = new Map();
+  const get = async (name, code) => {
+    if (!cache.has(name)) cache.set(name, await compile(device, name, code ?? byName.get(name)?.code));
+    return cache.get(name);
+  };
+  const results = [];
+  for (const m of mods) {
+    const r = { name: m.name, ok: false, messages: [], pipeline: 'skipped' };
+    results.push(r);
+    if (m.name.includes('.cd.') && !features.includes('clip-distances')) {
+      r.messages.push('clip-distances not supported by this adapter'); r.ok = null; continue;
+    }
+    const c = await get(m.name);
+    r.ok = c.ok; r.messages = c.messages;
+    if (!c.ok) continue;
+    let vs, fs, kind, cube = 0;
+    if (m.name.startsWith('vs_')) {
+      kind = m.name.includes('tvert') ? 'tvert' : m.name.includes('passthru') ? 'passthru' : 'program';
+      vs = c.module;
+      fs = kind === 'tvert' ? (await get('ps_1_tvert.wgsl')).module : (await get('trivial_fs', TRIVIAL_FS)).module;
+    } else {
+      const tv = m.name.includes('tvert');
+      kind = tv ? 'tvert' : 'passthru';
+      vs = (await get(tv ? 'vs_2_tvert.wgsl' : 'vs_1_passthru.wgsl')).module;
+      fs = c.module;
+      cube = cubeMaskOf(m.code);
+    }
+    try {
+      await device.createRenderPipelineAsync({
+        label: m.name,
+        layout: L.pipelineLayout(cube),
+        vertex: { module: vs, entryPoint: 'main', buffers: vertexLayout(kind) },
+        fragment: { module: fs, entryPoint: 'main', targets: [{ format: 'bgra8unorm' }] },
+        primitive: { topology: 'triangle-list', cullMode: 'none' },
+        depthStencil: { format: 'depth24plus-stencil8', depthCompare: 'less-equal', depthWriteEnabled: true },
+      });
+      r.pipeline = 'ok';
+    } catch (e) {
+      r.pipeline = String(e.message ?? e);
+    }
+  }
+  const bad = results.filter((r) => r.ok === false || (r.ok && r.pipeline !== 'ok'));
+  out.textContent = `${adapterName}\n${results.length} modules, ${bad.length} failing\n` +
+    bad.map((r) => `${r.name}: ${r.messages.join('; ')} ${r.pipeline}`).join('\n');
+  return { adapterName, features, results };
+};
+window.ready = {};
+out.textContent = navigator.gpu ? 'ready' : 'no WebGPU in this browser';
+</script>
