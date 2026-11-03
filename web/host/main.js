@@ -297,6 +297,16 @@ async function boot() {
     presenter = new Presenter({ device: gpu.device, features: gpu.features, canvas: $('screen'),
       memory, hostPtr, onError: (s) => log(`[page] ${s}`, 'err'), display });
     window.atv.presenter = presenter; window.atv.input = input;
+    // Render pipelines an earlier run used (web/tools/pipelist.mjs writes
+    // build-wasm/pipelines.json), created in the background while the game
+    // boots, so a brand-new browser profile has them compiled by the race
+    // start instead of compiling each at its first draw. ?prepipes=0: off.
+    if (q.get('prepipes') !== '0')
+      fetch('/wasm/pipelines.json').then((r) => (r.ok ? r.json() : null))
+        .then((l) => l && presenter.enc.preloadPipelines(l))
+        .then((r) => r && log(`[page] pipelines created ahead: ${r.made}${r.failed ? `, ${r.failed} failed` : ''}` +
+          `${r.skipped ? ' (list skipped: other display options)' : ''}`))
+        .catch(() => {});
     log(`[page] host block at 0x${hostPtr.toString(16)}`);
   })();
 

@@ -26,7 +26,7 @@
 // target at a new scale before the next frame ("window"). Off (1x, no MSAA):
 // none of that code runs.
 import * as P from './proto.js';
-import { makeLayouts, UNIFORM_SLOTS, vertexLayout, cubeMaskOf, inputMaskOf } from './layout.js';
+import { makeLayouts, UNIFORM_SLOTS, vertexLayout, cubeMaskOf, inputMaskOf, constRangeOf } from './layout.js';
 
 const BLEND_FACTOR = {
   0x0000: ['zero', 'zero'], 0x0001: ['one', 'one'],
@@ -71,6 +71,18 @@ const CLEAR_WGSL = `struct C { col: vec4f, z: f32 };
 }
 @fragment fn fs() -> @location(0) vec4f { return c.col; }`;
 const CLEAR_SLOTS = 64;
+
+// A pipeline spec's key, and a shader's (FNV-1a over the WGSL text).
+const specKey = (sp) => [sp.vs, sp.ps, sp.kind, sp.cube, sp.stride, sp.inputs, sp.writeMask,
+  sp.blend ? sp.blend.join(',') : '-', sp.ds ? sp.ds.join(',') : '-', sp.sten ? sp.sten.join(',') : '-'].join('|');
+function codeHash(code) {
+  let a = 0x811c9dc5, b = 0x01000193 ^ code.length;
+  for (let i = 0; i < code.length; i++) {
+    const c = code.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193); b = Math.imul(b ^ c, 0x5bd1e995) ^ (b >>> 15);
+  }
+  return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0') + code.length.toString(16);
+}
 
 const unpack = (c) => [((c >>> 16) & 255) / 255, ((c >>> 8) & 255) / 255, (c & 255) / 255, (c >>> 24) / 255];
 
@@ -140,6 +152,12 @@ export class GpEncoder {
     this.vsMods = new Map();   // id -> { module }   (built-ins 1, 2 share ids with
     this.psMods = new Map();   // id -> { module, cube }  PS 1: separate maps)
     this.pipes = new Map();
+    // Pipelines by what they are made of (shader text hashes and state; ids
+    // differ from run to run): what this run used (exportPipelines) and what
+    // preloadPipelines() created ahead of time.
+    this.codes = new Map();    // code hash -> WGSL
+    this.specs = new Map();    // stable key -> spec
+    this.pre = new Map();      // stable key -> GPURenderPipeline (created ahead)
     this.samplers = new Map();
     this.bufs = {};
     this.serial = 0;           // every resource gets a new one: the bind-group cache key
@@ -283,8 +301,10 @@ export class GpEncoder {
         case P.GP_SHADER_VS: case P.GP_SHADER_PS: {
           const code = dec.decode(payload.slice(0, Math.max(0, c.bytes - 1)));   // slice: not shared
           const module = this.dev.createShaderModule({ label: `${c.op === P.GP_SHADER_VS ? 'vs' : 'ps'}_${c.id}`, code });
-          if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module, inputs: inputMaskOf(code) });
-          else this.psMods.set(c.id, { module, cube: cubeMaskOf(code) });
+          const h = codeHash(code);
+          if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module, inputs: inputMaskOf(code), crange: constRangeOf(code), h });
+          else this.psMods.set(c.id, { module, cube: cubeMaskOf(code), h });
+          this.codes.set(h, code);
           this.stats.shMs += performance.now() - t0; this.stats.shN++;
           break;
         }
@@ -396,34 +416,71 @@ export class GpEncoder {
     return b;
   }
 
-  /** Repack the constant blocks the draws use into 256-aligned slots. */
+  /** Repack the constant blocks the draws use into 256-aligned slots.
+   *
+   * Uploads were the 4-player bottleneck (4 KB of slots a draw, 3000-4000
+   * draws: 12-16 MB a frame through the GPU process), so blocks are shared:
+   *  - xf / ps: by arena offset (gpu_rec.c's put_consts hands consecutive
+   *    equal blocks the same offset), as the VS constant file already was;
+   *  - smp: with the previous draw when its sampler words match;
+   *  - vsc: only the rows the program reads (constRangeOf: [lo, hi]) are
+   *    written; the 3 KB binding window starts lo rows before them (256-
+   *    aligned), so windows overlap rows nobody reads. A relative-addressing
+   *    program gets the whole file. */
   packUniforms(frame, draws) {
     const slots = [];
     let size = 3072;                       // offset 0: zeros, the "no block" slot for every binding
-    const vscSeen = new Map();
-    const take = (stride) => { const at = size; size += stride; return at; };
+    let end = 3072;                        // the highest window end (the buffer must hold it)
+    const vscSeen = new Map(), xfSeen = new Map(), psSeen = new Map();
+    const take = (stride) => { const at = size; size += stride; if (size > end) end = size; return at; };
+    let prevSmp = null;
     for (const d of draws) {
       if (d.kind !== P.GP_DRAW) continue;
-      const s = { xf: 0, vsc: 0, ps: 0, smp: 0 };
-      if (d.xfc_off !== 0xFFFFFFFF) s.xf = take(UNIFORM_SLOTS[0].stride);
-      if (d.vsc_off !== 0xFFFFFFFF) {
-        if (!vscSeen.has(d.vsc_off)) vscSeen.set(d.vsc_off, take(UNIFORM_SLOTS[1].stride));
-        s.vsc = vscSeen.get(d.vsc_off);
+      const s = { xf: 0, vsc: 0, ps: 0, smp: 0, vlo: 0, vhi: 0, wxf: false, wps: false, wsmp: false, wvsc: false };
+      if (d.xfc_off !== 0xFFFFFFFF) {
+        const k = d.vs === P.GP_VS_TVERT ? -1 - d.xfc_off : d.xfc_off;
+        if (!xfSeen.has(k)) { xfSeen.set(k, take(UNIFORM_SLOTS[0].stride)); s.wxf = true; }
+        s.xf = xfSeen.get(k);
       }
-      if (d.psc_off !== 0xFFFFFFFF) s.ps = take(UNIFORM_SLOTS[2].stride);
-      s.smp = take(UNIFORM_SLOTS[3].stride);
+      if (d.vsc_off !== 0xFFFFFFFF) {
+        const [lo, hi] = this.vsMods.get(d.vs)?.crange ?? [0, 191];
+        const e = vscSeen.get(d.vsc_off);
+        if (e && e.lo <= lo && e.hi >= hi) s.vsc = e.at;
+        else {
+          // Rows lo..hi land at or after `size`; the window starts lo rows earlier.
+          const at = Math.max(0, (size - lo * 16 + 255) & ~255);
+          size = at + (hi + 1) * 16;
+          if (at + UNIFORM_SLOTS[1].size > end) end = at + UNIFORM_SLOTS[1].size;
+          if (size > end) end = size;
+          vscSeen.set(d.vsc_off, { at, lo, hi });
+          s.vsc = at; s.vlo = lo; s.vhi = hi; s.wvsc = true;
+          size = (size + 255) & ~255;
+        }
+      }
+      if (d.psc_off !== 0xFFFFFFFF) {
+        if (!psSeen.has(d.psc_off)) { psSeen.set(d.psc_off, take(UNIFORM_SLOTS[2].stride)); s.wps = true; }
+        s.ps = psSeen.get(d.psc_off);
+      }
+      const p = prevSmp;
+      if (p && p.smp[0] === d.smp[0] && p.smp[1] === d.smp[1] && p.smp[2] === d.smp[2] && p.smp[3] === d.smp[3] &&
+          p.border[0] === d.border[0] && p.border[1] === d.border[1] && p.border[2] === d.border[2] && p.border[3] === d.border[3])
+        s.smp = p.slots.smp;
+      else { s.smp = take(UNIFORM_SLOTS[3].stride); s.wsmp = true; }
       d.slots = s;
+      prevSmp = d;
       slots.push(d);
     }
+    size = Math.max(size, end);
     // One arena, reused frame to frame (the slots below 3072 stay zero).
     if (this.arena.byteLength < size) this.arena = new Uint8Array(Math.max(size, this.arena.byteLength * 2));
     const arena = this.arena, af = new Float32Array(arena.buffer), au = new Uint32Array(arena.buffer);
     const c = frame.consts;
     for (const d of slots) {
       const s = d.slots;
-      if (s.xf) arena.set(c.subarray(d.xfc_off, d.xfc_off + (d.vs === P.GP_VS_TVERT ? P.GpTvConsts.size : P.GpXfConsts.size)), s.xf);
-      if (s.ps) arena.set(c.subarray(d.psc_off, d.psc_off + P.GpPsConsts.size), s.ps);
-      if (s.vsc) arena.set(c.subarray(d.vsc_off, d.vsc_off + P.GpVsConsts.size), s.vsc);
+      if (s.wxf) arena.set(c.subarray(d.xfc_off, d.xfc_off + (d.vs === P.GP_VS_TVERT ? P.GpTvConsts.size : P.GpXfConsts.size)), s.xf);
+      if (s.wps) arena.set(c.subarray(d.psc_off, d.psc_off + P.GpPsConsts.size), s.ps);
+      if (s.wvsc) arena.set(c.subarray(d.vsc_off + s.vlo * 16, d.vsc_off + (s.vhi + 1) * 16), s.vsc + s.vlo * 16);
+      if (!s.wsmp) continue;
       // GpWgslSmp: border colours (16 floats), which axes are BORDER (4 u32),
       // LOD bias (4 floats).
       const w = s.smp >> 2;
@@ -435,6 +492,7 @@ export class GpEncoder {
         af[w + 20 + st] = this.filtered(k) ? P.GP_SMP_BIAS_OF(k) / 256 : 0;
       }
     }
+    this.stats.uniBytes = (this.stats.uniBytes ?? 0) + size;
     const buf = this.buffer('uniforms', size, GPUBufferUsage.UNIFORM);
     this.dev.queue.writeBuffer(buf, 0, arena, 0, size);
     if (!this.group0)
@@ -469,41 +527,96 @@ export class GpEncoder {
     return this.samplers.get(key);
   }
 
+  /** The render pipeline for a draw. Its key is what the pipeline is made
+   * of -- both shaders' WGSL (by hash) and the fixed-function state -- so a
+   * pipeline created ahead of time from an earlier run's list
+   * (preloadPipelines) is found under the same key. */
   pipeline(d, kind, vs, ps, cube, hasDs) {
     const st = d.st, m = st.color_mask;
     const writeMask = (m & 0x00010000 ? 1 : 0) | (m & 0x00000100 ? 2 : 0) | (m & 0x00000001 ? 4 : 0) | (m & 0x01000000 ? 8 : 0);
     const dt = hasDs && st.depth_test, dw = dt && st.depth_write, sten = hasDs && st.stencil_en;
-    const key = [d.vs, d.ps, kind, cube, d.vtx_stride, st.blend_en ? 1 : 0, st.blend_src, st.blend_dst, st.blend_eq, writeMask,
-      hasDs ? 1 : 0, dt ? 1 : 0, dw ? 1 : 0, st.depth_func, sten ? [st.stencil_func, st.stencil_fmask & 255,
-        st.stencil_wmask & 255, st.stencil_fail, st.stencil_zfail, st.stencil_zpass].join(',') : '-'].join('|');
+    const spec = { vs: vs.h, ps: ps.h, kind, cube, stride: d.vtx_stride, inputs: vs.inputs, writeMask,
+      blend: st.blend_en ? [st.blend_src, st.blend_dst, st.blend_eq] : null,
+      ds: hasDs ? [dt ? 1 : 0, dw ? 1 : 0, st.depth_func] : null,
+      sten: sten ? [st.stencil_func, st.stencil_fmask & 255, st.stencil_wmask & 255, st.stencil_fail, st.stencil_zfail, st.stencil_zpass] : null };
+    const key = specKey(spec);
     let p = this.pipes.get(key);
     if (p) return p;
-    let blend;
-    if (st.blend_en) {
-      const op = BLEND_OP[st.blend_eq] ?? 'add', minmax = op === 'min' || op === 'max';
-      const f = (x, a) => (minmax ? 'one' : (BLEND_FACTOR[x] ?? ['one', 'one'])[a]);
-      blend = { color: { operation: op, srcFactor: f(st.blend_src, 0), dstFactor: f(st.blend_dst, 0) },
-        alpha: { operation: op, srcFactor: f(st.blend_src, 1), dstFactor: f(st.blend_dst, 1) } };
+    p = this.pre.get(key);
+    if (p) this.stats.prePipes = (this.stats.prePipes ?? 0) + 1;
+    else {
+      const t0 = performance.now();
+      p = this.dev.createRenderPipeline(this.pipeDesc(spec, key, vs.module, ps.module));
+      this.stats.pipelines++;
+      this.stats.pipeMs += performance.now() - t0;
     }
-    const face = sten ? { compare: CMP[st.stencil_func] ?? 'always', failOp: STENCIL_OP[st.stencil_fail] ?? 'keep',
-      depthFailOp: STENCIL_OP[st.stencil_zfail] ?? 'keep', passOp: STENCIL_OP[st.stencil_zpass] ?? 'keep' } : {};
-    const t0 = performance.now();
-    p = this.dev.createRenderPipeline({
-      label: key,
-      layout: this.L.pipelineLayout(cube),
-      vertex: { module: vs.module, entryPoint: 'main', buffers: vertexLayout(kind, vs.inputs, d.vtx_stride) },
-      fragment: { module: ps, entryPoint: 'main', targets: [{ format: 'bgra8unorm', blend, writeMask }] },
+    this.pipes.set(key, p);
+    this.specs.set(key, spec);
+    return p;
+  }
+
+  /** The descriptor for a spec (pipeline() above, preloadPipelines below). */
+  pipeDesc(spec, label, vsModule, psModule) {
+    let blend;
+    if (spec.blend) {
+      const [src, dst, eq] = spec.blend;
+      const op = BLEND_OP[eq] ?? 'add', minmax = op === 'min' || op === 'max';
+      const f = (x, a) => (minmax ? 'one' : (BLEND_FACTOR[x] ?? ['one', 'one'])[a]);
+      blend = { color: { operation: op, srcFactor: f(src, 0), dstFactor: f(dst, 0) },
+        alpha: { operation: op, srcFactor: f(src, 1), dstFactor: f(dst, 1) } };
+    }
+    const sn = spec.sten;
+    const face = sn ? { compare: CMP[sn[0]] ?? 'always', failOp: STENCIL_OP[sn[3]] ?? 'keep',
+      depthFailOp: STENCIL_OP[sn[4]] ?? 'keep', passOp: STENCIL_OP[sn[5]] ?? 'keep' } : {};
+    const ds = spec.ds;
+    return {
+      label,
+      layout: this.L.pipelineLayout(spec.cube),
+      vertex: { module: vsModule, entryPoint: 'main', buffers: vertexLayout(spec.kind, spec.inputs, spec.stride) },
+      fragment: { module: psModule, entryPoint: 'main', targets: [{ format: 'bgra8unorm', blend, writeMask: spec.writeMask }] },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       multisample: { count: this.msaa },
-      depthStencil: hasDs ? { format: this.dsFormat, depthWriteEnabled: !!dw,
-        depthCompare: dt ? CMP[st.depth_func] ?? 'always' : 'always',
+      depthStencil: ds ? { format: this.dsFormat, depthWriteEnabled: !!ds[1],
+        depthCompare: ds[0] ? CMP[ds[2]] ?? 'always' : 'always',
         stencilFront: face, stencilBack: face,
-        stencilReadMask: sten ? st.stencil_fmask & 255 : 0xFF, stencilWriteMask: sten ? st.stencil_wmask & 255 : 0 } : undefined,
-    });
-    this.pipes.set(key, p);
-    this.stats.pipelines++;
-    this.stats.pipeMs += performance.now() - t0;
-    return p;
+        stencilReadMask: sn ? sn[1] : 0xFF, stencilWriteMask: sn ? sn[2] : 0 } : undefined,
+    };
+  }
+
+  /** The pipelines this run created, with their shaders: what
+   * preloadPipelines() takes (web/tools/pipelines.mjs writes it to
+   * build-wasm/pipelines.json, beside the module it was recorded with). */
+  exportPipelines() {
+    const shaders = {};
+    for (const sp of this.specs.values()) for (const h of [sp.vs, sp.ps]) shaders[h] = this.codes.get(h);
+    return { version: 1, msaa: this.msaa, dsFormat: this.dsFormat, shaders, pipes: [...this.specs.values()] };
+  }
+
+  /** Create an earlier run's pipelines in the background
+   * (createRenderPipelineAsync), so the first draw that needs one finds it
+   * ready instead of waiting for the browser to compile it (a brand-new
+   * browser profile has no compiled shaders: 40-170 ms at the race start).
+   * A draw whose pipeline is not ready yet creates it as before; nothing is
+   * skipped or drawn differently. Returns a promise of { made, failed }. */
+  async preloadPipelines(list) {
+    if (!list || list.version !== 1 || list.msaa !== this.msaa || list.dsFormat !== this.dsFormat) return { made: 0, failed: 0, skipped: true };
+    const mods = new Map();
+    const mod = (h) => {
+      if (!mods.has(h)) mods.set(h, list.shaders[h] ? this.dev.createShaderModule({ label: `pre_${h}`, code: list.shaders[h] }) : null);
+      return mods.get(h);
+    };
+    let made = 0, failed = 0;
+    await Promise.all(list.pipes.map(async (spec) => {
+      const key = specKey(spec);
+      const vm = mod(spec.vs), pm = mod(spec.ps);
+      if (!vm || !pm || this.pipes.has(key) || this.pre.has(key)) return;
+      try {
+        const p = await this.dev.createRenderPipelineAsync(this.pipeDesc(spec, key, vm, pm));
+        if (!this.pre.has(key)) this.pre.set(key, p);
+        made++;
+      } catch { failed++; }
+    }));
+    return { made, failed };
   }
 
   // ---- passes --------------------------------------------------------------
@@ -677,7 +790,7 @@ export class GpEncoder {
     }
     const pass = this.pass, b = this.bound;
     this.scissor(rectOf(d, t.rt));
-    const pipe = this.pipeline(d, kind, vs, ps.module, cube, !!t.ds);
+    const pipe = this.pipeline(d, kind, vs, ps, cube, !!t.ds);
     if (pipe !== b.pipe) { pass.setPipeline(pipe); b.pipe = pipe; }
     pass.setBindGroup(0, this.group0, [d.slots.xf, d.slots.vsc, d.slots.ps, d.slots.smp]);
     if (g1 !== b.g1) { pass.setBindGroup(1, g1); b.g1 = g1; }

@@ -4,7 +4,12 @@
 // polling, independent of the page's main thread, which is the encoder).
 //
 //   node web/tools/gorace.mjs [--secs 14] [--port n] [--profile dir] [--out dir]
-//        [--qs 'res=2'] [--env K=V,...] [--wasm url] [--json file] [--shots]
+//        [--qs 'res=2'] [--env K=V,...] [--wasm url] [--json file] [--shots] [--save-pipes]
+//
+// --save-pipes: merge the render pipelines the run created into
+// build-wasm/pipelines.json (pipelist.mjs; the page creates them ahead of time
+// at boot, ?prepipes=0 does not). Each run is a fresh browser profile unless
+// --profile, so it shows the first-run pipeline compiles.
 //
 // The race scene appears (draws > 300) -> about 5.7 s of countdown -> GO.
 // Reported, from the first flip with > 300 draws (t = 0):
@@ -17,6 +22,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launch } from './cdp.mjs';
+import { savePipelines } from './pipelist.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const argv = process.argv.slice(2);
@@ -176,6 +182,9 @@ try {
   }
   if (opt('--json')) writeFileSync(opt('--json'), JSON.stringify(report) + '\n', { flag: 'a' });
   writeFileSync(join(out, 'flips.json'), JSON.stringify({ T0, fl, page }));
+  if (argv.includes('--save-pipes')) console.log(await savePipelines(b, join(ROOT, 'build-wasm/pipelines.json')));
+  console.log(`page: ${await b.eval('atv.log.filter((l) => l.includes("pipelines created ahead")).join(" ")')} ` +
+    `pipelines made at a draw ${await b.eval('atv.presenter.enc.stats.pipelines')}, taken from the preload ${await b.eval('atv.presenter.enc.stats.prePipes ?? 0')}`);
   result = 0;
 } catch (e) {
   console.log(`${el()} FAILED: ${e.message}`);

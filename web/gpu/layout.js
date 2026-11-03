@@ -60,6 +60,17 @@ export function inputMaskOf(wgsl) {
   return m;
 }
 
+// The rows of the VS constant file (K.c, GpVsConsts) a program module reads,
+// [lo, hi]: from its WGSL (gpu_shadergen_wgsl.c vsh_src), so exactly what it
+// can index. Relative addressing (cidx) can reach any row: [0, 191].
+// packUniforms uploads only these rows of each block.
+export function constRangeOf(wgsl) {
+  if (wgsl.includes('cidx(')) return [0, 191];
+  let lo = 192, hi = -1;
+  for (const x of wgsl.matchAll(/K\.c\[(\d+)\]/g)) { const r = Number(x[1]); if (r < lo) lo = r; if (r > hi) hi = r; }
+  return hi < 0 ? [0, 0] : [lo, hi];
+}
+
 // Vertex buffer layouts by vertex shader kind. Program vertices are either
 // all 16 inputs (GpProgVertex, 256 bytes: captures, native) or only the
 // inputs the module declares, packed in location order (the wasm recorder).

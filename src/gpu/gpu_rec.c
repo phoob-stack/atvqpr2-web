@@ -18,6 +18,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
 
 #include "nv2a_backend.h"
 #include "d3d8_swizzle.h"
@@ -125,6 +128,26 @@ static void *buf_take(Buf *b, uint32_t bytes, uint32_t align)
 }
 
 static Buf s_queue, s_draws, s_vtx, s_idx, s_consts;
+static void *vtx_take(uint32_t bytes, uint32_t align);   /* the vertex arena (below) */
+#if defined(__wasm__)
+/* The browser's consumer is asynchronous: the page stages frame N (copies
+ * its arenas into WebGPU buffers) while the walk records frame N+1. Two sets
+ * of arenas, swapped at every flip, so the flip need not wait for the page's
+ * claim (web_present.c waits for frame N-1's claim before handing over N,
+ * which is long done by then). Natively the consumer drains the frame inside
+ * the flip, so one set is enough. */
+static Buf s_spare[5];
+static void bufs_swap(void)
+{
+    Buf *live[5] = { &s_queue, &s_draws, &s_vtx, &s_idx, &s_consts };
+    int k;
+    for (k = 0; k < 5; k++) {
+        Buf t = *live[k];
+        *live[k] = s_spare[k];
+        s_spare[k] = t;
+    }
+}
+#endif
 /* One id space for every resource -- render targets, depth, textures and
  * shaders -- above the built-in shader ids, never reused. */
 static uint32_t s_frame, s_next_id = 64;
@@ -162,6 +185,44 @@ static uint64_t fnv(const void *p, size_t n, uint64_t h)
     return h;
 }
 #define FNV0 1469598103934665603ull
+
+/* The same, 8 bytes a step (the tail byte-wise), with a shift so high bits
+ * reach the low ones: for content and key hashes that stay in this process.
+ * wasm has no fast byte loop -- byte-wise FNV over a frame's textures and
+ * keys was ~4% of the walk thread in 4-player split screen. */
+static uint64_t fnv_wide(const void *p, size_t n, uint64_t h)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        memcpy(&w, b + i, 8);
+        h = (h ^ w) * 1099511628211ull;
+        h ^= h >> 29;
+    }
+    return fnv(b + i, n - i, h);
+}
+
+/* memcmp(a, b, n) == 0. wasi-libc's memcmp is a byte loop, and the recorder
+ * compares kilobytes per draw (the 3 KB VS constant file, programs). */
+static int same_bytes(const void *a, const void *b, size_t n)
+{
+#if defined(__wasm_simd128__)
+    const uint8_t *p = (const uint8_t *)a, *q = (const uint8_t *)b;
+    for (; n >= 64; p += 64, q += 64, n -= 64) {
+        v128_t d = wasm_v128_xor(wasm_v128_load(p), wasm_v128_load(q));
+        d = wasm_v128_or(d, wasm_v128_xor(wasm_v128_load(p + 16), wasm_v128_load(q + 16)));
+        d = wasm_v128_or(d, wasm_v128_xor(wasm_v128_load(p + 32), wasm_v128_load(q + 32)));
+        d = wasm_v128_or(d, wasm_v128_xor(wasm_v128_load(p + 48), wasm_v128_load(q + 48)));
+        if (wasm_v128_any_true(d)) return 0;
+    }
+    for (; n >= 16; p += 16, q += 16, n -= 16)
+        if (wasm_v128_any_true(wasm_v128_xor(wasm_v128_load(p), wasm_v128_load(q)))) return 0;
+    return !n || !memcmp(p, q, n);
+#else
+    return !memcmp(a, b, n);
+#endif
+}
 
 /* Ids whose contents were replaced: freed three frames later. */
 #define MAX_FREE 16384
@@ -479,10 +540,10 @@ static uint32_t face_stride(const Nv2aTexture *t)
 static uint64_t hash_span(const uint8_t *p, uint32_t n, uint64_t h)
 {
     uint32_t i;
-    if (n <= 16384) return fnv(p, n, h);
-    h = fnv(p, 4096, h);
+    if (n <= 16384) return fnv_wide(p, n, h);
+    h = fnv_wide(p, 4096, h);
     for (i = 4096; i + 4096 < n; i += 64) { h ^= p[i] | (uint32_t)p[i + 1] << 8; h *= 1099511628211ull; }
-    return fnv(p + n - 4096, 4096, h);
+    return fnv_wide(p + n - 4096, 4096, h);
 }
 
 /* Mip levels to upload: the format word's count for swizzled and DXT
@@ -736,7 +797,7 @@ static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
     uint32_t bb = d3d8_format_dxt_block_bytes(t->color), faces = cube ? 6 : 1, f, lv;
     uint32_t levels = tex_levels(t), fbytes = 0, stride, l0 = level0_bytes(t), id, gpu_bytes;
     uint32_t kk[6] = { t->offset, t->width, t->height, t->color, t->pitch, t->palette };
-    uint64_t key = fnv(kk, sizeof kk, FNV0) ^ (uint64_t)cube, h = FNV0, vkey;
+    uint64_t key = fnv_wide(kk, sizeof kk, FNV0) ^ (uint64_t)cube, h = FNV0, vkey;
     uint32_t slot = (uint32_t)(key ^ (key >> 32)) & (TEX_HASH - 1), probe;
     Tex *e = NULL, *victim = NULL;
     Ver *v;
@@ -766,7 +827,7 @@ static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
     for (f = 0; f < faces; f++)
         h = hash_span(mem + t->offset + f * stride, fbytes, h);
     if (t->color == 0x0B && t->palette)          /* P8: the palette is half the texture */
-        h = fnv(mem + t->palette, 1024, h);
+        h = fnv_wide(mem + t->palette, 1024, h);
     if (e && e->hash == h && s_ver[e->ver].id == e->id) {
         e->checked_frame = e->used = s_frame;
         s_ver[e->ver].used = s_frame;
@@ -932,7 +993,7 @@ static uint32_t vs_get(const uint32_t (*prog)[4], uint32_t len, uint32_t mask)
 {
     static uint32_t last[256][4], last_len, last_id;
     uint32_t id;
-    if (last_id && len == last_len && !memcmp(prog, last, (size_t)len * 16))
+    if (last_id && len == last_len && same_bytes(prog, last, (size_t)len * 16))
         return last_id;
     id = vs_lookup(prog, len, mask);
     last_id = 0;
@@ -944,9 +1005,9 @@ static uint32_t vs_get(const uint32_t (*prog)[4], uint32_t len, uint32_t mask)
     return id;
 }
 
-static uint32_t ps_get(const GpPsKey *k)
+static uint32_t ps_lookup(const GpPsKey *k)
 {
-    uint64_t key = fnv(k, sizeof *k, FNV0) | 1;
+    uint64_t key = fnv_wide(k, sizeof *k, FNV0) | 1;
     uint32_t slot = (uint32_t)key & (SH_HASH - 1), p;
     int n;
     for (p = 0; p < SH_HASH; p++) {
@@ -968,6 +1029,20 @@ static uint32_t ps_get(const GpPsKey *k)
         }
     }
     return 0;
+}
+
+/* Runs of draws share a combiner setup: the last key first. */
+static uint32_t ps_get(const GpPsKey *k)
+{
+    static GpPsKey last;
+    static uint32_t last_id;
+    uint32_t id;
+    if (last_id && same_bytes(k, &last, sizeof last))
+        return last_id;
+    id = ps_lookup(k);
+    last_id = id;
+    if (id) last = *k;
+    return id;
 }
 
 
@@ -1149,7 +1224,7 @@ static uint32_t put_consts(const void *p, uint32_t bytes)
     void *dst;
     for (k = 0; k < 4 && last[k].bytes && last[k].bytes != bytes; k++) ;
     if (k < 4 && last[k].bytes == bytes && last[k].epoch == s_epoch
-        && !memcmp(s_consts.p + last[k].off, p, bytes))
+        && same_bytes(s_consts.p + last[k].off, p, bytes))
         return last[k].off;
     if (!(dst = buf_take(&s_consts, bytes, 16))) return ~0u;
     memcpy(dst, p, bytes);
@@ -1166,7 +1241,7 @@ static uint32_t put_vs_consts(const float (*c)[4])
 {
     static uint32_t last_off = ~0u, last_epoch = ~0u;
     if (last_off != ~0u && last_epoch == s_epoch
-        && !memcmp(s_consts.p + last_off, c, sizeof(GpVsConsts)))
+        && same_bytes(s_consts.p + last_off, c, sizeof(GpVsConsts)))
         return last_off;
     last_off = put_consts(c, sizeof(GpVsConsts));
     last_epoch = s_epoch;
@@ -1224,11 +1299,36 @@ static void rec_draw(const Nv2aSurface *s, const Nv2aBatch *b)
         tc.alpha_ref = (float)(b->state->alpha_ref & 0xFF);
     }
     d->xfc_off = put_consts(&tc, sizeof tc);
-    if (!(v = buf_take(&s_vtx, b->count * sizeof(GpTVertex), 16))) return;
+    if (!(v = vtx_take(b->count * sizeof(GpTVertex), 16))) return;
     memcpy(v, b->vertices, b->count * sizeof(GpTVertex));
     d->vtx_off = (uint32_t)((uint8_t *)v - s_vtx.p);
     d->vtx_count = b->count;
     d->vtx_stride = sizeof(GpTVertex);
+}
+
+/* The vertex arena: when growing it moves it, inputs the executor was
+ * given room for earlier may not be passed again (its input reuse). */
+static void *vtx_take(uint32_t bytes, uint32_t align)
+{
+    uint8_t *was = s_vtx.p;
+    void *v = buf_take(&s_vtx, bytes, align);
+    if (s_vtx.p != was)
+        nv2a_backend_storage_reset();
+    return v;
+}
+
+/* Nv2aBackend.draw2_input_space: the executor fetches the next draw2's
+ * program inputs straight into the vertex arena, and rec_draw2 keeps them
+ * where they are instead of copying them (10-16 MB a frame in 4-player split
+ * screen). Room a batch does not submit stays unused until the flip. */
+static void *s_vtx_room;
+static uint32_t s_vtx_room_bytes;
+
+static void *rec_input_space(uint32_t bytes)
+{
+    s_vtx_room = vtx_take(bytes, 16);
+    s_vtx_room_bytes = bytes;
+    return s_vtx_room;
 }
 
 static void rec_draw2(const Nv2aSurface *s, const Nv2aRenderState *rs, const Nv2aDraw *dd)
@@ -1336,8 +1436,17 @@ static void rec_draw2(const Nv2aSurface *s, const Nv2aRenderState *rs, const Nv2
          * the 16, so the arena, the upload and the GPU's read shrink 3-5x. */
         {
             uint32_t bytes = dd->vertex_count * dd->input_count * 16;
-            if (!(v = buf_take(&s_vtx, bytes, 16))) return;
-            memcpy(v, dd->inputs, bytes);
+            const uint8_t *in = (const uint8_t *)dd->inputs;
+            if (s_vtx_room && (const void *)in == s_vtx_room
+                && s_vtx_room_bytes == bytes) {
+                v = s_vtx_room;                /* fetched in place (rec_input_space) */
+            } else if (in >= s_vtx.p && in + bytes <= s_vtx.p + s_vtx.n) {
+                v = (void *)in;                /* an earlier draw's, reused (executor d2_key) */
+            } else {
+                if (!(v = vtx_take(bytes, 16))) return;
+                memcpy(v, dd->inputs, bytes);
+            }
+            s_vtx_room = NULL;
             d->vtx_stride = dd->input_count * 16;
         }
         d->vtx_off = (uint32_t)((uint8_t *)v - s_vtx.p);
@@ -1348,7 +1457,7 @@ static void rec_draw2(const Nv2aSurface *s, const Nv2aRenderState *rs, const Nv2
         d->idx_count = dd->index_count;
     } else {
         d->vs = GP_VS_PASSTHRU;
-        if (!(v = buf_take(&s_vtx, dd->xf_count * sizeof(GpXfVertex), 16))) return;
+        if (!(v = vtx_take(dd->xf_count * sizeof(GpXfVertex), 16))) return;
         memcpy(v, dd->xf, dd->xf_count * sizeof(GpXfVertex));
         d->vtx_off = (uint32_t)((uint8_t *)v - s_vtx.p);
         d->vtx_count = dd->xf_count;
@@ -1384,6 +1493,7 @@ static void rec_sync(void)
         s_probe.n = 0;
     }
     s_queue.n = s_draws.n = s_vtx.n = s_idx.n = s_consts.n = 0;
+    s_vtx_room = NULL;
     s_epoch++;
 }
 
@@ -1432,13 +1542,18 @@ static void rec_flip(void)
         s_probe_draws = s_probe_verts = s_probe_bad_draws = s_probe_bad_verts = 0;
     }
     s_queue.n = s_draws.n = s_vtx.n = s_idx.n = s_consts.n = 0;
+    s_vtx_room = NULL;
+#if defined(__wasm__)
+    bufs_swap();                  /* the page may still be reading this set */
+    s_queue.n = s_draws.n = s_vtx.n = s_idx.n = s_consts.n = 0;
+#endif
     s_epoch++;
     s_frame++;
     { extern void atv2_freeride_frame(void); atv2_freeride_frame(); }
     { extern void atv2_control_frame(unsigned); atv2_control_frame((unsigned)f.draw_count); }
 }
 
-static Nv2aBackend s_backend = { rec_clear, rec_draw, rec_flip, rec_draw2, rec_sync };
+static Nv2aBackend s_backend = { rec_clear, rec_draw, rec_flip, rec_draw2, rec_sync, rec_input_space };
 
 void atv2_gpu_backend_install(void)
 {
