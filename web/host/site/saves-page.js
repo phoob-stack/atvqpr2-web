@@ -35,6 +35,9 @@ async function mustBeIdle() {
   if (await gameRunning()) throw new Error('The game is running in another tab of this page. Quit it there first, then change the saves here.');
 }
 
+// saves.js's backup names (UTC, sortable): 20261103-055724Z-before-...
+const utcStamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z').replace('T', '-');
+
 const utf16 = (u8) => {
   try { return new TextDecoder('utf-16le').decode(u8); } catch { return ''; }
 };
@@ -107,7 +110,7 @@ export const hooks = {
     // Nothing (or only title data) left: back the saves up, then empty the folder.
     const root = await navigator.storage.getDirectory();
     if (tree.some((f) => !f.dir)) {
-      const b = await (await root.getDirectoryHandle(mod.BACKUP_DIR, { create: true })).getDirectoryHandle(`${stamp().replace('_', '-')}-before-delete`, { create: true });
+      const b = await (await root.getDirectoryHandle(mod.BACKUP_DIR, { create: true })).getDirectoryHandle(`${utcStamp()}-before-delete`, { create: true });
       for (const f of tree) {
         const parts = f.path.split('/');
         let d = b;

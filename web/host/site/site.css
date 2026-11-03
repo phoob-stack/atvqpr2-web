@@ -71,7 +71,7 @@ button.freeride:hover:not(:disabled) { background: rgba(233, 194, 126, 0.1); }
 .game-state.ok { border-left-color: var(--ok); }
 .game-state.need { border-left-color: var(--orange); }
 
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin: 18px 0; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 14px; margin: 18px 0; }
 #home .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
 #home .card.wide { grid-column: 1 / -1; }
 #home .card p { margin: 6px 0; }
@@ -105,7 +105,7 @@ kbd { display: inline-block; min-width: 1.4em; padding: 1px 6px; margin-right: 3
 
 /* ---- settings ----------------------------------------------------------------- */
 .settings { color: var(--text); font: 14px/1.45 var(--font); }
-.set-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; align-items: start; }
+.set-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; align-items: start; }
 .set-sec { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 10px 16px 14px; margin: 0; min-width: 0; }
 .set-sec legend { font: 700 13px var(--display); text-transform: uppercase; letter-spacing: 0.08em; color: var(--sand); padding: 0 6px; }
 .set-row { display: grid; grid-template-columns: 1fr; gap: 5px 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(67, 56, 46, 0.6); }
@@ -211,3 +211,4 @@ progress { width: 100%; accent-color: var(--orange); }
   main { padding: 12px 16px; }
   button.play { font-size: 34px; }
 }
+.cards.about { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }

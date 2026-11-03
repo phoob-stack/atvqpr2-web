@@ -130,6 +130,17 @@ try {
   await b.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'Space', key: ' ', windowsVirtualKeyCode: 32 });
   await sleep(200);
   check(await b.eval(`JSON.parse(localStorage.getItem('atv2.settings.v1')).values.key_a === 'Space'`), 'rebind: A = Space stored');
+  // Gamepad: a fake standard pad (as boot.mjs --pad); Set on "B", then its button 3 goes down.
+  await b.eval(`(() => {
+    const p = { id: 'site.mjs fake pad', index: 0, connected: true, mapping: 'standard', timestamp: 0, axes: [0, 0, 0, 0],
+      buttons: Array.from({ length: 17 }, () => ({ pressed: false, touched: false, value: 0 })) };
+    window.__padSet = (k, v) => { p.buttons[k] = { pressed: !!v, touched: !!v, value: v ? 1 : 0 }; };
+    Object.defineProperty(Navigator.prototype, 'getGamepads', { configurable: true, value: () => [p, null, null, null] });
+    [...document.querySelectorAll('table.ctl')][1].querySelectorAll('tbody tr')[1].querySelector('button').click(); })()`);
+  await sleep(200);
+  await b.eval(`__padSet(3, 1)`); await sleep(300); await b.eval(`__padSet(3, 0)`);
+  check(await b.eval(`JSON.parse(localStorage.getItem('atv2.settings.v1')).values.pad_b === '3'`), 'gamepad rebind: B = button 3 stored');
+  await b.eval(`(() => { const v = JSON.parse(localStorage.getItem('atv2.settings.v1')); delete v.values.pad_b; localStorage.setItem('atv2.settings.v1', JSON.stringify(v)); })()`);
   await b.send('Page.reload', {});
   await sleep(1500);
   await until(`document.body.classList.contains('mode-home')`);
@@ -170,6 +181,10 @@ try {
     check(await b.eval(`document.getElementById('fps').hidden`), 'menu: FPS counter off');
     await click('#mn-fps');
     check(await b.eval(`!document.getElementById('fps').hidden`), 'menu: FPS counter on');
+    await click('#mn-full');
+    const fs = await until(`!!document.fullscreenElement`, 3);
+    check(fs, 'menu: fullscreen on');
+    if (fs) { await click('#mn-full'); check(await until(`!document.fullscreenElement`, 3), 'menu: fullscreen off'); }
     await click('#mn-shot');
     await until(`/Saved atv2-.*png/.test(document.getElementById('mn-note').textContent)`, 5);
     await sleep(800);
@@ -198,7 +213,27 @@ try {
     await sleep(50);
     check(await b.eval(`atv.input.keys[0x5a] === 0`), 'and lets go');
     check(await b.eval(`atv.state.error === undefined && atv.state.trap === null`), 'no boot error or trap');
+
+    // Quit (two clicks) goes back to the start page.
+    await key('F1'); await sleep(200);
+    await click('#mn-quit'); await sleep(100); await click('#mn-quit');
+    check(await until(`document.body.classList.contains('mode-home') && !location.search`, 10), 'Quit: back on the start page');
   }
+  // Free Ride: the env gets RECOMP_FREERIDE=1 (the address is what the button pushes).
+  await b.eval(`localStorage.removeItem('atv2.settings.v1')`);
+  await b.send('Page.navigate', { url: `${base}/host/index.html?play=freeride` });
+  check(await until(`(window.atv?.log ?? []).some((l) => l.startsWith('[page] env:') && l.includes('RECOMP_FREERIDE=1'))`, 30), 'Free Ride: RECOMP_FREERIDE=1 in the env');
+  check(await b.eval(`document.getElementById('loading-title').textContent === 'Free Ride'`), 'Free Ride: loading card title');
+  // A start that fails: the card says so and offers Retry / Reload / Download log.
+  await b.send('Page.navigate', { url: `${base}/host/index.html?play=1&wasm=no-such-module.wasm` });
+  check(await until(`document.getElementById('loading').classList.contains('failed')`, 30), 'failed start: ' +
+    await b.eval(`document.getElementById('loading-msg')?.textContent`).catch(() => ''));
+  check(await b.eval(`['ld-retry', 'ld-reload', 'ld-log'].every((id) => !document.getElementById(id).hidden)`), 'Retry / Reload / Download log offered');
+  await shot('game-failed.png');
+  await click('#ld-log'); await sleep(800);
+  check(readdirSync(dl).filter((f) => f.startsWith('atv2-log-')).length >= 2, 'log from the loading card saved');
+  await click('#ld-reload');
+  check(await until(`document.body.classList.contains('mode-home')`, 10), 'Reload: the start page');
 } catch (e) {
   console.log(`${el()} FAILED: ${e.stack ?? e.message}`);
   fails++;

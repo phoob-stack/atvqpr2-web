@@ -21,12 +21,19 @@ const $ = (id) => document.getElementById(id);
 let installed = false;
 let flipsAt = -1;
 
+// Esc opens the menu unless a control is bound to it (cached; re-read when settings change).
+let escFreeCache = null;
 function escFree() {
-  const v = loadSettings();
-  return !Object.entries(v).some(([k, val]) => k.startsWith('key_') && String(val).split(' ').includes('Escape'));
+  if (escFreeCache === null) {
+    const v = loadSettings();
+    escFreeCache = !Object.entries(v).some(([k, val]) => k.startsWith('key_') && String(val).split(' ').includes('Escape'));
+  }
+  return escFreeCache;
 }
+addEventListener(CHANGED_EVENT, () => { escFreeCache = null; });
+addEventListener('storage', () => { escFreeCache = null; });
 
-export function isOpen() { return !!window.atvSite?.menuOpen; }
+export function isOpen() { return !!$('menu')?.open; }
 
 export function open() {
   const d = $('menu');
@@ -46,6 +53,7 @@ export function close() {
 }
 
 function onClosed() {
+  if ($('menu').open) return;            // a late close event after the menu was opened again
   window.atvSite.menuOpen = false;
   $('mn-settings-pane').hidden = true;
   $('screen').focus({ preventScroll: true });
