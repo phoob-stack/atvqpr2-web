@@ -1,7 +1,7 @@
 // Boot the browser build in headless Edge and report how far it gets.
 //
 //   node web/tools/boot.mjs [seconds=60] [--env K=V,K=V] [--keys 20:13,25:90:3000] [--shots 30,60] [--out dir]
-//        [--anchor <status text>] [--pad 20:9,25:0:3000]
+//        [--anchor <status text>] [--pad 20:9,25:0:3000] [--until <log text>]
 //        [--game <folder>] [--wasm <url>] [--args a,b] [--overlay <dir>] [--audio]
 //
 // Starts web/host/serve.mjs (127.0.0.1, a free port), opens the page, polls
@@ -33,6 +33,9 @@ const anchor = opt('--anchor');
 // 0 A, 1 B, 2 X, 3 Y, 4 LB, 5 RB, 6 LT, 7 RT, 8 Back, 9 Start, 12-15 d-pad
 // up/down/left/right) replaces navigator.getGamepads, so input.js's pad path
 // runs as with a real one. Same clock as --keys.
+// --until TEXT: stop as soon as the page log has a line containing TEXT
+// (e.g. 'periodic slot' for a USB bring-up check).
+const until = opt('--until');
 const padPresses = (opt('--pad', '') || '').split(',').filter(Boolean).map((s) => s.split(':').map(Number));
 let base = anchor ? null : 0;
 mkdirSync(out, { recursive: true });
@@ -79,6 +82,7 @@ try {
     if (st.status !== last) { console.log(`${String(s + 1).padStart(4)}s ${st.status}`); last = st.status; }
     if (base === null && st.status.includes(anchor)) { base = s + 1; console.log(`${String(s + 1).padStart(4)}s anchor "${anchor}": key and shot times count from here`); }
     if (st.exit !== null || st.err) break;
+    if (until && await b.eval(`atv.log.some((l) => l.includes(${JSON.stringify(until)}))`)) { console.log(`${String(s + 1).padStart(4)}s found "${until}"`); break; }
   }
   snap = await b.eval('atv.snapshot()').catch((e) => { console.log(`snapshot: ${e.message}`); return null; });
   const logText = await b.eval('atv.log.join("\\n")');
