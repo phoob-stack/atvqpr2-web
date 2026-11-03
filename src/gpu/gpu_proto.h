@@ -16,6 +16,7 @@
 #ifndef ATV2_GPU_PROTO_H
 #define ATV2_GPU_PROTO_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define GP_VERSION 1
@@ -163,6 +164,10 @@ _Static_assert(sizeof(GpCmd) == 32, "GpCmd layout");
 /* The drawing side (gpu_d3d11.c). Called at every flip with that frame. */
 void gp_d3d11_consume(const GpFrame *f);
 int  gp_d3d11_ready(void);
+/* The recorder has just queued this shader's HLSL (GP_SHADER_VS/PS): compile
+ * it now, off the walk, so the flip finds it done. mask: GP_SHADER_VS b (the
+ * VS's input mask; 0 for a pixel shader), part of the cache key. */
+void gp_d3d11_prefetch_shader(int pixel, uint32_t mask, const char *src, size_t len);
 /* GPU-vs-CPU check (RECOMP_GPU_CHECK): draw a partial frame now, sampling
  * level 0 only (as the CPU reference does), and write every target it drew
  * back to guest memory, swizzled targets swizzled. */
@@ -176,5 +181,12 @@ void gp_d3d11_writeback_swizzled(void);
 #define GP_PROBE_MAX    64
 uint32_t gp_d3d11_vs_probe(uint32_t vs, const GpXfConsts *xc, const GpVsConsts *vc,
                            const GpProgVertex *in, uint32_t n, float *out);
+
+/* Frame timing (gpu_rec.c, RECOMP_GPU_FRAMELOG=<csv> / RECOMP_GPU_HITCH=<ms>):
+ * the recorder and the consumers add what each frame spent where. */
+enum { GP_T_REC_TEX, GP_T_REC_SH, GP_T_CON_TEX, GP_T_CON_SH, GP_T_CON_RT, GP_T_CON_DRAW,
+       GP_T_COUNT };
+double gp_now_ms(void);
+void   gp_time_add(int what, double ms, uint32_t n);
 
 #endif

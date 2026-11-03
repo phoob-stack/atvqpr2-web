@@ -91,3 +91,6 @@ third_party/
 wgpu-native*/
 wasi-sdk*/
 node_modules/
+
+# Compiled shaders (RECOMP_GPU_SHADER_CACHE): derived from the game's shader programs
+shadercache/

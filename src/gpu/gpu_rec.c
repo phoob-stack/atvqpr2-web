@@ -27,6 +27,85 @@
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
+/* ---- frame timing ----------------------------------------------------------
+ *
+ * RECOMP_GPU_FRAMELOG=<csv>: one line per flip -- the time since the last
+ * flip, and what the recorder (texture decode, shader generation) and the
+ * consumer (texture creation, shader compiles, targets, draws) spent on it.
+ * RECOMP_GPU_HITCH=<ms>: a log line for every flip interval over that. */
+#ifdef _WIN32
+__declspec(dllimport) int __stdcall QueryPerformanceCounter(int64_t *);
+__declspec(dllimport) int __stdcall QueryPerformanceFrequency(int64_t *);
+double gp_now_ms(void)
+{
+    static double inv;
+    int64_t t;
+    if (!inv) { int64_t f; QueryPerformanceFrequency(&f); inv = 1000.0 / (double)f; }
+    QueryPerformanceCounter(&t);
+    return (double)t * inv;
+}
+#else
+#include <time.h>
+double gp_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+#endif
+
+static double s_tms[GP_T_COUNT];
+static uint32_t s_tn[GP_T_COUNT];
+static int s_timing = -1;            /* -1 not read yet, 0 off, 1 on */
+static double s_hitch_ms;
+static FILE *s_framelog;
+
+void gp_time_add(int what, double ms, uint32_t n)
+{
+    if (what < 0 || what >= GP_T_COUNT) return;
+    s_tms[what] += ms;
+    s_tn[what] += n;
+}
+
+static void timing_init(void)
+{
+    const char *p = getenv("RECOMP_GPU_FRAMELOG"), *h = getenv("RECOMP_GPU_HITCH");
+    s_timing = 0;
+    if (p && *p && (s_framelog = fopen(p, "w"))) {
+        setvbuf(s_framelog, NULL, _IOFBF, 1 << 16);
+        fprintf(s_framelog, "frame,t_ms,interval_ms,flip_ms,rec_tex_ms,rec_tex_n,rec_sh_ms,rec_sh_n,"
+                "con_tex_ms,con_tex_n,con_sh_ms,con_sh_n,con_rt_ms,con_rt_n,con_draw_ms,draws\n");
+        s_timing = 1;
+    }
+    if (h && *h) { s_hitch_ms = atof(h); if (s_hitch_ms > 0) s_timing = 1; }
+}
+
+/* Called once per flip, after the consumer: log and reset this frame's sums. */
+static void timing_frame(uint32_t frame, double t_flip0, double t_flip1, uint32_t draws)
+{
+    static double last;
+    double iv = last ? t_flip0 - last : 0;
+    last = t_flip0;
+    if (s_framelog) {
+        fprintf(s_framelog, "%u,%.3f,%.3f,%.3f,%.3f,%u,%.3f,%u,%.3f,%u,%.3f,%u,%.3f,%u,%.3f,%u\n",
+                frame, t_flip0, iv, t_flip1 - t_flip0,
+                s_tms[GP_T_REC_TEX], s_tn[GP_T_REC_TEX], s_tms[GP_T_REC_SH], s_tn[GP_T_REC_SH],
+                s_tms[GP_T_CON_TEX], s_tn[GP_T_CON_TEX], s_tms[GP_T_CON_SH], s_tn[GP_T_CON_SH],
+                s_tms[GP_T_CON_RT], s_tn[GP_T_CON_RT], s_tms[GP_T_CON_DRAW], draws);
+        if ((frame & 63) == 0) fflush(s_framelog);
+    }
+    if (s_hitch_ms > 0 && iv > s_hitch_ms)
+        fprintf(stderr, "  [HITCH] frame %u: %.1f ms since the last flip; flip %.1f ms; recorder: "
+                "%u textures %.1f ms, %u shaders %.1f ms; consumer: %u textures %.1f ms, "
+                "%u shaders %.1f ms, %u targets %.1f ms, draws %.1f ms\n",
+                frame, iv, t_flip1 - t_flip0,
+                s_tn[GP_T_REC_TEX], s_tms[GP_T_REC_TEX], s_tn[GP_T_REC_SH], s_tms[GP_T_REC_SH],
+                s_tn[GP_T_CON_TEX], s_tms[GP_T_CON_TEX], s_tn[GP_T_CON_SH], s_tms[GP_T_CON_SH],
+                s_tn[GP_T_CON_RT], s_tms[GP_T_CON_RT], s_tms[GP_T_CON_DRAW]);
+    memset(s_tms, 0, sizeof s_tms);
+    memset(s_tn, 0, sizeof s_tn);
+}
+
 /* ---- growable byte buffers ----------------------------------------------- */
 
 typedef struct { uint8_t *p; uint32_t n, cap; } Buf;
@@ -85,7 +164,7 @@ static uint64_t fnv(const void *p, size_t n, uint64_t h)
 #define FNV0 1469598103934665603ull
 
 /* Ids whose contents were replaced: freed three frames later. */
-#define MAX_FREE 4096
+#define MAX_FREE 16384
 static struct { uint32_t id, frame; } s_free[MAX_FREE];
 static int s_nfree;
 
@@ -347,7 +426,7 @@ static uint32_t ds_get(uint32_t va, uint32_t w, uint32_t h)
 #define TEX_HASH 4096
 typedef struct {
     uint32_t offset, w, h, color, pitch, cube, used, levels, palette;
-    uint32_t id, checked_frame;
+    uint32_t id, checked_frame, ver;   /* ver: its slot in s_ver */
     uint64_t hash;
 } Tex;
 static Tex s_tex[TEX_HASH];
@@ -441,16 +520,229 @@ static void tex_undecodable(const Nv2aTexture *t, int cube)
     }
 }
 
+/* ---- fast texel decode -----------------------------------------------------
+ *
+ * nv2a_backend_decode_texture goes through the CPU rasteriser's sampler, one
+ * texel at a time, recomputing the swizzle masks and depositing both
+ * coordinates bit by bit for every texel: about 40 ns a texel. A race
+ * recreates three 128x128 P8 textures (8 levels, palette animated) up to a
+ * dozen times a frame -- ~0.9 ms each, 9 ms of the walk's frame after GO.
+ * These are the same conversions as sample_tex() in nv2a_pb_exec.c (clamped,
+ * so every texel is read where it lies), with the swizzle deposit done once
+ * per row and column. Anything else goes to the reference decoder.
+ * RECOMP_GPU_DECODE_CHECK=1 decodes every level both ways and logs any
+ * difference. */
+static int fast_decode(const Nv2aTexture *t, uint32_t *out)
+{
+    static uint32_t xs[4096], ys[4096];
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    const uint8_t *p = mem + t->offset;
+    uint32_t w = t->width, h = t->height, x, y, mx, my;
+    int swz;
+
+    if (!w || !h || w > 4096 || h > 4096) return 0;
+    switch (t->color) {
+    case 0x0B:                                   /* SZ_I8_A8R8G8B8 */
+        if (!t->palette) return 0;
+        swz = 1;
+        break;
+    case 0x06: case 0x07:                        /* SZ_A8R8G8B8, SZ_X8R8G8B8 */
+        swz = 1;
+        break;
+    case 0x12: case 0x1E:                        /* LIN_A8R8G8B8, LIN_X8R8G8B8 */
+        swz = 0;
+        break;
+    default:
+        return 0;
+    }
+    if (!swz) {
+        uint32_t or_ = t->color == 0x1E ? 0xFF000000u : 0;
+        for (y = 0; y < h; y++) {
+            const uint32_t *row = (const uint32_t *)(p + (size_t)y * t->pitch);
+            uint32_t *o = out + (size_t)y * w;
+            for (x = 0; x < w; x++) o[x] = row[x] | or_;
+        }
+        return 1;
+    }
+    xbox_swizzle_masks(w, h, &mx, &my);
+    for (x = 0; x < w; x++) xs[x] = swizzle_deposit(x, mx);
+    for (y = 0; y < h; y++) ys[y] = swizzle_deposit(y, my);
+    if (t->color == 0x0B) {
+        const uint32_t *pal = (const uint32_t *)(mem + t->palette);
+        for (y = 0; y < h; y++) {
+            uint32_t *o = out + (size_t)y * w, yo = ys[y];
+            for (x = 0; x < w; x++) o[x] = pal[p[xs[x] | yo]];
+        }
+    } else {
+        const uint32_t *s = (const uint32_t *)p;
+        uint32_t or_ = t->color == 0x07 ? 0xFF000000u : 0;
+        for (y = 0; y < h; y++) {
+            uint32_t *o = out + (size_t)y * w, yo = ys[y];
+            for (x = 0; x < w; x++) o[x] = s[xs[x] | yo] | or_;
+        }
+    }
+    return 1;
+}
+
+static int decode_level(const Nv2aTexture *lt, uint32_t *out)
+{
+    static int check = -1, fast = -1;
+    if (check < 0) {
+        const char *e = getenv("RECOMP_GPU_FAST_DECODE");
+        check = getenv("RECOMP_GPU_DECODE_CHECK") != NULL;
+        fast = !(e && *e == '0');                /* =0: the reference decoder only (A/B) */
+    }
+    /* While the executor checks a frame, decode as its CPU pass does. */
+    if (!fast || nv2a_check_active() || !fast_decode(lt, out))
+        return nv2a_backend_decode_texture(lt, out);
+    if (check) {
+        static uint32_t *ref;
+        static size_t cap;
+        static unsigned checked, bad;
+        size_t n = (size_t)lt->width * lt->height;
+        if (n > cap) { free(ref); cap = n; ref = (uint32_t *)malloc(n * 4); }
+        if (ref && nv2a_backend_decode_texture(lt, ref)) {
+            int tries;
+            checked++;
+            /* The title can be rewriting the texels (an animated palette)
+             * while they are read: a difference counts only if it stays
+             * through a few reference-then-fast rounds. */
+            for (tries = 0; tries < 4 && memcmp(ref, out, n * 4); tries++) {
+                nv2a_backend_decode_texture(lt, ref);
+                fast_decode(lt, out);
+            }
+            if (memcmp(ref, out, n * 4)) {
+                size_t i;
+                for (i = 0; i < n && ref[i] == out[i]; i++) ;
+                if (bad++ < 20)
+                    fprintf(stderr, "  [GPUREC] decode check: 0x%08X %ux%u fmt %02X differs at texel %u:"
+                            " fast %08X reference %08X\n", lt->offset, lt->width, lt->height, lt->color,
+                            (unsigned)i, out[i], ref[i]);
+            }
+            if ((checked & 1023) == 0)
+                fprintf(stderr, "  [GPUREC] decode check: %u levels compared, %u differ\n", checked, bad);
+        }
+    }
+    return 1;
+}
+
+/* ---- texture versions ------------------------------------------------------
+ *
+ * Every texture id the recorder creates is a version: one address and shape
+ * with one content hash. When a texture's contents change to something seen
+ * before -- the rider textures above cycle back to earlier palettes -- the
+ * version that already holds them is bound again: no decode, no upload, no
+ * GPU texture creation.
+ *
+ * A version that some texture entry (s_tex) currently shows is kept as long
+ * as before (until that entry moves on or is evicted). One that none shows
+ * any more is kept VER_IDLE frames for a possible return, then freed (three
+ * frames later, as before); together those hold at most VER_OLD_BYTES. */
+#define VER_HASH  8192
+#define VER_PROBE 16
+#define VER_IDLE  60
+#define VER_OLD_BYTES (64ull << 20)
+typedef struct { uint64_t key, full; uint32_t id, used, bytes, cur; } Ver;   /* cur: entries showing it */
+static Ver s_ver[VER_HASH];
+static uint64_t s_ver_old_bytes;             /* bytes of versions with cur == 0 */
+static uint32_t s_ver_hits, s_ver_made, s_ver_freed;
+static int s_tex_reuse = -1;
+
+/* RECOMP_GPU_REUSE_CHECK=1: every version also gets a hash of all its bytes
+ * (the content hash samples large textures), and every rebind compares it
+ * with the bytes in memory now. */
+static int s_reuse_check = -1;
+static uint32_t s_rc_ok, s_rc_bad;
+
+static uint64_t full_hash(const Nv2aTexture *t, uint32_t faces, uint32_t stride, uint32_t fbytes)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint64_t h = FNV0;
+    uint32_t f;
+    for (f = 0; f < faces; f++) h = fnv(mem + t->offset + f * stride, fbytes, h);
+    if (t->color == 0x0B && t->palette) h = fnv(mem + t->palette, 1024, h);
+    return h;
+}
+
+static void ver_drop(Ver *v)
+{
+    defer_free(v->id);
+    if (!v->cur) s_ver_old_bytes -= v->bytes;
+    s_ver_freed++;
+    memset(v, 0, sizeof *v);
+}
+
+static void ver_hold(Ver *v)
+{
+    if (!v->cur++) s_ver_old_bytes -= v->bytes;
+}
+
+/* An entry stops showing version slot `slot` (if it is still id's). */
+static void ver_release(uint32_t slot, uint32_t id)
+{
+    Ver *v = &s_ver[slot & (VER_HASH - 1)];
+    if (!id || v->id != id || !v->cur) return;
+    if (!--v->cur) { s_ver_old_bytes += v->bytes; v->used = s_frame; }
+}
+
+static uint32_t ver_slot(uint64_t key) { return (uint32_t)(key ^ (key >> 29)) & (VER_HASH - 1); }
+
+static Ver *ver_find(uint64_t key)
+{
+    uint32_t i, s = ver_slot(key);
+    for (i = 0; i < VER_PROBE; i++) {
+        Ver *v = &s_ver[(s + i) & (VER_HASH - 1)];
+        if (v->id && v->key == key) return v;
+    }
+    return NULL;
+}
+
+/* A new version, shown by one entry. Its run of slots full: the least
+ * recently used one that nothing shows goes, else the least recently used. */
+static Ver *ver_add(uint64_t key, uint32_t id, uint32_t bytes)
+{
+    uint32_t i, s = ver_slot(key);
+    Ver *best = NULL;
+    for (i = 0; i < VER_PROBE; i++) {
+        Ver *v = &s_ver[(s + i) & (VER_HASH - 1)];
+        if (!v->id) { best = v; break; }
+        if (!best || (!v->cur && best->cur) || (!v->cur == !best->cur && v->used < best->used)) best = v;
+    }
+    if (best->id) ver_drop(best);
+    best->key = key; best->id = id; best->used = s_frame; best->bytes = bytes; best->cur = 1;
+    s_ver_made++;
+    return best;
+}
+
+/* Every 15 frames: free versions nothing has shown for VER_IDLE frames, then
+ * the oldest of those while they hold more than VER_OLD_BYTES. */
+static void ver_sweep(void)
+{
+    uint32_t i;
+    for (i = 0; i < VER_HASH; i++)
+        if (s_ver[i].id && !s_ver[i].cur && s_frame - s_ver[i].used > VER_IDLE) ver_drop(&s_ver[i]);
+    while (s_ver_old_bytes > VER_OLD_BYTES) {
+        Ver *old = NULL;
+        for (i = 0; i < VER_HASH; i++)
+            if (s_ver[i].id && !s_ver[i].cur && (!old || s_ver[i].used < old->used)) old = &s_ver[i];
+        if (!old) break;
+        ver_drop(old);
+    }
+}
+
 static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
 {
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
     uint32_t bb = d3d8_format_dxt_block_bytes(t->color), faces = cube ? 6 : 1, f, lv;
-    uint32_t levels = tex_levels(t), fbytes = 0, stride, l0 = level0_bytes(t);
+    uint32_t levels = tex_levels(t), fbytes = 0, stride, l0 = level0_bytes(t), id, gpu_bytes;
     uint32_t kk[6] = { t->offset, t->width, t->height, t->color, t->pitch, t->palette };
-    uint64_t key = fnv(kk, sizeof kk, FNV0) ^ (uint64_t)cube, h = FNV0;
+    uint64_t key = fnv(kk, sizeof kk, FNV0) ^ (uint64_t)cube, h = FNV0, vkey;
     uint32_t slot = (uint32_t)(key ^ (key >> 32)) & (TEX_HASH - 1), probe;
     Tex *e = NULL, *victim = NULL;
+    Ver *v;
     int bc = bb && (t->width & 3) == 0 && (t->height & 3) == 0;
+    double t_start = 0;
+    int replaced;
 
     *is_bc = bc;
     if (!t->offset || !t->width || !t->height || t->width > 4096 || t->height > 4096 || !l0)
@@ -467,30 +759,67 @@ static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
         }
         if (!victim || !c->id || (victim->id && c->used < victim->used)) victim = c;
     }
+    /* Its version was swept: the id is going, look the contents up again. */
+    if (e && s_ver[e->ver].id != e->id) { e->checked_frame = ~0u; e->hash = 0; }
     if (e && e->checked_frame == s_frame) { e->used = s_frame; return e->id; }
+    if (s_timing > 0) t_start = gp_now_ms();
     for (f = 0; f < faces; f++)
         h = hash_span(mem + t->offset + f * stride, fbytes, h);
     if (t->color == 0x0B && t->palette)          /* P8: the palette is half the texture */
         h = fnv(mem + t->palette, 1024, h);
-    if (e && e->hash == h) { e->checked_frame = e->used = s_frame; return e->id; }
+    if (e && e->hash == h && s_ver[e->ver].id == e->id) {
+        e->checked_frame = e->used = s_frame;
+        s_ver[e->ver].used = s_frame;
+        if (s_timing > 0) gp_time_add(GP_T_REC_TEX, gp_now_ms() - t_start, 0);
+        return e->id;
+    }
 
+    replaced = e != NULL;
     if (!e) e = victim;
-    defer_free(e->id);                           /* old contents: free later */
+    ver_release(e->ver, e->id);                  /* what it showed may come back */
     memset(e, 0, sizeof *e);
-    e->id = s_next_id++;
     e->offset = t->offset; e->w = t->width; e->h = t->height;
     e->color = t->color; e->pitch = t->pitch; e->cube = (uint32_t)cube;
     e->levels = levels; e->palette = t->palette;
     e->hash = h; e->checked_frame = e->used = s_frame;
 
+    /* The version key leaves the palette's address out: its contents are
+     * in h, and riders share one P8 texture with a palette each. */
+    kk[5] = levels;
+    vkey = fnv(&h, sizeof h, fnv(kk, sizeof kk, FNV0) ^ (uint64_t)cube) | 1;
+    if (s_tex_reuse < 0) {                       /* RECOMP_GPU_TEX_REUSE=0: never (A/B) */
+        const char *r = getenv("RECOMP_GPU_TEX_REUSE");
+        s_tex_reuse = !(r && *r == '0');
+    }
+    if (s_tex_reuse && (v = ver_find(vkey))) {   /* contents seen before: bind them again */
+        ver_hold(v);
+        v->used = s_frame;
+        e->id = v->id;
+        e->ver = (uint32_t)(v - s_ver);
+        s_ver_hits++;
+        if (s_reuse_check > 0) {
+            if (full_hash(t, faces, stride, fbytes) == v->full) s_rc_ok++;
+            else if (s_rc_bad++ < 20)
+                fprintf(stderr, "  [GPUREC] reuse check: 0x%08X %ux%u fmt %02X rebound to id %u but its bytes"
+                        " differ from that version's\n", t->offset, t->width, t->height, t->color, v->id);
+            if (((s_rc_ok + s_rc_bad) & 255) == 0)
+                fprintf(stderr, "  [GPUREC] reuse check: %u rebinds compared in full, %u differ\n",
+                        s_rc_ok + s_rc_bad, s_rc_bad);
+        }
+        if (s_timing > 0) gp_time_add(GP_T_REC_TEX, gp_now_ms() - t_start, 0);
+        return e->id;
+    }
+    id = s_next_id++;
+
     /* Payload: per face, level 0 then each smaller level -- the order the
      * NV2A stores them in (xemu: levels follow level 0, each swizzled or
      * block-compressed on its own), so BC is a straight copy. */
     if (bc) {
-        uint8_t *p = (uint8_t *)q_cmd_reserve(GP_TEX_CREATE, e->id, levels, t->width, t->height,
+        uint8_t *p = (uint8_t *)q_cmd_reserve(GP_TEX_CREATE, id, levels, t->width, t->height,
                                               t->color == 0x0C ? GP_FMT_BC1
                                               : t->color == 0x0E ? GP_FMT_BC2 : GP_FMT_BC3,
                                               faces, fbytes * faces);
+        gpu_bytes = fbytes * faces;
         if (p)
             for (f = 0; f < faces; f++)
                 memcpy(p + (size_t)f * fbytes, mem + t->offset + f * stride, fbytes);
@@ -502,8 +831,9 @@ static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
             uint32_t lh = (t->height >> lv) ? (t->height >> lv) : 1;
             total += lw * lh;
         }
-        p = (uint32_t *)q_cmd_reserve(GP_TEX_CREATE, e->id, levels, t->width, t->height,
+        p = (uint32_t *)q_cmd_reserve(GP_TEX_CREATE, id, levels, t->width, t->height,
                                       GP_FMT_BGRA8, faces, total * 4 * faces);
+        gpu_bytes = total * 4 * faces;
         for (f = 0; p && f < faces; f++) {
             uint32_t src = t->offset + f * stride;
             for (lv = 0; lv < levels; lv++) {
@@ -514,7 +844,7 @@ static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
                 lt.offset = src;
                 lt.levels = 1;
                 px = lt.width * lt.height;
-                if (!nv2a_backend_decode_texture(&lt, p + at)) {
+                if (!decode_level(&lt, p + at)) {
                     /* Not decodable (palettised, say): as the CPU, read white. */
                     memset(p + at, 0xFF, (size_t)px * 4);
                     tex_undecodable(t, cube);
@@ -524,7 +854,22 @@ static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
             }
         }
     }
-    return e->id;
+    v = ver_add(vkey, id, gpu_bytes);
+    if (s_reuse_check < 0) s_reuse_check = getenv("RECOMP_GPU_REUSE_CHECK") != NULL;
+    if (s_reuse_check > 0) v->full = full_hash(t, faces, stride, fbytes);
+    e->id = id;
+    e->ver = (uint32_t)(v - s_ver);
+    if (s_timing > 0) gp_time_add(GP_T_REC_TEX, gp_now_ms() - t_start, 1);
+    {
+        static int texlog = -1;
+        if (texlog < 0) texlog = getenv("RECOMP_GPU_TEXLOG") != NULL;
+        if (texlog)
+            fprintf(stderr, "  [TEXLOG] frame %u id %u 0x%08X %ux%u fmt %02X lv %u%s pitch %u %s hash %016llX %.3f ms\n",
+                    s_frame, id, t->offset, t->width, t->height, t->color, levels, cube ? " cube" : "",
+                    t->pitch, replaced ? "changed" : "new", (unsigned long long)h,
+                    s_timing > 0 ? gp_now_ms() - t_start : 0.0);
+    }
+    return id;
 }
 
 /* The sampler key for a stage: rc_texel()'s one linear switch (what the check
@@ -561,6 +906,7 @@ static uint32_t vs_lookup(const uint32_t (*prog)[4], uint32_t len, uint32_t mask
         uint32_t i = (slot + p) & (SH_HASH - 1);
         if (s_vs[i].key == key) return s_vs[i].id;
         if (!s_vs[i].key) {
+            double t0 = s_timing > 0 ? gp_now_ms() : 0;
             n = gpu_gen_vs_program(prog, len, s_hlsl, sizeof s_hlsl);
             if (n < 0) return 0;
             if (mask != gpu_vs_input_mask(prog, len))       /* the two rules must agree */
@@ -569,7 +915,11 @@ static uint32_t vs_lookup(const uint32_t (*prog)[4], uint32_t len, uint32_t mask
             s_vs[i].key = key;
             s_vs[i].id = s_next_id++;
             q_cmd(GP_SHADER_VS, s_vs[i].id, len, mask, 0, 0, 0, s_hlsl, (uint32_t)n + 1);
+#ifndef __wasm__
+            gp_d3d11_prefetch_shader(0, mask, s_hlsl, (size_t)n);
+#endif
             gp_wgsl_note_vs(s_vs[i].id, prog, len);
+            if (s_timing > 0) gp_time_add(GP_T_REC_SH, gp_now_ms() - t0, 1);
             return s_vs[i].id;
         }
     }
@@ -603,12 +953,17 @@ static uint32_t ps_get(const GpPsKey *k)
         uint32_t i = (slot + p) & (SH_HASH - 1);
         if (s_ps[i].key == key) return s_ps[i].id;
         if (!s_ps[i].key) {
+            double t0 = s_timing > 0 ? gp_now_ms() : 0;
             n = gpu_gen_ps(k, s_hlsl, sizeof s_hlsl);
             if (n < 0) return 0;
             s_ps[i].key = key;
             s_ps[i].id = s_next_id++;
             q_cmd(GP_SHADER_PS, s_ps[i].id, 0, 0, 0, 0, 0, s_hlsl, (uint32_t)n + 1);
+#ifndef __wasm__
+            gp_d3d11_prefetch_shader(1, 0, s_hlsl, (size_t)n);
+#endif
             gp_wgsl_note_ps(s_ps[i].id, k);
+            if (s_timing > 0) gp_time_add(GP_T_REC_SH, gp_now_ms() - t0, 1);
             return s_ps[i].id;
         }
     }
@@ -1037,6 +1392,13 @@ static void rec_flip(void)
     GpFrame f;
     int i, k;
 
+    if (s_frame % 15 == 14) ver_sweep();
+    if (s_frame % 600 == 599 && s_ver_made) {
+        fprintf(stderr, "  [GPUREC] textures in 600 frames: %u created, %u rebound from earlier contents,"
+                " %u freed; %u KB of earlier contents held\n", s_ver_made, s_ver_hits, s_ver_freed,
+                (unsigned)(s_ver_old_bytes >> 10));
+        s_ver_made = s_ver_hits = s_ver_freed = 0;
+    }
     /* Texture ids replaced three or more frames ago can go now. */
     for (i = k = 0; i < s_nfree; i++) {
         if (s_frame - s_free[i].frame >= 3)
@@ -1047,7 +1409,12 @@ static void rec_flip(void)
     s_nfree = k;
 
     frame_of(&f);
-    gp_backend_flip(&f);          /* D3D11, or wgpu; captures (gpu_wgsl_tap.c) */
+    if (s_timing < 0) timing_init();
+    {
+        double t0 = s_timing ? gp_now_ms() : 0;
+        gp_backend_flip(&f);      /* D3D11, or wgpu; captures (gpu_wgsl_tap.c) */
+        if (s_timing) timing_frame(s_frame, t0, gp_now_ms(), f.draw_count);
+    }
     /* The consumer wrote this frame's targets back: remember what the guest
      * now holds, so a later CPU write to them can be told apart. */
     for (i = 0; i < s_nrt; i++)
