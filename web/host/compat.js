@@ -54,12 +54,15 @@ export function wasmFeatures() {
 }
 
 // Module Workers: the options getter is read only by browsers that know `type`.
+// (A blob: URL, which the site's CSP allows for workers, rather than data:.)
 function moduleWorkers() {
-  let seen = false;
+  let seen = false, url = null;
   try {
-    const w = new Worker('data:text/javascript,', { get type() { seen = true; return 'module'; } });
+    url = URL.createObjectURL(new Blob([''], { type: 'text/javascript' }));
+    const w = new Worker(url, { get type() { seen = true; return 'module'; } });
     w.terminate();
   } catch { /* the probe URL may be refused; `seen` is what counts */ }
+  if (url) URL.revokeObjectURL(url);
   return seen;
 }
 

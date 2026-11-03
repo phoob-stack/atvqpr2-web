@@ -97,6 +97,15 @@ export async function canvasShot() {
   return null;
 }
 
+/** A base64 data: URL as a Blob (no fetch: the site's CSP has no data: in connect-src). */
+function dataUrlBlob(url) {
+  const [head, b64] = url.split(',');
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new Blob([u8], { type: head.slice(5).split(';')[0] || 'application/octet-stream' });
+}
+
 export async function screenshot() {
   // The game's own frame at its render size (presenter.snapshot); when the shown framebuffer has no
   // render target right now (the presenter keeps the last frame up), what the canvas shows.
@@ -105,7 +114,7 @@ export async function screenshot() {
     url = await window.atv?.snapshot?.().catch(() => null);
     if (!url) await new Promise((r) => requestAnimationFrame(r));
   }
-  const blob = url ? await (await fetch(url)).blob() : await canvasShot().catch(() => null);
+  const blob = url ? dataUrlBlob(url) : await canvasShot().catch(() => null);
   if (!blob) { note('No frame to save yet.'); return null; }
   const name = `atv2-${stamp()}.png`;
   downloadBlob(blob, name);

@@ -4,11 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ATV 2 (browser)</title>
-<script>
-  // Wake the browser's GPU process while the page's modules load: the first
-  // requestAdapter takes ~0.3 s; main.js asks again and then gets it at once.
-  try { navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' }).catch(() => {}); } catch (e) { /* compat.js reports it */ }
-</script>
+<!-- No inline scripts (the project site's copy runs under a CSP without them): early.js wakes the GPU, canvas.js sizes the canvas. -->
+<script src="./early.js"></script>
 <!-- The module graph, fetched in parallel instead of import by import. -->
 <link rel="modulepreload" href="./main.js">
 <link rel="modulepreload" href="./compat.js">
@@ -75,6 +72,8 @@
   #saves-msg { min-height: 1.4em; margin-top: 6px; }
   #saves-msg.err { color: #f2a65a; }
   #saves-msg.ok { color: #8fd18f; }
+  /* [siteplay] the project site's copy (deploy.js mode 'site', shell.js) shows its own texts */
+  .deploy-site .local-only, html:not(.deploy-site) .site-only { display: none !important; }
 </style>
 <!-- [site] the start page, in-game menu and settings (site/*.js); site.css overrides the styles above where needed. -->
 <link rel="stylesheet" href="./site/site.css">
@@ -92,7 +91,7 @@
       <span class="name"><b>ATV 2</b><small>Quad Power Racing &middot; in your browser</small></span>
     </a>
     <nav id="nav" aria-label="Sections">
-      <a href="#play">Play</a><a href="#settings">Settings</a><a href="#saves">Saves</a><a href="#data">Game data</a><a href="#about">About</a>
+      <a href="#play">Play</a><a href="#settings">Settings</a><a href="#saves">Saves</a><a href="#data">Game data</a><a href="#about">About</a><a class="site-only" href="../../index.html">Project site</a>
     </nav>
   </header>
   <main>
@@ -154,11 +153,17 @@
         <div class="card wide">
           <h3>What this is</h3>
           <p>ATV Quad Power Racing 2 (Climax, 2003) for the original Xbox, statically recompiled: the game's x86 code is translated to C ahead of time, built for WebAssembly, and run here with its graphics drawn by WebGPU and its sound played by an AudioWorklet. Nothing is emulated instruction by instruction.</p>
-          <p><strong>No game data is included in this page or served by it.</strong> The server on this computer sends the page and the program only. The game's files come from your own copy, which you choose on the Play tab, and stay in this browser's private storage on this computer.</p>
+          <p class="local-only"><strong>No game data is included in this page or served by it.</strong> The server on this computer sends the page and the program only. The game's files come from your own copy, which you choose on the Play tab, and stay in this browser's private storage on this computer.</p>
+          <p class="site-only"><strong>No game data is included in this page or served by it.</strong> This website sends the page's own code only. The game's files and the game program (<code>atv2.wasm</code>) come from your own copy: the builder makes the program on your computer from your disc, and you select its folder on the Play tab. Both stay in this browser's private storage on this computer.</p>
         </div>
         <div class="card">
           <h3>Using your own copy</h3>
-          <ol class="small">
+          <ol class="small site-only">
+            <li>Copy the files of your ATV Quad Power Racing 2 disc to a folder and run the builder on it once. It checks the disc copy, builds the game program (<code>atv2.wasm</code>) on your computer and writes a play folder, <code>atv2-play</code>, with your game files and the program together.</li>
+            <li>On the Play tab, Select local game files and choose that folder. The page checks that <code>default.xbe</code> is the retail <b>USA</b> release and that <code>atv2.wasm</code> is the build this page was made for (its size and SHA-256).</li>
+            <li>The files are copied into the browser once (about 0.7 GB; "Skip the movies" saves about 380 MB). After that, Play starts straight away.</li>
+          </ol>
+          <ol class="small local-only">
             <li>Copy the files of your ATV Quad Power Racing 2 disc to a folder: the one with <code>default.xbe</code>, <code>ATV.bah</code>, <code>ATV.bad</code>, <code>Fonts</code>, <code>Movies</code>, <code>Music</code>, <code>Sound</code>&hellip;</li>
             <li>On the Play tab, choose that folder. The page checks that <code>default.xbe</code> is the retail <b>USA</b> release (its size and SHA-256); other releases and modified copies are refused.</li>
             <li>The files are copied into the browser once (about 0.7 GB; "Skip the movies" saves about 380 MB). After that, Play starts straight away.</li>
@@ -182,7 +187,7 @@
       </div>
     </section>
   </main>
-  <footer class="small muted">Runs only on this computer (127.0.0.1). Works offline. Nothing is uploaded.</footer>
+  <footer class="small muted"><span class="local-only">Runs only on this computer (127.0.0.1). Works offline. Nothing is uploaded.</span><span class="site-only">Runs in this browser, from your own files. Nothing is uploaded.</span></footer>
 </div>
 <canvas id="screen" width="1280" height="960" tabindex="0"></canvas>
 <!-- [site] over the game: loading card, fps counter, menu button, in-game menu (site/loading.js, site/overlay.js). -->
@@ -232,12 +237,15 @@
 <div id="importer" hidden>
   <div class="card">
     <h1>ATV Quad Power Racing 2</h1>
-    <p>This page runs your own copy of the game. Choose the folder that contains <code>default.xbe</code>:
+    <p class="local-only">This page runs your own copy of the game. Choose the folder that contains <code>default.xbe</code>:
       the top folder of your ATV Quad Power Racing 2 disc copy (USA release), with <code>ATV.bah</code>,
       <code>ATV.bad</code>, <code>Fonts</code>, <code>Movies</code>, <code>Music</code>, <code>Sound</code>…</p>
+    <p class="site-only">This page runs your own copy of the game. Select the folder the builder made from your disc
+      (<code>atv2-play</code>): your game files (<code>default.xbe</code>, <code>ATV.bah</code>, <code>ATV.bad</code>…)
+      and your game build, <code>atv2.wasm</code>.</p>
     <p class="small">The files are checked, then copied into this browser's own storage on this computer
       (about 0.7 GB, once). They are not uploaded anywhere.</p>
-    <button id="pick">Choose your ATV 2 game folder</button>
+    <button id="pick"><span class="local-only">Choose your ATV 2 game folder</span><span class="site-only">Select local game files</span></button>
     <input id="gamedir" type="file" webkitdirectory multiple hidden>
     <label class="small"><input type="checkbox" id="skipmovies"> Skip the movies (about 380 MB less; the intro and FMVs are not shown)</label>
     <div id="imp-msg"></div>
@@ -248,12 +256,6 @@
 <div id="log"></div>
 <!-- [site] shell.js shows the start page, or boots the game (main.js) for Play and for any of main.js's own parameters. -->
 <script type="module" src="./site/shell.js"></script>
-<script>
-  // Keep the canvas backing store at the element's size (letterboxing is in present.js).
-  const cv = document.getElementById('screen');
-  new ResizeObserver(() => { cv.width = Math.max(1, Math.round(cv.clientWidth * devicePixelRatio));
-    cv.height = Math.max(1, Math.round(cv.clientHeight * devicePixelRatio)); }).observe(cv);
-  addEventListener('keydown', (e) => { if (e.code === 'F2') document.body.classList.toggle('nolog'); });
-</script>
+<script src="./canvas.js"></script>
 </body>
 </html>

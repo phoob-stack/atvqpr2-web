@@ -22,7 +22,15 @@
 // the player's own folder, imported into OPFS by loader.js (or, for
 // developers, served by serve.mjs --game at /data/) and read by the I/O
 // worker (vfs.js).
+//
+// [siteplay] On the project site (deploy.js mode 'site', /play/host/) nothing
+// comes from a server but this page's code: the module is the player's own
+// build, kept in OPFS with the game files (gamebuild.js loadStoredWasm, read
+// once the game files are known to be there), and there is no /log, /data/ or
+// /wasm/pipelines.json to ask for. ?wasm= is ignored there.
 import { Host, hostView, stageName } from './abi.js';
+import { SITE } from './deploy.js';
+import { loadStoredWasm, BuildError } from './gamebuild.js';
 import { Presenter } from './present.js';
 import { Input } from './input.js';
 import { requestDevice } from '../gpu/layout.js';
@@ -88,6 +96,7 @@ function log(text, cls = '') {
 }
 // The dev server keeps the log in a file for whoever runs it (localhost only).
 setInterval(() => {
+  if (SITE) { logPending = []; return; }
   if (!logPending.length) return;
   const body = logPending.join('\n') + '\n';
   logPending = [];
@@ -112,10 +121,12 @@ async function boot() {
   for (const n of basics.notes) log(`[page] ${n}`);
   if (basics.problems.length) throw fail("This browser can't run the game", basics.problems);
   // A bare name is a module in build-wasm/ (served at /wasm/).
-  const wasmUrl = ((w) => (w.includes('/') ? w : `/wasm/${w}`))(q.get('wasm') ?? 'atv2.wasm');
+  const wasmUrl = SITE ? 'atv2.wasm (your game build, kept in this browser)'
+    : ((w) => (w.includes('/') ? w : `/wasm/${w}`))(q.get('wasm') ?? 'atv2.wasm');
   // The module downloads and compiles while the GPU and the game files are
   // set up (and while the player picks the game folder, the first time).
-  const wasm = loadWasm(wasmUrl);
+  // [siteplay] On the site it is read from OPFS once the game is there (makeMemory).
+  let wasm = SITE ? null : loadWasm(wasmUrl);
   const args = ['atv2', ...(q.get('args') ?? '').split(',').filter(Boolean)];
   const env = { ...DEFAULT_ENV };
   // [site] the player's settings (site/settings.js via site/shell.js), between the defaults and ?env=; null unsets.
@@ -207,11 +218,16 @@ async function boot() {
   const makeMemory = async (game) => {
     if (game.manifest?.skipMovies && !('RECOMP_SKIP_MOVIES' in env)) env.RECOMP_SKIP_MOVIES = '1';
     let module;
+    wasm ??= loadStoredWasm();
     try { module = await wasm.module; } catch (e) {
+      if (e instanceof BuildError)
+        throw fail('Your game build does not match this page', [{ what: e.message,
+          fix: 'Run the builder version named above, then use "Select local game files" again (Game data > Forget game files first).' }], '', 'Problem:');
       if (e instanceof WebAssembly.CompileError)
         throw fail("This browser can't compile the game module", [{ what: 'a WebAssembly feature the module uses',
           fix: 'Use a current Edge, Chrome or Firefox.' }], e.message);
-      throw fail('The game module did not load', [{ what: wasmUrl, fix: 'Is the local server still running?' }], e.message, 'Could not load:');
+      throw fail('The game module did not load', [{ what: wasmUrl, fix: SITE ? 'Select your local game files again (the folder your builder made).'
+        : 'Is the local server still running?' }], e.message, 'Could not load:');
     }
     mark('wasmCompiled');
     const lim = await wasm.limits;
@@ -301,7 +317,7 @@ async function boot() {
     // build-wasm/pipelines.json), created in the background while the game
     // boots, so a brand-new browser profile has them compiled by the race
     // start instead of compiling each at its first draw. ?prepipes=0: off.
-    if (q.get('prepipes') !== '0')
+    if (q.get('prepipes') !== '0' && !SITE)
       fetch('/wasm/pipelines.json').then((r) => (r.ok ? r.json() : null))
         .then((l) => l && presenter.enc.preloadPipelines(l))
         .then((r) => r && log(`[page] pipelines created ahead: ${r.made}${r.failed ? `, ${r.failed} failed` : ''}` +
