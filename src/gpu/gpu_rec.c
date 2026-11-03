@@ -688,6 +688,7 @@ static void rec_flip(void)
 
     s_queue.n = s_draws.n = s_vtx.n = s_idx.n = s_consts.n = 0;
     s_frame++;
+    { extern void atv2_control_frame(unsigned); atv2_control_frame((unsigned)f.draw_count); }
 }
 
 static Nv2aBackend s_backend = { rec_clear, rec_draw, rec_flip, rec_draw2 };

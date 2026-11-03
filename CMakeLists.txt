@@ -56,6 +56,9 @@ set(GAME_SOURCES
     src/gpu/gpu_rec.c
     src/gpu/gpu_shadergen.c
     src/gpu/gpu_d3d11.c
+    # Test control channel (RECOMP_CONTROL=<port>; src/control, CONTROL.md)
+    src/control/control.c
+    src/control/control_png.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
     # src/custom_renderer.c
@@ -86,6 +89,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gpu
     ${XBOXRECOMP_DIR}/src/kernel   # nv2a_backend.h
     ${XBOXRECOMP_DIR}/src/d3d      # d3d8_swizzle.h
+    ${XBOXRECOMP_DIR}/src/usb      # usb_gamepad.h (control channel input)
 )
 
 if(WIN32)
@@ -100,6 +104,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     # Lets the fault handler resolve the host RIP back to the generated
     # function's symbol, i.e. to the guest function that faulted.
     dbghelp
+    # control channel: sockets, PNG screenshots through WIC
+    ws2_32
+    windowscodecs
+    ole32
 )
 endif()
 
