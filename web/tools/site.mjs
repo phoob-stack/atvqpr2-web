@@ -115,7 +115,7 @@ try {
     await shot(`home-${t}.png`);
   }
   check(await b.eval(`document.querySelectorAll('#changelog > li').length >= 5`), 'changelog listed');
-  check(await b.eval(`/Game files \\(your import\\)|Developer/.test(document.getElementById('data-body').innerText) && /Storage is/.test(document.getElementById('data-body').innerText)`), 'game data: storage report');
+  check(await b.eval(`/Game files \\(your import\\)|developer server|No game files/i.test(document.getElementById('data-body').innerText) && /Storage is/.test(document.getElementById('data-body').innerText)`), 'game data: storage report');
   await viewport(390, 844, true);
   await b.eval(`location.hash = 'play'`); await sleep(500);
   await shot('phone-play.png');
@@ -268,8 +268,11 @@ try {
   // A start that fails: the card says so and offers Retry / Reload / Download log.
   await b.send('Page.navigate', { url: `${base}/host/index.html?play=1&wasm=no-such-module.wasm` });
   check(await until(`document.getElementById('loading').classList.contains('failed')`, 30), 'failed start: ' +
-    await b.eval(`document.getElementById('loading-msg')?.textContent`).catch(() => ''));
-  check(await b.eval(`['ld-retry', 'ld-reload', 'ld-log'].every((id) => !document.getElementById(id).hidden)`), 'Retry / Reload / Download log offered');
+    await b.eval(`document.querySelector('#atv-problem h1')?.textContent ?? document.getElementById('loading-msg')?.textContent`).catch(() => ''));
+  check(await b.eval(`['ld-retry', 'ld-reload', 'ld-log'].every((id) => { const e = document.getElementById(id); return e && e.offsetParent !== null; })`),
+    'Retry / Reload / Download log offered (visible)');
+  check(await b.eval(`[document.getElementById('atv-problem'), document.getElementById('loading')].filter((e) => e && getComputedStyle(e).display !== 'none' && !e.hidden).length === 1`),
+    'one message box: ' + await b.eval(`(document.querySelector('#atv-problem h1')?.textContent ?? '') + ' / ' + (document.getElementById('loading').hidden ? 'card hidden' : 'card shown')`));
   await shot('game-failed.png');
   const logsBefore = readdirSync(dl).filter((f) => f.startsWith('atv2-log-')).length;
   await click('#ld-log'); await sleep(800);

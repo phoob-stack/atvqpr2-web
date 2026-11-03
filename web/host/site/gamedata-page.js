@@ -23,7 +23,9 @@ export async function renderData(root, { onChange = () => {} } = {}) {
       h('dt', {}, 'Imported'), h('dd', {}, new Date(m.importedAt).toLocaleString()),
       h('dt', {}, 'default.xbe'), h('dd', {}, h('code', {}, `SHA-256 ${String(m.xbeSha256).slice(0, 16)}…`), ' (the retail USA release)')));
   } else {
-    game.append(h('p', {}, 'No game files in this browser yet. Choose your game folder on the Play tab.'));
+    const dev = await fetch('/data/manifest.json', { method: 'HEAD', cache: 'no-store' }).then((r) => r.ok).catch(() => false);
+    game.append(h('p', {}, dev ? 'The developer server (serve.mjs --game) serves the game files: nothing is imported into this browser.'
+      : 'No game files in this browser yet. Choose your game folder on the Play tab.'));
   }
   const bar = h('progress', { value: 0, max: 1, hidden: true });
   const check = h('button', { class: 'btn', disabled: !m, onclick: async () => {
