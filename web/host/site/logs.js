@@ -8,7 +8,7 @@
 // loader, audio, WebGPU messages). The file starts with a header: time,
 // address, browser, isolation, WebGPU adapter, settings, the status line and
 // the loader/boot state.
-import { toText, loadSettings, settingsEnv } from './settings.js';
+import { toText, loadSettings, describeLaunch } from './settings.js';
 
 const MAX_LINES = 20000;
 const lines = [];
@@ -52,7 +52,7 @@ export function logText() {
   const gpu = atv?.log?.find?.((l) => l.startsWith('[page] WebGPU:'));
   const ua = navigator.userAgentData?.brands?.map((b) => `${b.brand} ${b.version}`).join(', ');
   let env = '';
-  try { env = Object.entries(settingsEnv()).map(([k, v]) => (v === null ? `-${k}` : `${k}=${v}`)).join(' '); } catch { /* */ }
+  try { env = describeLaunch().join(' '); } catch { /* */ }
   out.push('ATV 2 (browser) log', `saved      ${new Date().toString()}`, `address    ${location.href}`,
     `browser    ${navigator.userAgent}${ua ? ` (${ua})` : ''}`,
     `isolated   ${self.crossOriginIsolated}  threads ${navigator.hardwareConcurrency}  memory ${navigator.deviceMemory ?? '?'} GB`,
@@ -60,7 +60,7 @@ export function logText() {
     `status     ${document.getElementById('status')?.textContent ?? ''}`,
     `boot       ${atv ? `stage ${atv.stage?.()}, exit ${atv.state?.exit}, error ${atv.state?.error ?? 'none'}` : 'the game was not started'}`,
     `loader     ${atv?.loader ? JSON.stringify({ phase: atv.loader.phase, error: atv.loader.error }) : 'n/a'}`,
-    `settings   env from settings: ${env || '(none)'}`, '');
+    `settings   start options from settings: ${env || '(none)'}`, '');
   out.push('--- settings', toText(loadSettings()).trim(), '');
   if (atv?.log?.length) out.push(`--- game and page log (${atv.log.length} lines)`, ...atv.log, '');
   out.push(`--- page console (${lines.length} lines${dropped ? `; ${dropped} older lines dropped` : ''})`, ...lines, '');

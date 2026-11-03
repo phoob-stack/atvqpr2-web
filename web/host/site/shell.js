@@ -13,7 +13,7 @@
 // The settings reach the game through window.atvSite.env, which main.js
 // merges between its DEFAULT_ENV and ?env= (an explicit ?env= wins).
 // ?settings=off boots with the default settings.
-import { loadSettings, settingsEnv, CHANGED_EVENT } from './settings.js';
+import { loadSettings, settingsEnv, settingsQuery, CHANGED_EVENT } from './settings.js';
 import { installLogCapture, downloadLog, siteLog } from './logs.js';
 
 installLogCapture();
@@ -58,13 +58,19 @@ async function startGame(kind, { fromClick = false } = {}) {
   site.kind = kind;
   const settings = loadSettings();
   if (fromClick && settings.fullscreen) enterFullscreen();       // must run inside the click
-  const env = q.get('settings') === 'off' ? {} : settingsEnv(settings);
+  const useSettings = q.get('settings') !== 'off';
+  const env = useSettings ? settingsEnv(settings) : {};
   if (kind === 'freeride') env.RECOMP_FREERIDE = '1';
   site.env = env;
-  if (fromClick) {
+  // The display options are page parameters main.js reads from the address when it loads. A ?play= start
+  // (Play, Free Ride, Retry) takes them from the settings; a start by the tools' parameters keeps its own.
+  if (fromClick || q.has('play')) {
     const u = new URL(location.href);
-    u.search = ''; u.searchParams.set('play', kind === 'freeride' ? 'freeride' : '1');
-    history.pushState(null, '', u);
+    if (fromClick) { u.search = ''; u.searchParams.set('play', kind === 'freeride' ? 'freeride' : '1'); }
+    for (const [k, v] of Object.entries(useSettings ? settingsQuery(settings) : {})) {
+      if (v === null) u.searchParams.delete(k); else u.searchParams.set(k, v);
+    }
+    if (fromClick) history.pushState(null, '', u); else history.replaceState(null, '', u);
   }
   setMode('game');
   applyPageSettings();

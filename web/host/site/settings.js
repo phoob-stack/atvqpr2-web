@@ -1,6 +1,7 @@
 // The player's settings: one table, kept in localStorage, turned into the
 // game's environment at boot (main.js merges settingsEnv() between its
-// DEFAULT_ENV and ?env=, so a test's ?env= still wins).
+// DEFAULT_ENV and ?env=, so a test's ?env= still wins) and, for the display
+// options, into the page parameters main.js reads (settingsQuery()).
 //
 // Pure apart from localStorage (wrapped in try/catch: private windows and
 // blocked storage just give the defaults). No DOM here; settings-ui.js draws
@@ -25,16 +26,18 @@ const bool = { parse: (s) => (/^(1|on|yes|true)$/i.test(s) ? true : /^(0|off|no|
  * page itself. `next: true` = takes effect at the next start of the game.
  */
 export const SETTINGS = [
+  // Display: the page's own parameters (display worker: ?res=, ?msaa=, ?widescreen=; main.js reads them
+  // from the address at load, so shell.js puts them there before it imports main.js).
   { key: 'res_scale', section: 'display', label: 'Resolution scale', type: 'enum', values: ['1', '2', '3', '4', 'window'], def: '1',
     names: { 1: '1x (640x480, original)', 2: '2x', 3: '3x', 4: '4x', window: 'Match the window' }, next: true,
-    help: 'Renders the game at a multiple of its 640x480 (RECOMP_RES_SCALE).',
-    env: (v) => (v === '1' ? {} : { RECOMP_RES_SCALE: v }) },
+    help: 'Renders the game at a multiple of its 640x480, or at the size it is shown at (?res=).',
+    query: (v) => ({ res: v === '1' ? null : v }) },
   { key: 'widescreen', section: 'display', label: 'Widescreen (16:9)', type: 'bool', def: false, next: true,
-    help: 'Tells the game the TV is 16:9 (RECOMP_WIDESCREEN).',
-    env: (v) => (v ? { RECOMP_WIDESCREEN: '1' } : {}) },
-  { key: 'msaa', section: 'display', label: 'Anti-aliasing (MSAA)', type: 'enum', values: ['0', '2', '4', '8'], def: '0',
-    names: { 0: 'Off', 2: '2x', 4: '4x', 8: '8x' }, next: true, help: 'Multisampled rendering (RECOMP_MSAA).',
-    env: (v) => (v === '0' ? {} : { RECOMP_MSAA: v }) },
+    help: 'Tells the game the TV is 16:9 and shows it at 16:9 (?widescreen=1, RECOMP_WIDESCREEN).',
+    query: (v) => ({ widescreen: v ? '1' : null }) },
+  { key: 'msaa', section: 'display', label: 'Anti-aliasing (MSAA)', type: 'enum', values: ['0', '4'], def: '0',
+    names: { 0: 'Off', 4: '4x' }, next: true, help: 'Multisampled rendering (?msaa=4).',
+    query: (v) => ({ msaa: v === '0' ? null : v }) },
   { key: 'frame_pacing', section: 'display', label: 'Frame rate', type: 'enum', values: ['vsync', 'uncapped'], def: 'vsync',
     names: { vsync: '60 fps, vsync (the console\'s pacing)', uncapped: 'Uncapped (benchmark; menus may run fast)' }, next: true,
     help: 'Uncapped turns off the flip pacing (RECOMP_FLIP_PACING).',
@@ -151,6 +154,19 @@ export function setSetting(key, value) {
   v[key] = value;
   saveSettings(v);
   return v;
+}
+
+/** The page parameters the settings give main.js: { name: value | null (absent) }. */
+export function settingsQuery(values = loadSettings()) {
+  const out = {};
+  for (const s of SETTINGS) if (s.query) Object.assign(out, s.query(values[s.key]));
+  return out;
+}
+
+/** What a start gets, for people: ['res=2', 'RECOMP_SKIP_MOVIES=1', '-RECOMP_X', ...]. */
+export function describeLaunch(values = loadSettings()) {
+  return [...Object.entries(settingsQuery(values)).filter(([, v]) => v !== null).map(([k, v]) => `${k}=${v}`),
+    ...Object.entries(settingsEnv(values)).map(([k, v]) => (v === null ? `-${k}` : `${k}=${v}`))];
 }
 
 /** The variables the settings give the game: { NAME: value | null (unset) }. */

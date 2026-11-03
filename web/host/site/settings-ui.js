@@ -4,7 +4,7 @@
 // boots, the page ones (volume, fps counter, status bar, fullscreen) apply
 // live through the atv2-settings event.
 import { SETTINGS, SECTIONS, BY_KEY, RESERVED_CODES, CHANGED_EVENT, loadSettings, saveSettings, setSetting, resetSettings,
-  parseValue, toText, fromText, settingsEnv, defaults } from './settings.js';
+  parseValue, toText, fromText, describeLaunch, defaults } from './settings.js';
 import { ACTIONS, PAD_CONTROLS, PAD_BUTTON_NAMES } from './keymap.js';
 
 const h = (tag, attrs = {}, ...kids) => {
@@ -79,7 +79,7 @@ export function renderSettings(root, opts = {}) {
   root.append(text);
 
   // ---- what the game gets, and reset -----------------------------------------
-  const env = Object.entries(settingsEnv(vals)).map(([k, v]) => (v === null ? `-${k}` : `${k}=${v}`));
+  const env = describeLaunch(vals);
   let armed = 0;
   const reset = h('button', { class: 'btn danger', onclick: () => {
     if (Date.now() - armed > 4000) { armed = Date.now(); reset.textContent = 'Click again to reset every setting'; return; }
@@ -87,7 +87,7 @@ export function renderSettings(root, opts = {}) {
   } }, 'Reset all settings');
   root.append(h('div', { class: 'set-foot' },
     h('div', { class: 'small', 'data-env': env.join(',') },
-      env.length ? ['The game starts with: ', h('code', {}, env.join(' '))] : 'The game starts with its default environment.'),
+      env.length ? ['The game starts with: ', h('code', {}, env.join(' '))] : 'The game starts with its defaults.'),
     reset));
   root.append(msg);
 
@@ -100,12 +100,12 @@ export function renderSettings(root, opts = {}) {
     if (!root.isConnected) return;
     const v = loadSettings();
     if (!dirty) ta.value = toText(v);
-    const e = Object.entries(settingsEnv(v)).map(([k, x]) => (x === null ? `-${k}` : `${k}=${x}`));
+    const e = describeLaunch(v);
     const line = root.querySelector('[data-env]');
     if (line) {
       line.dataset.env = e.join(',');
       line.textContent = '';
-      line.append(...(e.length ? ['The game starts with: ', h('code', {}, e.join(' '))] : ['The game starts with its default environment.']));
+      line.append(...(e.length ? ['The game starts with: ', h('code', {}, e.join(' '))] : ['The game starts with its defaults.']));
     }
   };
   addEventListener(CHANGED_EVENT, root._onSettings);

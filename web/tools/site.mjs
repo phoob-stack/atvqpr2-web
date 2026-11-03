@@ -132,7 +132,7 @@ try {
   await b.eval(`(() => { const r = document.getElementById('set-volume'); r.value = '40'; r.dispatchEvent(new Event('change')); })()`);
   await click('#set-fps_counter');
   let env = await b.eval(`document.querySelector('[data-env]').dataset.env`);
-  check(env.includes('RECOMP_RES_SCALE=2') && env.includes('RECOMP_SKIP_MOVIES=1'), `forms -> env: ${env}`);
+  check(env.includes('res=2') && env.includes('RECOMP_SKIP_MOVIES=1'), `forms -> start options: ${env}`);
   // The text box: MSAA 4 and a bad line.
   await b.eval(`document.querySelector('.set-textbox').open = true`);
   await b.eval(`(() => { const t = document.querySelector('.set-text'); t.value = t.value.replace(/^msaa = .*$/m, 'msaa = 4') + '\\nnot_a_setting = 3\\n'; })()`);
@@ -178,7 +178,9 @@ try {
     await shot('game-loading.png');
     check(await until(`(window.atv?.log ?? []).some((l) => l.startsWith('[page] env:'))`, 60), 'game booting');
     const envLine = await b.eval(`atv.log.find((l) => l.startsWith('[page] env:'))`);
-    check(/RECOMP_RES_SCALE=2/.test(envLine) && /RECOMP_MSAA=4/.test(envLine) && /RECOMP_SKIP_MOVIES=1/.test(envLine), `settings reach the game env: ${envLine.slice(0, 400)}`);
+    check(/RECOMP_SKIP_MOVIES=1/.test(envLine), `settings reach the game env: ${envLine.slice(0, 400)}`);
+    const search = await b.eval('location.search');
+    check(/[?&]res=2(&|$)/.test(search) && /[?&]msaa=4(&|$)/.test(search) && /play=1/.test(search), `display settings in the page parameters main.js reads: ${search}`);
     check(await until(`document.getElementById('loading').hidden`, 90), 'loading card gone at the first frame');
     check(await until(`document.getElementById('status').textContent.includes('draws 18,')`, 120), 'title screen');
     await sleep(1500);
