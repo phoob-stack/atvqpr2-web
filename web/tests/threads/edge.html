@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>wasm threads test</title>
+<pre id="out"></pre>
+<script type="module">
+// Runs a wasm32-wasip1-threads test module through web/host/threads.js with
+// real Web Workers. Driven by run-edge.mjs (headless Edge over CDP); needs a
+// cross-origin isolated page (COOP/COEP) for SharedArrayBuffer.
+import { WasmThreads } from '../../host/threads.js';
+
+const out = document.getElementById('out');
+const lines = [];
+new BroadcastChannel('wasm-stdout').onmessage = (e) => {
+  lines.push(e.data.line);
+  out.textContent += e.data.line + '\n';
+};
+
+window.runTest = async (wasmUrl, pool = 8, env = {}) => {
+  if (!crossOriginIsolated) return { error: 'page is not cross-origin isolated' };
+  const t0 = performance.now();
+  const mem = await (await fetch(wasmUrl.replace(/\.wasm$/, '.memory.json'))).json();
+  const module = await WebAssembly.compile(await (await fetch(wasmUrl)).arrayBuffer());
+  const memory = new WebAssembly.Memory({ initial: mem.initialPages, maximum: mem.maximumPages, shared: true });
+  // PAGE_TIMER=<ms>: keep a short page timer running during the test (does a
+  // pending short timer raise the process's Windows timer resolution?).
+  let pageTimer = null;
+  if (env.PAGE_TIMER) pageTimer = setInterval(() => {}, +env.PAGE_TIMER);
+  const traps = [];
+  const wt = new WasmThreads({
+    module, memory, env, pool, spare: 2, max: 64, args: ['test'],
+    importsUrl: new URL('./wasi-min.js', import.meta.url).href,
+    onTrap: (t) => traps.push(t),
+  });
+  await wt.start();
+  const startMs = performance.now() - t0;
+  const timeout = new Promise((r) => setTimeout(() => r('timeout'), 110000));
+  const code = await Promise.race([wt.runMain(), timeout]);
+  const stats = wt.stats();
+  await new Promise((r) => setTimeout(r, 500));   // let the last lines arrive
+  wt.terminate();
+  if (pageTimer) clearInterval(pageTimer);
+  return { code, ms: Math.round(performance.now() - t0), poolStartMs: Math.round(startMs),
+           stats, traps, lines, ua: navigator.userAgent, cores: navigator.hardwareConcurrency };
+};
+window.ready = Promise.resolve(true);
+</script>

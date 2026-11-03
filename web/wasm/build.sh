@@ -21,6 +21,13 @@ mkdir -p "$OUT/gen" "$OUT/rt" "$OUT/fuzz"
 CFLAGS="--target=wasm32-wasip1-threads -pthread -msimd128 -mbulk-memory -mnontrapping-fptoint -mtail-call
   -O2 -fno-delete-null-pointer-checks -mllvm -wasm-enable-sjlj
   -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -Wno-everything"
+# Link configuration (memory, threads, exports): web/wasm/link-flags.sh.
+# The guest span ends below 0x84100000 (wasm-mem, WASM-MEM.md); runtime data,
+# the main C stack and the heap start there.
+WASM_GLOBAL_BASE=${WASM_GLOBAL_BASE:-0x84100000}
+WASM_INITIAL_MEMORY=${WASM_INITIAL_MEMORY:-$(( 0x84100000 + (128 << 20) ))}
+. "$HERE/link-flags.sh"
+
 INC="-I$GEN -I$RT/include -I$RT/src -I$RT/src/kernel -I$RT/src/d3d -I$RT/src/platform -I$RT/src/usb
   -I$RT/src/nv2a -I$RT/src/apu -I$RT/src/audio -I$RT/src/video -I$RT/src/input -I$GAME/src -I$GAME/src/gpu"
 
@@ -36,7 +43,7 @@ echo "== runtime and game sources"
 # Skipped on purpose: the D3D8->D3D11 HLE (d3d8_*), SDL and Win32-only input/video
 # back ends, and the D3D11 GPU consumer -- the web build replaces them.
 for f in "$RT"/src/{apu,audio,kernel,nv2a,platform,usb,video,input}/*.c "$GAME"/src/*.c \
-         "$GAME"/src/control/*.c "$GAME"/src/gpu/gpu_rec.c "$GAME"/src/gpu/gpu_shadergen*.c \
+         "$GAME"/src/control/*.c "$GAME"/src/wasm/*.c "$GAME"/src/gpu/gpu_rec.c "$GAME"/src/gpu/gpu_shadergen*.c \
          "$GAME"/src/gpu/gpu_wgsl_tap.c; do
   case "$(basename "$f")" in *sdl*|d3d8_*|mkb_input.c|xinput_device.c) continue;; esac
   compile "$OUT/rt" "$f"
@@ -44,9 +51,8 @@ done
 echo "== trial link (everything kept, so every missing symbol shows)"
 $CC --target=wasm32-wasip1-threads -pthread "$OUT"/gen/*.o "$OUT"/rt/*.o -o "$OUT/game.wasm" \
   -Wl,--no-entry -Wl,--export-all -Wl,--no-gc-sections -Wl,--error-limit=0 \
-  -Wl,--import-memory,--export-memory,--shared-memory,--max-memory=4294967296 \
-  -mllvm -wasm-enable-sjlj -lsetjmp -lwasi-emulated-mman -lwasi-emulated-signal -lwasi-emulated-process-clocks \
-  2> "$OUT/link.err"
+  $WASM_LDFLAGS 2> "$OUT/link.err"
+wasm_memory_json "$OUT/game.memory.json"
 grep "undefined symbol: " "$OUT/link.err" | sed 's/.*undefined symbol: //' | sort -u > "$OUT/undefined.txt"
 echo "$(wc -l < "$OUT/undefined.txt") undefined symbols (build-wasm/undefined.txt):"
 tr '\n' ' ' < "$OUT/undefined.txt"; echo
