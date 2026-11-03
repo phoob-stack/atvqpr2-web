@@ -51,3 +51,43 @@ Thumbs.db
 # Local build dirs and logs
 build-*/
 *.log
+
+# ── Anything taken from the disc never goes in this repo ──────────────
+# The player supplies their own copy; the loader reads it at run time.
+src/recomp/
+*.bin
+*.cue
+*.img
+*.mdf
+*.nrg
+*.xbx
+*.xpr
+*.xwb
+*.xsb
+*.xmv
+*.wma
+*.wav
+*.dds
+*.tga
+*.bmp
+*.rwd
+*.dff
+*.txd
+
+# Captures, dumps and screenshots can hold game textures or memory
+dumps/
+memdumps/
+captures*/
+shots/
+screens/
+screenshots/
+*.png
+*.jpg
+*.raw
+*.dmp
+
+# Downloaded toolchains and libraries (fetch them, don't vendor them)
+third_party/
+wgpu-native*/
+wasi-sdk*/
+node_modules/
