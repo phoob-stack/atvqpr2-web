@@ -401,6 +401,19 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
         }
         fflush(stderr);
     }
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO
+        || ep->ExceptionRecord->ExceptionCode == EXCEPTION_INT_OVERFLOW) {
+        /* A guest `div` by zero (or overflow) faults the same way on the
+         * host; without this the process just ends with 0xC0000094. */
+        fprintf(stderr, "[CRASH] integer %s at RIP=0x%llX\n",
+                ep->ExceptionRecord->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO
+                    ? "divide by zero" : "overflow",
+                (unsigned long long)ep->ContextRecord->Rip);
+        fprintf(stderr, "  Xbox regs: eax=0x%08X ecx=0x%08X edx=0x%08X esp=0x%08X\n",
+            g_eax, g_ecx, g_edx, g_esp);
+        print_guest_context((void *)ep->ContextRecord->Rip);
+        fflush(stderr);
+    }
 
     return EXCEPTION_CONTINUE_SEARCH;
 }

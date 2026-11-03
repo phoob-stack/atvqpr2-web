@@ -43,8 +43,8 @@ const GpDisplay *gp_display(void)
     s_d.present = s_d.window || s_d.scale != 1.0f;
     s_d.active = s_d.present || s_d.msaa > 1;
     if (s_d.active || s_d.widescreen)
-        fprintf(stderr, "  [DISPLAY] internal resolution %s%.2fx, MSAA %dx, %s\n",
-                s_d.window ? "window-sized (now " : "", s_d.window ? 1.0f : s_d.scale, s_d.msaa,
+        fprintf(stderr, "  [DISPLAY] internal resolution %s %.2fx, MSAA %dx, %s\n",
+                s_d.window ? "window-sized, starting at" : "fixed", s_d.scale, s_d.msaa,
                 s_d.widescreen ? "widescreen 16:9" : "4:3");
     return &s_d;
 }
@@ -73,10 +73,12 @@ void gp_display_scale_for(uint32_t cw, uint32_t ch, float *sx, float *sy)
     if (*sx < 1.0f) *sx = 1.0f;
     if (*sy > 8.0f) *sy = 8.0f;
     if (*sx > 8.0f) *sx = 8.0f;
-    /* Whole steps of 1/64 so that a few pixels of resize do not rebuild
-     * every target. */
-    *sx = (float)(int)(*sx * 64.0f + 0.5f) / 64.0f;
-    *sy = (float)(int)(*sy * 64.0f + 0.5f) / 64.0f;
+    /* "window": whole steps of 1/64, so that a few pixels of resize do not
+     * rebuild every target. */
+    if (d->window) {
+        *sx = (float)(int)(*sx * 64.0f + 0.5f) / 64.0f;
+        *sy = (float)(int)(*sy * 64.0f + 0.5f) / 64.0f;
+    }
 }
 
 /* ---- presenting through the framebuffer window --------------------------- */
