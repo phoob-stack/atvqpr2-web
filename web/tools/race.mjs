@@ -2,7 +2,10 @@
 // measure it: fps per second, and optionally a CPU profile of every thread.
 //
 //   node web/tools/race.mjs [seconds=30] [--out dir] [--profile secs] [--warm secs=6]
-//        [--env K=V,...] [--wasm url] [--shots] [--keep-profiles]
+//        [--env K=V,...] [--wasm url] [--shots] [--keep-profiles] [--opfs] [--profile dir] [--port n]
+//
+// --opfs: the dev server has no /data/; the game files are the ones imported
+// into OPFS (web/tools/import.mjs with the same --profile and --port).
 //
 // Route (headless Edge, fresh browser profile, so no save): title (status
 // 'draws 18,') -> Enter -> SAVED PROFILES: A creates one -> CHOOSE A RIDER: A ->
@@ -41,15 +44,16 @@ mkdirSync(out, { recursive: true });
 const ROUTE = [[3, 13], [8, 90], [13, 90], [18, 90], [23, 40], [24, 40], [28, 90], [32, 90], [36, 90], [40, 90],
   [44, 90, 0]];
 
-const port = 8600 + Math.floor(Math.random() * 300);
+const port = Number(opt('--port', 8600 + Math.floor(Math.random() * 300)));
 const wasm = opt('--wasm');
-const srv = spawn(process.execPath, [join(ROOT, 'web/host/serve.mjs'), '--port', String(port), '--log', join(out, 'serve-web.log')],
+const srv = spawn(process.execPath, [join(ROOT, 'web/host/serve.mjs'), '--port', String(port), '--log', join(out, 'serve-web.log'),
+  ...(argv.includes('--opfs') ? [] : ['--game', join(ROOT, 'game/atv2')])],
   { stdio: ['ignore', 'pipe', 'inherit'] });
 await new Promise((r) => srv.stdout.once('data', r));
 const qs = new URLSearchParams();
 qs.set('env', env);
 if (wasm) qs.set('wasm', wasm);
-const b = await launch(`http://127.0.0.1:${port}/host/index.html?${qs}`);
+const b = await launch(`http://127.0.0.1:${port}/host/index.html?${qs}`, { profile: opt('--profile') });
 const t0 = Date.now();
 const el = () => `${((Date.now() - t0) / 1000).toFixed(0).padStart(4)}s`;
 const status = () => b.eval(`(() => { const h = atv.presenter?.i32, s = atv.presenter?.stats ?? {};

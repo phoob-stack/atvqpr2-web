@@ -10,8 +10,11 @@
 //   /data/manifest.json  the game folder's file list (path, size, mtime)
 //   /data/<path>      the game folder's files, with Range support
 //   POST /log         appends the page's log to --log (default build-wasm/web.log)
-// The game folder is the player's own copy (default: atvrecomp/game/atv2); it
-// is read in place, never copied, and only ever served to this machine.
+// /data/ exists only with --game <folder> (a developer option: the page then
+// reads that folder instead of the player's import; ?dev=0 ignores it). The
+// folder is read in place, never copied, and only ever served to this
+// machine. Without --game the server sends no game data at all: the page asks
+// the player for their own game folder and copies it into OPFS (loader.js).
 import { createServer } from 'node:http';
 import { createReadStream, statSync, readdirSync, appendFileSync, writeFileSync } from 'node:fs';
 import { resolve, join, dirname, extname, relative, sep } from 'node:path';
@@ -20,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../..');
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
-const GAME = resolve(arg('--game', join(ROOT, 'game/atv2')));
+const GAME = arg('--game') ? resolve(arg('--game')) : null;
 const PORT = Number(arg('--port', 8460));
 const LOG = resolve(arg('--log', join(ROOT, 'build-wasm/web.log')));
 const MOUNTS = { '/host/': join(ROOT, 'web/host'), '/gpu/': join(ROOT, 'web/gpu'), '/wasm/': join(ROOT, 'build-wasm') };
@@ -69,7 +72,7 @@ function sendFile(req, res, file) {
 
 const inside = (base, p) => { const r = relative(base, p); return r && !r.startsWith('..') && !r.includes(':'); };
 
-writeFileSync(LOG, `--- dev server start ${new Date().toISOString()} (game folder ${GAME})\n`);
+writeFileSync(LOG, `--- dev server start ${new Date().toISOString()} (${GAME ? `game folder ${GAME} at /data/` : 'no /data/'})\n`);
 const srv = createServer((req, res) => {
   const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   if (req.method === 'POST' && path === '/log') {
@@ -82,6 +85,7 @@ const srv = createServer((req, res) => {
   if (path === '/' || path === '/index.html') {
     res.writeHead(302, { ...ISOLATION, Location: '/host/index.html' + new URL(req.url, 'http://x').search }); res.end(); return;
   }
+  if (!GAME && path.startsWith('/data/')) { res.writeHead(404, ISOLATION); res.end(); return; }
   if (path === '/data/manifest.json') {
     const body = JSON.stringify(manifest());
     res.writeHead(200, { ...ISOLATION, 'Content-Type': 'application/json' }); res.end(body); return;
@@ -104,5 +108,6 @@ const srv = createServer((req, res) => {
   res.writeHead(404, ISOLATION); res.end();
 });
 srv.listen(PORT, '127.0.0.1', () => {
-  console.log(`ATV 2 dev server: http://127.0.0.1:${srv.address().port}/  (game folder ${GAME}, log ${LOG})`);
+  console.log(`ATV 2 dev server: http://127.0.0.1:${srv.address().port}/  ` +
+    `(${GAME ? `dev game folder ${GAME} at /data/` : 'no /data/: the page imports the player\'s game folder'}, log ${LOG})`);
 });

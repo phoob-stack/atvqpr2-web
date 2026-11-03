@@ -3,6 +3,12 @@
 //   node web/tools/boot.mjs [seconds=60] [--env K=V,K=V] [--keys 20:13,25:90:3000] [--shots 30,60] [--out dir]
 //        [--anchor <status text>] [--pad 20:9,25:0:3000] [--until <log text>] [--movies]
 //        [--game <folder>] [--wasm <url>] [--args a,b] [--overlay <dir>] [--audio]
+//        [--opfs] [--profile <dir>] [--port <n>]
+//
+// The game files come from the dev server's /data/ (--game, default
+// game/atv2). --opfs starts the server without /data/, so the page boots from
+// the game folder imported into OPFS (web/tools/import.mjs, with the same
+// --profile and --port: OPFS belongs to the browser profile and the origin).
 //
 // Starts web/host/serve.mjs (127.0.0.1, a free port), opens the page, polls
 // the boot stage and the status line, presses keys at the given seconds
@@ -42,8 +48,9 @@ const padPresses = (opt('--pad', '') || '').split(',').filter(Boolean).map((s) =
 let base = anchor ? null : 0;
 mkdirSync(out, { recursive: true });
 
-const port = 8600 + Math.floor(Math.random() * 300);
-const game = opt('--game'), wasm = opt('--wasm'), args = opt('--args'), overlay = opt('--overlay');
+const port = Number(opt('--port', 8600 + Math.floor(Math.random() * 300)));
+const opfs = argv.includes('--opfs');
+const game = opfs ? null : opt('--game', join(ROOT, 'game/atv2')), wasm = opt('--wasm'), args = opt('--args'), overlay = opt('--overlay');
 const srv = spawn(process.execPath, [join(ROOT, 'web/host/serve.mjs'), '--port', String(port), '--log', join(out, 'serve-web.log'),
   ...(game ? ['--game', game] : []), ...(overlay ? ['--overlay', overlay] : [])],
   { stdio: ['ignore', 'pipe', 'inherit'] });
@@ -53,7 +60,7 @@ if (env) qs.set('env', env);
 if (wasm) qs.set('wasm', wasm);
 if (args) qs.set('args', args);
 const url = `http://127.0.0.1:${port}/host/index.html${qs.size ? `?${qs}` : ''}`;
-const b = await launch(url);
+const b = await launch(url, { profile: opt('--profile') });
 const t0 = Date.now();
 let last = '', snap = null;
 try {

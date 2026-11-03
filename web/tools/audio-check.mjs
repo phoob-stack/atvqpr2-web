@@ -39,7 +39,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- the dev server and the browser ----------------------------------------
 const port = 8600 + Math.floor(Math.random() * 300);
-const game = opt('--game');
+const game = opt('--game', join(ROOT, 'game/atv2'));   // serve.mjs has /data/ only with --game
 const srv = spawn(process.execPath, [join(ROOT, 'web/host/serve.mjs'), '--port', String(port), '--log', join(out, 'serve-web.log'),
   ...(game ? ['--game', game] : [])], { stdio: ['ignore', 'pipe', 'inherit'] });
 await new Promise((r) => srv.stdout.once('data', r));

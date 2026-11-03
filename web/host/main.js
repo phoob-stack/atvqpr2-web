@@ -6,15 +6,21 @@
 //             &wasm=<name|url> module (default atv2.wasm, from build-wasm/)
 //             &args=a,b       argv[1..]
 //             &threads=0      single-threaded even when threads.js is there
+//             &dev=1|0        game files from the dev server's /data/ (1) or
+//                             never from it (0); see loader.js
+//             &forget=1       delete the imported game files first
 //
 // Served by web/host/serve.mjs (127.0.0.1 only, COOP/COEP so that
 // SharedArrayBuffer and shared WebAssembly.Memory exist). The game files are
-// the player's own folder, read through /data/ by the worker (vfs.js).
+// the player's own folder, imported into OPFS by loader.js (or, for
+// developers, served by serve.mjs --game at /data/) and read by the I/O
+// worker (vfs.js).
 import { Host, hostView, stageName } from './abi.js';
 import { Presenter } from './present.js';
 import { Input } from './input.js';
 import { requestDevice } from '../gpu/layout.js';
 import { IO_BYTES, IO_HOST_PTR } from './io.js';
+import { prepareGame, loaderState } from './loader.js';
 
 // What run.ps1 sets for a native run, minus the Win32-only parts.
 export const DEFAULT_ENV = {
@@ -97,6 +103,12 @@ async function boot() {
   const gpu = await requestDevice();
   log(`[page] WebGPU: ${gpu.adapterName}; features: ${gpu.features.join(', ')}`);
 
+  // The game files: the player's import in OPFS (the import UI first if there
+  // is none yet), or the dev server's /data/.
+  const game = await prepareGame({ q, log });
+  if (game.manifest?.skipMovies && !('RECOMP_SKIP_MOVIES' in env)) env.RECOMP_SKIP_MOVIES = '1';
+  $('status').textContent = 'loading…';
+
   const t0 = performance.now();
   const bytes = await (await fetch(wasmUrl)).arrayBuffer();
   const module = await WebAssembly.compile(bytes);
@@ -117,7 +129,8 @@ async function boot() {
       else if (m.type === 'log') log(m.text, m.fd === 2 ? 'err' : '');
       else if (m.type === 'stats') state.vfs = m.vfs;
     };
-    ioWorker.postMessage({ type: 'init', memory, io, dataBase: '/data', traceWasi: q.get('trace') === '1' });
+    ioWorker.postMessage({ type: 'init', memory, io, traceWasi: q.get('trace') === '1',
+      game: game.source === 'opfs' ? { source: 'opfs', dir: game.dir } : { source: 'server', base: game.base } });
   });
   const host = { io };
 
@@ -265,7 +278,7 @@ ${m.stack ?? ''}`, 'err'); };
 }
 
 window.atv = {
-  state, log: logLines,
+  state, log: logLines, loader: loaderState,
   stage: () => stageName(state.stage),
   snapshot: async () => {
     const png = await window.atv.presenter?.snapshot();

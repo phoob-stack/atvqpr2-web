@@ -6,8 +6,10 @@
 <title>ATV 2 (browser)</title>
 <!--
   The browser build's host page. Serve it with web/host/serve.mjs, which
-  binds 127.0.0.1 only and reads the game files from your own game folder;
-  nothing here is meant to be hosted anywhere else.
+  binds 127.0.0.1 only. The page contains no game data: the player chooses the
+  folder of their own copy of the game, which is checked and copied into this
+  browser's private storage (OPFS) by loader.js. serve.mjs --game <folder>
+  serves a folder at /data/ instead (developer option).
   Keys: Enter = START, Z = A, X = B, C = X, V = Y, arrows = d-pad,
   W/A/S/D = left stick, Backspace = BACK. A gamepad works too.
 -->
@@ -16,15 +18,48 @@
   html, body { margin: 0; height: 100%; background: #000; color: #ccc; font: 12px ui-monospace, Consolas, monospace; }
   body { display: flex; flex-direction: column; }
   #screen { flex: 1 1 auto; width: 100%; min-height: 0; display: block; background: #000; }
-  #status { padding: 4px 8px; background: #111; border-top: 1px solid #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #bar { display: flex; background: #111; border-top: 1px solid #333; }
+  #bar button { flex: none; margin: 2px 4px; font: inherit; background: #222; color: #ccc; border: 1px solid #444; border-radius: 3px; cursor: pointer; }
+  #status { flex: 1 1 auto; padding: 4px 8px; background: #111; border-top: 1px solid #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #log { height: 22vh; overflow-y: auto; padding: 4px 8px; background: #0a0a0a; border-top: 1px solid #333; white-space: pre-wrap; }
   #log .err { color: #e8b86b; }
   body.nolog #log { display: none; }
+  #importer { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px;
+    background: rgba(0, 0, 0, 0.92); font: 15px/1.5 system-ui, 'Segoe UI', sans-serif; color: #ddd; z-index: 1; }
+  #importer[hidden] { display: none; }
+  #importer .card { max-width: 560px; width: 100%; background: #16181c; border: 1px solid #333; border-radius: 8px; padding: 24px; }
+  #importer h1 { margin: 0 0 8px; font-size: 22px; color: #fff; }
+  #importer p { margin: 8px 0; }
+  #importer code { font: 13px ui-monospace, Consolas, monospace; color: #f0c674; }
+  #importer .small { font-size: 13px; color: #999; }
+  #pick { display: block; width: 100%; margin: 16px 0 10px; padding: 12px; font: 600 16px system-ui, sans-serif;
+    background: #2f6fd6; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+  #pick:disabled { opacity: 0.5; cursor: default; }
+  #imp-msg { min-height: 1.5em; margin-top: 12px; }
+  #imp-msg.err { color: #f2a65a; }
+  #imp-bar { width: 100%; height: 14px; margin-top: 10px; }
+  #imp-stats { font: 12px ui-monospace, Consolas, monospace; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
 </head>
 <body>
 <canvas id="screen" width="1280" height="960" tabindex="0"></canvas>
-<div id="status">loading…</div>
+<div id="bar"><div id="status">loading…</div><button id="forget" hidden title="Delete the imported game files from this browser (saves stay)">Forget game files</button></div>
+<div id="importer" hidden>
+  <div class="card">
+    <h1>ATV Quad Power Racing 2</h1>
+    <p>This page runs your own copy of the game. Choose the folder that contains <code>default.xbe</code>:
+      the top folder of your ATV Quad Power Racing 2 disc copy (USA release), with <code>ATV.bah</code>,
+      <code>ATV.bad</code>, <code>Fonts</code>, <code>Movies</code>, <code>Music</code>, <code>Sound</code>…</p>
+    <p class="small">The files are checked, then copied into this browser's own storage on this computer
+      (about 0.7 GB, once). They are not uploaded anywhere.</p>
+    <button id="pick">Choose your ATV 2 game folder</button>
+    <input id="gamedir" type="file" webkitdirectory multiple hidden>
+    <label class="small"><input type="checkbox" id="skipmovies"> Skip the movies (about 380 MB less; the intro and FMVs are not shown)</label>
+    <div id="imp-msg"></div>
+    <progress id="imp-bar" value="0" max="1" hidden></progress>
+    <div id="imp-stats"></div>
+  </div>
+</div>
 <div id="log"></div>
 <script type="module" src="./main.js"></script>
 <script>

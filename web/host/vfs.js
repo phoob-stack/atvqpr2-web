@@ -1,11 +1,16 @@
 // The filesystem behind wasi.js. Synchronous, so it runs in a worker.
 //
-//   /game  the player's own game folder, read-only. The dev server lists it
-//          at /data/manifest.json and serves its files at /data/<path> with
-//          Range support. Blocks of 1 MiB are fetched on first use (a
-//          synchronous XHR, which workers may do) and cached in OPFS, so a
-//          second boot reads nothing from the server. The cache is dropped
-//          when the manifest (names, sizes, mtimes) changes.
+//   /game  the player's own game folder, read-only. Two sources:
+//          - imported (the player's path, mountOpfsGame): loader.js copied
+//            the folder the player picked into OPFS (atv2-game/); every file
+//            is opened once with a SyncAccessHandle and read in place.
+//          - dev server (developer option, mountGame): serve.mjs --game lists
+//            the folder at /data/manifest.json and serves its files at
+//            /data/<path> with Range support. Blocks of 1 MiB are fetched on
+//            first use (a synchronous XHR, which workers may do) and cached in
+//            OPFS (atv2-game-cache/), so a second boot reads nothing from the
+//            server. The cache is dropped when the manifest (names, sizes,
+//            mtimes) changes.
 //   /save  the save side (xbox_path_init's save dir): directories and sparse
 //          files in memory. ponytail: persist UDATA/TDATA to OPFS.
 //
@@ -87,6 +92,25 @@ class GameFile {
       const b = this.cache.block(this.entry, bi);
       dst.set(b.subarray(bo, bo + take), done);
       done += take;
+    }
+    return n;
+  }
+  write() { throw new FsError(E.ROFS, 'game folder is read-only'); }
+  truncate() { throw new FsError(E.ROFS, 'game folder is read-only'); }
+}
+
+/** A read-only game file imported into OPFS (loader.js), read in place. */
+class OpfsGameFile {
+  constructor(name, entry, handle) {
+    this.kind = 'file'; this.name = name; this.size = entry.size; this.handle = handle;
+    this.readOnly = true; this.ino = inoNext++; this.mtime = BigInt(Math.round((entry.mtime ?? 0) * 1e6));
+  }
+  read(pos, dst) {
+    const n = Math.max(0, Math.min(dst.length, this.size - pos));
+    for (let done = 0; done < n;) {
+      const got = this.handle.read(dst.subarray(done, n), { at: pos + done });
+      if (got <= 0) throw new FsError(E.IO, `${this.name}: short read at ${pos + done}`);
+      done += got;
     }
     return n;
   }
@@ -195,6 +219,39 @@ export class Vfs {
     }
     const note = await cache.openOpfs(text);
     return { files: manifest.files.length, bytes: manifest.files.reduce((a, f) => a + f.size, 0), note };
+  }
+
+  /**
+   * Mount the game folder the player imported into OPFS (loader.js; `dir` is
+   * its folder under the OPFS root, e.g. 'atv2-game') read-only at /game.
+   * The import's own list (.import.json) says which files are complete.
+   */
+  async mountOpfsGame(dirName) {
+    const root = await navigator.storage.getDirectory();
+    let top;
+    try { top = await root.getDirectoryHandle(dirName); } catch { throw new Error('no imported game files in this browser'); }
+    const mf = await (await top.getFileHandle('.import.json')).getFile();
+    const manifest = JSON.parse(await mf.text());
+    if (!manifest.complete) throw new Error('the game files import did not finish; choose the game folder again');
+    const game = this.root.add(new Dir('game', { readOnly: true }));
+    let bytes = 0;
+    for (const f of manifest.files) {
+      const parts = f.path.split('/');
+      let d = game, h = top;
+      for (const p of parts.slice(0, -1)) {
+        d = d.get(p) ?? d.add(new Dir(p, { readOnly: true }));
+        h = await h.getDirectoryHandle(p);
+      }
+      let sync;
+      try { sync = await (await h.getFileHandle(parts.at(-1))).createSyncAccessHandle(); } catch (e) {
+        throw new Error(`${f.path}: ${e.name === 'NoModificationAllowedError' ? 'in use by another tab of this page' : e.message}`);
+      }
+      if (sync.getSize() !== f.size) throw new Error(`${f.path}: ${sync.getSize()} bytes in OPFS, ${f.size} expected; choose the game folder again`);
+      d.add(new OpfsGameFile(parts.at(-1), f, sync));
+      bytes += f.size;
+    }
+    return { files: manifest.files.length, bytes, note: `imported ${new Date(manifest.importedAt).toISOString().slice(0, 10)}` +
+      (manifest.skipMovies ? ', without movies' : '') };
   }
 
   mountMem(name) { return this.root.add(new Dir(name)); }

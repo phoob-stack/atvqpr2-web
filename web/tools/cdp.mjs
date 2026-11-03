@@ -53,9 +53,11 @@ export function findBrowser() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500), headless = true } = {}) {
+// profile: a user-data-dir to keep (e.g. OPFS with an imported game folder
+// across runs); default a fresh temporary one.
+export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500), headless = true, profile } = {}) {
   const exe = findBrowser();
-  const profile = mkdtempSync(join(tmpdir(), 'atv2-webgpu-'));
+  profile = profile ? resolve(profile) : mkdtempSync(join(tmpdir(), 'atv2-webgpu-'));
   const args = [
     headless ? '--headless=new' : '',
     `--remote-debugging-port=${port}`,
