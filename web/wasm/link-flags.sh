@@ -28,7 +28,7 @@ WASM_LDFLAGS="-Wl,--import-memory -Wl,--export-memory -Wl,--shared-memory
   -Wl,--max-memory=$((WASM_MAX_MEMORY)) -Wl,--initial-memory=$((WASM_INITIAL_MEMORY))
   -Wl,--global-base=$((WASM_GLOBAL_BASE)) -Wl,-z,stack-size=$WASM_STACK_SIZE -Wl,--no-stack-first
   -Wl,--export=wasi_thread_start -Wl,--export=malloc -Wl,--export=free
-  -Wl,--export=xbox_WasmHostTickWord -Wl,--export=xbox_WasmPollWatchTable
+  -Wl,--export-if-defined=xbox_WasmHostTickWord -Wl,--export-if-defined=xbox_WasmPollWatchTable
   -lsetjmp
   -lwasi-emulated-mman -lwasi-emulated-signal -lwasi-emulated-process-clocks -lwasi-emulated-getpid"
 

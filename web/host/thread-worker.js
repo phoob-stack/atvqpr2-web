@@ -42,6 +42,13 @@ async function run(init) {
   ctx.instance = inst;
 
   if (init.role === 'main') {
+    // Instantiated before every pool Worker (threads.js start()), so this
+    // instance's start function set __tls_base to the static TLS block.
+    // _start waits for the page's 'run'.
+    await new Promise((resolve) => {
+      onMsg((m) => { if (m && m.type === 'run') resolve(); });
+      post({ type: 'main-ready' });
+    });
     // The host tick word (host_time.c): the page pumps it (threads.js).
     if (typeof ex.xbox_WasmHostTickWord === 'function')
       post({ type: 'tick', addr: ex.xbox_WasmHostTickWord() >>> 0,

@@ -186,6 +186,7 @@ export class WasmThreads {
     if (m.type === 'exit') this._exit(m.code);
     else if (m.type === 'tick') { this._watchAddr = m.watch || 0; this._startTicks(m.addr); }
     else if (m.type === 'trap') this._trap({ role, slot, ...m });
+    else if (m.type === 'main-ready' && this._mainReady) { this._mainReady(); this._mainReady = null; }
     else if (m.type === 'ready' && this._readyWaiters) {
       const r = this._readyWaiters.get(slot);
       if (r) { this._readyWaiters.delete(slot); r(); }
@@ -224,7 +225,21 @@ export class WasmThreads {
     return true;
   }
 
+  // The main Worker is instantiated FIRST, before any pool Worker. With a
+  // shared memory, wasm-ld's start function (__wasm_init_memory) initialises
+  // the data segments and sets __tls_base to the static TLS block only in
+  // the instance that wins its init flag; every later instance keeps
+  // __tls_base = 0 until wasi_thread_start gives it a block of its own. The
+  // main thread never gets one that way, so if a pool Worker instantiated
+  // first, every main-thread TLS variable (the guest register file,
+  // g_fs_base, the IRQL ...) lived uninitialised at linear address 0.
   async start() {
+    const w = await this._makeWorker();
+    this.mainWorker = w;
+    const mainReady = new Promise((r) => { this._mainReady = r; });
+    this._wire(w, 'main', -1);
+    w.postMessage(this._init('main', -1));
+    await mainReady;
     const adds = [];
     for (let k = 0; k < this.poolSize; k++) adds.push(this._addPoolWorker());
     await Promise.all(adds);
@@ -283,14 +298,13 @@ export class WasmThreads {
     }
   }
 
-  // Run _start (the C main) in a Worker of its own. Resolves with the exit code.
+  // Run _start (the C main) in the main Worker (instantiated by start()).
+  // Resolves with the exit code.
   async runMain() {
     const done = new Promise((r) => this._exitWaiters.push(r));
     if (this.exitCode !== undefined) return this.exitCode;
-    const w = await this._makeWorker();
-    this.mainWorker = w;
-    this._wire(w, 'main', -1);
-    w.postMessage(this._init('main', -1));
+    if (!this.mainWorker) await this.start();
+    this.mainWorker.postMessage({ type: 'run' });
     return done;
   }
 

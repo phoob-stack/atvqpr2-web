@@ -45,6 +45,12 @@ static HANDLE s_tick_ev;                /* set by the timer thread each round */
 static HANDLE s_sem;
 static volatile LONG s_stop;
 static int failures;
+/* The game's g_fs_base is a TLS variable with an initialiser (XBOX_TIB_MAIN).
+ * The main thread's TLS block is set up by the start function only in the
+ * first instance (threads.js instantiates the main Worker first). */
+static __thread uint32_t t_tls_init = 0x4000;
+static volatile uint32_t s_thread_tls_seen;
+static DWORD WINAPI tls_peek(LPVOID p) { (void)p; s_thread_tls_seen = t_tls_init; return 0; }
 
 static void check(int ok, const char *what)
 {
@@ -332,6 +338,14 @@ int main(void)
            GUESTS, ITERS);
     check(xbox_GuestCpuOn(), "guest CPU lock on (RECOMP_GUEST_LOCK=1)");
     check(xbox_DispatchGateOn(), "DISPATCH gate on (RECOMP_DISPATCH_GATE=1)");
+    check(t_tls_init == 0x4000 && __builtin_wasm_tls_base() != 0,
+          "main thread: TLS initialised, block not at address 0");
+    {
+        HANDLE h = CreateThread(NULL, 0, tls_peek, NULL, 0, NULL);
+        WaitForSingleObject(h, INFINITE);
+        CloseHandle(h);
+        check(s_thread_tls_seen == 0x4000, "spawned thread: TLS initialised");
+    }
 
     wd = CreateThread(NULL, 0, watchdog, (LPVOID)(uintptr_t)60, 0, NULL);
     for (i = 0; i < GUESTS; i++)
