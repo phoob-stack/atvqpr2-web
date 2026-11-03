@@ -86,6 +86,11 @@ rm -f "$OUT/rt.a"; "$SDK/bin/llvm-ar" rcs "$OUT/rt.a" "$OUT"/rt/*.o
 $CC --target=wasm32-wasip1-threads -pthread "$OUT"/gen/*.o "$OUT/rt.a" -o "$OUT/atv2.wasm" \
   $WASM_LDFLAGS -Wl,--allow-undefined -Wl,--error-limit=0 2> "$OUT/link-web.err"
 wasm_memory_json "$OUT/atv2.memory.json"
+# The page needs no DWARF (traps are named from the name section, which
+# stays): 0.5 MB less to fetch. WASM_KEEP_DEBUG=1 keeps it.
+if [ "${WASM_KEEP_DEBUG:-0}" != 1 ] && [ -f "$OUT/atv2.wasm" ]; then
+  "$SDK/bin/llvm-strip" --strip-debug "$OUT/atv2.wasm" -o "$OUT/atv2.wasm.tmp" && mv -f "$OUT/atv2.wasm.tmp" "$OUT/atv2.wasm"
+fi
 grep -v "^$" "$OUT/link-web.err" | head -20
 [ -f "$OUT/atv2.wasm" ] && ls -la "$OUT/atv2.wasm"
 

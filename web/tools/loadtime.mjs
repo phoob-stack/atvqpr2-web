@@ -13,6 +13,10 @@
 //            "first load with the game already imported".
 //   --fresh  a new empty profile for every run (no OPFS either: needs the
 //            dev /data/ path, so not with --opfs).
+//   --import <game folder>  with --fresh: the player's very first visit. The
+//            server has no /data/; the import panel takes <game folder>
+//            (movies skipped) through its <input webkitdirectory> fallback,
+//            and the times include the import ("imported" column).
 //   (neither: the profile is kept as it is, so run 2.. are second loads.)
 //   --root <dir>  serve another checkout's web/ (e.g. a baseline worktree,
 //            for before/after numbers taken in the same minutes).
@@ -33,7 +37,8 @@ const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const runs = Number(opt('--runs', 3));
 const port = Number(opt('--port', 8835));
-const opfs = argv.includes('--opfs'), cold = argv.includes('--cold'), fresh = argv.includes('--fresh');
+const importDir = opt('--import') ? resolve(opt('--import')) : null;
+const opfs = argv.includes('--opfs') || !!importDir, cold = argv.includes('--cold'), fresh = argv.includes('--fresh') || !!importDir;
 const timeout = Number(opt('--timeout', 120)) * 1000;
 const profileArg = opt('--profile');
 const env = ['RECOMP_SKIP_MOVIES=1', opt('--env', '')].filter(Boolean).join(',');
@@ -57,7 +62,7 @@ const CACHE_DIRS = ['Default/Cache', 'Default/Code Cache', 'Default/Service Work
 const POLL = `(() => {
   const s = atv.presenter?.stats;
   return { t: performance.now(), status: document.getElementById('status')?.textContent ?? '',
-    frames: s?.frames ?? 0, err: atv.state.error ?? null, exit: atv.state.exit,
+    frames: s?.frames ?? 0, err: atv.state.error ?? null, exit: atv.state.exit, loader: atv.loader?.phase ?? null,
     timings: atv.timings ?? null, nlog: atv.log.length,
     compiled: atv.log.find((l) => l.includes(' compiled in ')) ?? null,
     pool: atv.log.some((l) => l.includes('worker pool up')) };
@@ -71,13 +76,22 @@ try {
     const profile = fresh ? mkdtempSync(join(out, 'profiles', 'fresh-')) : resolve(profileArg);
     if (cold) for (const d of CACHE_DIRS) rmSync(join(profile, d), { recursive: true, force: true });
     const b = await launch(url, { profile, port: 9800 + port % 100 });
-    const r = { run, wasm: null, pool: null, first: null, title: null, error: null, compileLog: null };
+    const r = { run, wasm: null, pool: null, first: null, title: null, error: null, compileLog: null, imported: null };
+    let fed = false;
     const t0 = Date.now();
     try {
       while (Date.now() - t0 < timeout) {
         let s;
         try { s = await b.eval(POLL); } catch { await sleep(50); continue; }
         if (s.err) { r.error = s.err; break; }
+        if (importDir && !fed && s.loader === 'waiting') {
+          fed = true;
+          await b.eval(`document.getElementById('skipmovies').checked = true`);
+          const doc = await b.send('DOM.getDocument', { depth: 0 });
+          const qn = await b.send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#gamedir' });
+          await b.send('DOM.setFileInputFiles', { nodeId: qn.result.nodeId, files: [importDir] });
+        }
+        if (importDir && r.imported === null && (s.loader === 'done' || s.loader === 'ready') && fed) r.imported = s.t;
         if (s.compiled && r.wasm === null) { r.wasm = s.timings?.wasmCompiled ?? s.t; r.compileLog = s.compiled.replace(/^\[page\] /, ''); }
         if (s.pool && r.pool === null) r.pool = s.timings?.workersUp ?? s.t;
         if (s.frames > 0 && r.first === null) r.first = s.timings?.firstFrame ?? s.t;
@@ -98,7 +112,7 @@ try {
       if (fresh) try { rmSync(profile, { recursive: true, force: true, maxRetries: 40, retryDelay: 250 }); } catch (e) { console.log(`(profile left: ${e.message})`); }
     }
     const f = (v) => (v === null ? '   -  ' : `${(v / 1000).toFixed(2).padStart(6)}`);
-    console.log(`run ${run}: wasm ${f(r.wasm)} s | threads ${f(r.pool)} s | first frame ${f(r.first)} s | PRESS START ${f(r.title)} s` +
+    console.log(`run ${run}: ${importDir ? `imported ${f(r.imported)} s | ` : ''}wasm ${f(r.wasm)} s | threads ${f(r.pool)} s | first frame ${f(r.first)} s | PRESS START ${f(r.title)} s` +
       `${r.error ? ` | ERROR ${r.error}` : ''}\n        ${r.compileLog ?? ''}${r.timings ? `\n        marks ${JSON.stringify(r.timings)}` : ''}`);
     results.push(r);
   }
