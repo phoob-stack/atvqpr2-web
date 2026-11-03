@@ -1,7 +1,8 @@
 // The start page: tabs (Play, Settings, Saves, Game data, About) chosen by
 // the address's #hash, the game-files check on Play (the import panel the
 // first time), and the buttons that start the game.
-import { importedGame, prepareGame } from '../loader.js';
+import { readyGame, importedGame, prepareGame } from '../loader.js';
+import { SITE } from '../deploy.js';
 import { siteLog, downloadLog } from './logs.js';
 import { loadSettings, setSetting, CHANGED_EVENT } from './settings.js';
 import { h } from './settings-ui.js';
@@ -67,17 +68,19 @@ async function gameStatus() {
   const st = $('game-state');
   const play = [$('btn-play'), $('btn-freeride')];
   const ready = (text) => { st.textContent = text; st.className = 'game-state ok'; for (const b of play) b.disabled = false; };
-  const dev = await fetch('/data/manifest.json', { method: 'HEAD', cache: 'no-store' }).then((r) => r.ok).catch(() => false);
+  const dev = !SITE && await fetch('/data/manifest.json', { method: 'HEAD', cache: 'no-store' }).then((r) => r.ok).catch(() => false);
   if (dev) { ready('Game files: served by the developer server (serve.mjs --game).'); return; }
-  const m = await importedGame();
+  const m = await readyGame();
   if (m) {
     const mb = m.files.reduce((a, f) => a + f.size, 0) / 1048576;
     ready(`Game files ready: ${m.files.length} files, ${mb.toFixed(0)} MB, imported ${new Date(m.importedAt).toLocaleDateString()}` +
-      `${m.skipMovies ? ' (without the movies)' : ''}.`);
+      `${m.skipMovies ? ' (without the movies)' : ''}${m.build ? `; game build from builder ${m.build.builder}` : ''}.`);
     $('import-slot').hidden = true;
     return;
   }
-  st.textContent = 'First time here: choose your game folder below. It is copied into this browser once.';
+  st.textContent = SITE ? (await importedGame() ? 'Your game build needs updating: select your local game files below (the folder your builder made).'
+    : 'First time here: select your local game files below (the folder your builder made). They are copied into this browser once.')
+    : 'First time here: choose your game folder below. It is copied into this browser once.';
   st.className = 'game-state need';
   for (const b of play) b.disabled = true;
   const imp = $('importer');

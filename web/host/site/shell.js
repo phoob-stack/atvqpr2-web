@@ -15,8 +15,11 @@
 // ?settings=off boots with the default settings.
 import { loadSettings, settingsEnv, settingsQuery, CHANGED_EVENT } from './settings.js';
 import { installLogCapture, downloadLog, siteLog } from './logs.js';
+import { SITE } from '../deploy.js';
 
 installLogCapture();
+// [siteplay] The project site's copy: its texts (.site-only) instead of the local server's (.local-only).
+if (SITE) document.documentElement.classList.add('deploy-site');
 const $ = (id) => document.getElementById(id);
 const q = new URLSearchParams(location.search);
 const BOOT_PARAMS = ['play', 'env', 'wasm', 'args', 'trace', 'threads', 'dev', 'forget', 'saves'];

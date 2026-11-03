@@ -21,6 +21,16 @@
 // files either: a game folder's own UDATA/TDATA/CACHE/TitleCache (older
 // native builds kept saves there) is left out of the import (SAVE_FOLDERS);
 // saves.js imports saves.
+//
+// [siteplay] On the project site (deploy.js mode 'site') there is no server
+// with /data/ or /wasm/: the player picks the play folder their builder made,
+// which also holds their game build (atv2.wasm, gamebuild.js). It is checked
+// after default.xbe and kept in OPFS next to the game files (BUILD_DIR), and
+// the game is ready only when both are there. importFolder() is the whole
+// pick -> check -> import, used by this page's import panel and by the site's
+// own Play panel (same origin, same OPFS).
+import { SITE } from './deploy.js';
+import { BUILD_DIR, BUILD_FILES, BuildError, checkBuild, storeBuild, storedBuild, forgetBuild, STALE_TEXT } from './gamebuild.js';
 
 export const GAME_DIR = 'atv2-game';           // the player's import
 export const CACHE_DIR = 'atv2-game-cache';    // vfs.js block cache of the dev server's /data/
@@ -46,6 +56,13 @@ export const loaderState = { phase: 'idle', error: null, progress: null, result:
 
 async function opfsRoot() { return navigator.storage.getDirectory(); }
 
+/** The dev server's game folder (/data/); never on the site, where no server has one. */
+async function devServes() {
+  if (SITE) return false;
+  const r = await fetch('/data/manifest.json', { method: 'HEAD', cache: 'no-store' }).catch(() => null);
+  return !!r?.ok;
+}
+
 /** The finished import's manifest, or null. */
 export async function importedGame() {
   try {
@@ -58,7 +75,7 @@ export async function importedGame() {
 /** Is any game data (finished or partial import, dev cache) in OPFS? */
 export async function hasGameData() {
   const root = await opfsRoot();
-  for (const n of [GAME_DIR, CACHE_DIR]) { try { await root.getDirectoryHandle(n); return true; } catch { /* none */ } }
+  for (const n of [GAME_DIR, CACHE_DIR, BUILD_DIR]) { try { await root.getDirectoryHandle(n); return true; } catch { /* none */ } }
   return false;
 }
 
@@ -75,6 +92,15 @@ export async function forgetGame(log = () => {}) {
       }
     }
   }
+  if (await forgetBuild().catch(() => false)) log(`[loader] deleted ${BUILD_DIR} (the game build) from this browser's storage`);
+}
+
+/** Game files ready to play: the import's manifest (on the site only with a matching game build kept too), else null. */
+export async function readyGame() {
+  const m = await importedGame();
+  if (!m || !SITE) return m;
+  const b = await storedBuild();
+  return b?.ok ? { ...m, build: b } : null;
 }
 
 // ---- reading the picked folder ---------------------------------------------
@@ -213,66 +239,120 @@ export async function importEntries(entries, { sha, skipMovies = false, onProgre
   return { files: list.length, bytes: total, copied, skipped, secs, mbps: copied / 1048576 / Math.max(0.001, secs), persisted };
 }
 
+/**
+ * Check a picked folder and import it: default.xbe, then (on the site) the
+ * game build, then the copy into OPFS. scan: () => entries (scanHandle /
+ * scanFileList). onPhase(phase, text) follows it ('validating', 'importing',
+ * 'done'); onProgress as importEntries. Throws an Error (a BuildError for the
+ * build) whose message is for the player. Returns importEntries' result plus
+ * { sha, build }.
+ */
+export async function importFolder(scan, { skipMovies = false, onProgress = () => {}, onPhase = () => {}, log = () => {} } = {}) {
+  onPhase('validating', 'Checking the folder…');
+  const entries = await scan();
+  const sha = await validate(entries);
+  log(`[loader] default.xbe is the retail USA build (SHA-256 ${sha.slice(0, 16)}…); ${entries.length} files`);
+  if (loaderState.savesLeftOut) log(`[loader] left out ${loaderState.savesLeftOut} files in the folder's UDATA/TDATA/CACHE: ` +
+    "saves are not game files (Saves > Import the Windows build's save folder brings saves in)");
+  let build = null;
+  if (SITE) {
+    onPhase('validating', 'This is ATV Quad Power Racing 2 (USA). Checking your game build (atv2.wasm)…');
+    build = await checkBuild(entries);
+    log(`[loader] atv2.wasm is builder ${build.match.builder}'s build (SHA-256 ${build.sha256.slice(0, 16)}…, ${build.size} bytes)`);
+  }
+  // The build's own files are not game files.
+  const game = entries.filter((e) => !(BUILD_FILES.test(e.path) && !e.path.includes('/')));
+  onPhase('importing', 'This is ATV Quad Power Racing 2 (USA). Copying the files into this browser…');
+  const r = await importEntries(game, { sha, skipMovies, onProgress });
+  if (build) {
+    // After the game files: a build is kept only next to a finished import.
+    const rec = await storeBuild(build);
+    log(`[loader] kept the game build in this browser (${BUILD_DIR}, builder ${rec.builder})`);
+  }
+  log(`[loader] imported ${r.files} files, ${MB(r.bytes)} MB (${MB(r.copied)} MB copied, ${r.skipped} already there) ` +
+    `in ${r.secs.toFixed(1)} s, ${r.mbps.toFixed(0)} MB/s; persistent storage ${r.persisted ? 'granted' : 'not granted'}`);
+  onPhase('done', 'Done.');
+  return { ...r, sha, build: build && { builder: build.match.builder, sha256: build.sha256, size: build.size } };
+}
+
+/**
+ * Open the folder picker: showDirectoryPicker, which resolves with a scan
+ * function for importFolder (null when the player closed it); else, or when
+ * it is refused, the <input webkitdirectory> `input` is clicked and null
+ * returned: the caller's input.onchange takes it from there (inputScan).
+ */
+export async function pickFolder(input) {
+  if (window.showDirectoryPicker) {
+    try {
+      const dir = await window.showDirectoryPicker({ id: SITE ? 'atv2-play' : 'atv2-game', mode: 'read' });
+      return () => scanHandle(dir);
+    } catch (e) {
+      if (e.name === 'AbortError') return null;      // the player closed the picker
+      /* e.g. not allowed here: the classic picker below */
+    }
+  }
+  input.click();
+  return null;
+}
+
+/** The <input webkitdirectory>'s files as a scan function (null when empty); clears the input. */
+export function inputScan(input) {
+  const files = [...input.files];
+  input.value = '';
+  return files.length ? () => scanFileList(files) : null;
+}
+
 // ---- the page's UI -----------------------------------------------------------
 
-function showError(msg) {
+function showError(msg, link = null) {
   loaderState.phase = 'error'; loaderState.error = msg;
   const m = $('imp-msg'); m.textContent = msg; m.className = 'err';
+  if (link) { const a = document.createElement('a'); a.href = link.href; a.textContent = link.text; m.append(' ', a); }
 }
 
 /** Show the import panel; resolves once a valid folder has been imported. */
-function runImporter(log) {
+function runImporter(log, note = '') {
   const panel = $('importer'), pick = $('pick'), input = $('gamedir'), bar = $('imp-bar'), stats = $('imp-stats');
   panel.hidden = false;
   loaderState.phase = 'waiting';
+  if (note) { $('imp-msg').textContent = note; $('imp-msg').className = 'err'; }
   return new Promise((resolve) => {
     let busy = false;
     const go = async (scan) => {
       if (busy) return;
       busy = true; pick.disabled = true; $('skipmovies').disabled = true;
       $('imp-msg').className = ''; $('imp-msg').textContent = 'Checking the folder…';
-      loaderState.phase = 'validating'; loaderState.error = null;
+      loaderState.phase = 'validating'; loaderState.error = null; loaderState.errorKind = null;
       try {
-        const entries = await scan();
-        const sha = await validate(entries);
-        const skipMovies = $('skipmovies').checked;
-        log(`[loader] default.xbe is the retail USA build (SHA-256 ${sha.slice(0, 16)}…); ${entries.length} files`);
-        if (loaderState.savesLeftOut) log(`[loader] left out ${loaderState.savesLeftOut} files in the folder's UDATA/TDATA/CACHE: ` +
-          "saves are not game files (Saves > Import the Windows build's save folder brings saves in)");
-        $('imp-msg').textContent = 'This is ATV Quad Power Racing 2 (USA). Copying the files into this browser…';
-        loaderState.phase = 'importing';
-        bar.hidden = false;
-        const r = await importEntries(entries, { sha, skipMovies, onProgress: (p) => {
-          loaderState.progress = p;
-          bar.max = p.total; bar.value = p.done;
-          stats.textContent = `${p.file} / ${p.files} files · ${MB(p.done)} / ${MB(p.total)} MB · ${p.mbps.toFixed(0)} MB/s · ${p.path}`;
-        } });
+        const r = await importFolder(scan, { skipMovies: $('skipmovies').checked, log,
+          onPhase: (phase, text) => {
+            loaderState.phase = phase;
+            $('imp-msg').textContent = phase === 'done' ? 'Done. Starting the game…' : text;
+            if (phase === 'importing') bar.hidden = false;
+          },
+          onProgress: (p) => {
+            loaderState.progress = p;
+            bar.max = p.total; bar.value = p.done;
+            stats.textContent = `${p.file} / ${p.files} files · ${MB(p.done)} / ${MB(p.total)} MB · ${p.mbps.toFixed(0)} MB/s · ${p.path}`;
+          } });
         loaderState.result = r;
-        log(`[loader] imported ${r.files} files, ${MB(r.bytes)} MB (${MB(r.copied)} MB copied, ${r.skipped} already there) ` +
-          `in ${r.secs.toFixed(1)} s, ${r.mbps.toFixed(0)} MB/s; persistent storage ${r.persisted ? 'granted' : 'not granted'}`);
         stats.textContent = `${r.files} files, ${MB(r.bytes)} MB in ${r.secs.toFixed(1)} s`;
-        $('imp-msg').textContent = 'Done. Starting the game…';
         loaderState.phase = 'done';
         panel.hidden = true;
         resolve();
       } catch (e) {
         log(`[loader] ${e.message}`, 'err');
-        showError(e.message);
+        loaderState.errorKind = e instanceof BuildError ? e.kind : 'game';
+        showError(e.message, e.link);
       } finally {
         busy = false; pick.disabled = false; $('skipmovies').disabled = false;
       }
     };
     pick.onclick = async () => {
-      if (window.showDirectoryPicker) {
-        let dir;
-        try { dir = await window.showDirectoryPicker({ id: 'atv2-game', mode: 'read' }); } catch (e) {
-          if (e.name === 'AbortError') return;      // the player closed the picker
-          input.click(); return;                    // e.g. not allowed here: the classic picker
-        }
-        go(() => scanHandle(dir));
-      } else input.click();
+      const scan = await pickFolder(input);
+      if (scan) go(scan);
     };
-    input.onchange = () => { if (input.files.length) go(() => scanFileList(input.files)); input.value = ''; };
+    input.onchange = () => { const scan = inputScan(input); if (scan) go(scan); };
   });
 }
 
@@ -299,11 +379,10 @@ export async function peekGame(q) {
   if (q.has('forget')) return null;
   const dev = q.get('dev');
   if (dev !== '0') {
-    const r = await fetch('/data/manifest.json', { method: 'HEAD', cache: 'no-store' }).catch(() => null);
-    if (r?.ok) return { source: 'server', base: '/data' };
+    if (await devServes()) return { source: 'server', base: '/data' };
     if (dev === '1') return null;
   }
-  const m = await importedGame();
+  const m = await readyGame();
   return m ? { source: 'opfs', dir: GAME_DIR, manifest: m } : null;
 }
 
@@ -320,16 +399,17 @@ export async function prepareGame({ q, log }) {
   }
   const dev = q.get('dev');
   if (dev !== '0') {
-    const r = await fetch('/data/manifest.json', { method: 'HEAD', cache: 'no-store' }).catch(() => null);
-    if (r?.ok) { loaderState.phase = 'dev'; return { source: 'server', base: '/data' }; }
+    if (await devServes()) { loaderState.phase = 'dev'; return { source: 'server', base: '/data' }; }
     if (dev === '1') throw new Error('?dev=1, but the dev server serves no game folder (start serve.mjs with --game <folder>)');
   }
-  let m = await importedGame();
+  let m = await readyGame();
   if (!m) {
     if (await hasGameData()) $('forget').hidden = false;
-    $('status').textContent = 'Choose your ATV 2 game folder to start';
-    await runImporter(log);
-    m = await importedGame();
+    $('status').textContent = SITE ? 'Select your local game files to start' : 'Choose your ATV 2 game folder to start';
+    // On the site: game files kept, but a build for an earlier version of the page.
+    const kept = SITE && await importedGame() ? await storedBuild() : null;
+    await runImporter(log, kept && !kept.ok ? STALE_TEXT() : '');
+    m = await readyGame();
     if (!m) throw new Error('the import finished but its file list is missing');
   }
   loaderState.phase = 'ready';

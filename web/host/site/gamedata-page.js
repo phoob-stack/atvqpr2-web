@@ -2,8 +2,10 @@
 import { importedGame, forgetGame, storageReport, requestPersist, checkGame, GAME_DIR, CACHE_DIR, MB } from './gamedata.js';
 import { h } from './settings-ui.js';
 import { siteLog } from './logs.js';
+import { SITE } from '../deploy.js';
+import { storedBuild, BUILD_DIR } from '../gamebuild.js';
 
-const NAMES = { [GAME_DIR]: 'Game files (your import)', [CACHE_DIR]: 'Developer server cache',
+const NAMES = { [GAME_DIR]: 'Game files (your import)', [CACHE_DIR]: 'Developer server cache', [BUILD_DIR]: 'Your game build (atv2.wasm)',
   'atv2-saves': 'Saves', 'atv2-saves-backups': 'Save backups', 'atv2-saves-incoming': 'Save import in progress' };
 
 export async function renderData(root, { onChange = () => {} } = {}) {
@@ -23,9 +25,16 @@ export async function renderData(root, { onChange = () => {} } = {}) {
       h('dt', {}, 'Imported'), h('dd', {}, new Date(m.importedAt).toLocaleString()),
       h('dt', {}, 'default.xbe'), h('dd', {}, h('code', {}, `SHA-256 ${String(m.xbeSha256).slice(0, 16)}…`), ' (the retail USA release)')));
   } else {
-    const dev = await fetch('/data/manifest.json', { method: 'HEAD', cache: 'no-store' }).then((r) => r.ok).catch(() => false);
+    const dev = !SITE && await fetch('/data/manifest.json', { method: 'HEAD', cache: 'no-store' }).then((r) => r.ok).catch(() => false);
     game.append(h('p', {}, dev ? 'The developer server (serve.mjs --game) serves the game files: nothing is imported into this browser.'
-      : 'No game files in this browser yet. Choose your game folder on the Play tab.'));
+      : SITE ? 'No game files in this browser yet. Select your local game files on the Play tab.'
+        : 'No game files in this browser yet. Choose your game folder on the Play tab.'));
+  }
+  if (SITE) {
+    const b = await storedBuild();
+    game.append(h('dl', { class: 'facts' }, h('dt', {}, 'Game build'), h('dd', {}, !b ? 'none yet' :
+      [`atv2.wasm from builder ${b.builder}, ${MB(b.size)}, `, h('code', {}, `SHA-256 ${String(b.sha256).slice(0, 16)}…`),
+        b.ok ? ' (matches this page)' : ' (made for another version of this site: rebuild and select the folder again)'])));
   }
   const bar = h('progress', { value: 0, max: 1, hidden: true });
   const check = h('button', { class: 'btn', disabled: !m, onclick: async () => {
