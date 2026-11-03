@@ -3,7 +3,7 @@
 // screenshots.
 //
 //   node web/tools/site.mjs --profile <dir> [--port 8837] [--out dir] [--shots dir] [--game <folder>]
-//        [--skip-game]
+//        [--skip-game] [--first-use <game folder>]
 //
 // The profile should hold an imported game folder (web/tools/import.mjs with
 // the same --profile and --port; OPFS belongs to the profile and the origin),
@@ -34,6 +34,7 @@ const out = resolve(opt('--out', join(ROOT, 'build-wasm/site')));
 const shots = resolve(opt('--shots', join(out, 'screens')));
 const dl = join(out, 'downloads');
 const game = opt('--game');
+const firstUse = opt('--first-use');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 mkdirSync(shots, { recursive: true });
 rmSync(dl, { recursive: true, force: true });
@@ -83,6 +84,22 @@ try {
   await b.eval(`localStorage.removeItem('atv2.settings.v1')`);
   await b.send('Page.reload', {});
   await sleep(1000);
+
+  // 0. --first-use <game folder>: a profile with no import. The Play tab shows the import panel, Play is off until
+  // the folder is imported (the <input webkitdirectory> fallback, as import.mjs).
+  if (firstUse) {
+    check(await until(`!document.getElementById('import-slot').hidden && document.getElementById('import-slot').contains(document.getElementById('importer'))
+      && !document.getElementById('importer').hidden`, 20), 'first use: the import panel is in the Play tab');
+    check(await b.eval(`document.getElementById('btn-play').disabled`), 'first use: Play is off until the import');
+    await shot('home-first-use.png');
+    const doc = await b.send('DOM.getDocument', { depth: -1 });
+    const q = await b.send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#gamedir' });
+    await b.send('DOM.setFileInputFiles', { nodeId: q.result.nodeId, files: [resolve(firstUse)] });
+    await sleep(2500);
+    await shot('home-importing.png');
+    check(await until(`document.getElementById('game-state').classList.contains('ok') && !document.getElementById('btn-play').disabled`, 180),
+      'first use: imported, Play on: ' + await b.eval(`document.getElementById('game-state').textContent`));
+  }
 
   // 1. the start page
   check(await until(`document.body.classList.contains('mode-home')`), 'the start page shows (no game boot without a parameter)');
@@ -157,7 +174,7 @@ try {
     await click('#btn-play');
     check(await until(`document.body.classList.contains('mode-game') && location.search.includes('play=1')`, 5), 'Play: game mode, ?play=1 in the address');
     check(await until(`!document.getElementById('loading').hidden`, 5), 'loading card shown');
-    await sleep(1500);
+    await sleep(150);
     await shot('game-loading.png');
     check(await until(`(window.atv?.log ?? []).some((l) => l.startsWith('[page] env:'))`, 60), 'game booting');
     const envLine = await b.eval(`atv.log.find((l) => l.startsWith('[page] env:'))`);
@@ -230,8 +247,9 @@ try {
     await b.eval(`document.getElementById('loading-msg')?.textContent`).catch(() => ''));
   check(await b.eval(`['ld-retry', 'ld-reload', 'ld-log'].every((id) => !document.getElementById(id).hidden)`), 'Retry / Reload / Download log offered');
   await shot('game-failed.png');
+  const logsBefore = readdirSync(dl).filter((f) => f.startsWith('atv2-log-')).length;
   await click('#ld-log'); await sleep(800);
-  check(readdirSync(dl).filter((f) => f.startsWith('atv2-log-')).length >= 2, 'log from the loading card saved');
+  check(readdirSync(dl).filter((f) => f.startsWith('atv2-log-')).length === logsBefore + 1, 'log from the loading card saved');
   await click('#ld-reload');
   check(await until(`document.body.classList.contains('mode-home')`, 10), 'Reload: the start page');
 } catch (e) {

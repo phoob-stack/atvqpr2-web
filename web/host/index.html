@@ -12,6 +12,10 @@
   serves a folder at /data/ instead (developer option).
   Keys: Enter = START, Z = A, X = B, C = X, V = Y, arrows = d-pad,
   W/A/S/D = left stick, Backspace = BACK. A gamepad works too.
+  [site] With no parameter the page is the start page (site/shell.js): Play,
+  Free Ride, Settings, Saves, Game data, About. ?play=1 (what Play puts in the
+  address) or any of main.js's parameters boots the game. In the game, F1 or
+  Esc opens the page's menu; F2 shows the status bar and log.
 -->
 <style>
   :root { color-scheme: dark; }
@@ -132,7 +136,7 @@
           <h3>Credits</h3>
           <ul class="small">
             <li><b>xboxrecomp</b>: the static recompiler and the Xbox runtime under the game (kernel, NV2A, APU, USB).</li>
-            <li><b>nfsu2-web</b> (and nfsu2.xyz): the techniques this port learned from (frame packets drawn with WebGPU, a worker per guest thread, OPFS files, an AudioWorklet ring) and the idea of a start page like this one. No code, text or art is taken from it.</li>
+            <li><b>nfsu2-web</b>: the techniques this port learned from (frame packets drawn with WebGPU, a worker per guest thread, OPFS files, an AudioWorklet ring) and the idea of a start page like this one. No code, text or art is taken from it.</li>
             <li><b>wasi-sdk</b>: the WebAssembly compiler and C library.</li>
             <li><b>wgpu</b> (wgpu-native): the native WebGPU back end the shaders were proven on.</li>
             <li>ATV Quad Power Racing 2 is the work of Climax and Acclaim. This is an unofficial project for people who own the game.</li>
