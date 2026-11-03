@@ -228,6 +228,24 @@ static const Rt *rt_find(uint32_t va)
     return NULL;
 }
 
+/* Could this texture be what a target of `bpp` bytes drew? DXT and palette
+ * formats never are. This matters once memory is reused (RECOMP_HEAP_RECLAIM:
+ * D3D frees an impostor's 256 KB and a DXT texture lands at the address):
+ * matched by address alone, that texture sampled the stale target instead. */
+static uint32_t texel_bytes(uint32_t fmt);
+
+static int rt_format_ok(const Nv2aTexture *t, uint32_t bpp)
+{
+    if (d3d8_format_dxt_block_bytes(t->color) || t->color == 0x0B) return 0;
+    return texel_bytes(t->color) == bpp;
+}
+
+static const Rt *rt_find_tex(const Nv2aTexture *t)
+{
+    const Rt *r = rt_find(t->offset);
+    return r && rt_format_ok(t, r->bpp) ? r : NULL;
+}
+
 /* A texture that lies inside a render target without starting at it: a tile
  * of an atlas the title drew (ATV 2 draws distant riders as impostors into
  * 256x256 swizzled targets and samples them as smaller swizzled textures at
@@ -258,7 +276,7 @@ static int s_nsub, s_sub_next;
 static uint32_t rt_tex(const Nv2aTexture *t, int *full)
 {
     int i;
-    const Rt *r = rt_find(t->offset);
+    const Rt *r = rt_find_tex(t);
     uint32_t x0, y0, d, k;
     *full = 0;
     if (r) { *full = 1; return GP_TEX_RT | r->id; }
@@ -267,7 +285,7 @@ static uint32_t rt_tex(const Nv2aTexture *t, int *full)
         if (t->offset > r->va && t->offset - r->va < r->h * (r->swz ? r->w * r->bpp : r->pitch))
             break;
     }
-    if (i == s_nrt || r->bpp != 4) return 0;
+    if (i == s_nrt || r->bpp != 4 || !rt_format_ok(t, 4)) return 0;
     d = t->offset - r->va;
     if (size_from_format(t->color)) {
         uint32_t mx, my;
@@ -774,7 +792,7 @@ static void rec_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     tc.zscale = zscale_of(s->zeta_format);
     tc.texsize[0] = tc.texsize[1] = 1.0f;
     if (b->texture) {
-        const Rt *src = rt_find(b->texture->offset);
+        const Rt *src = rt_find_tex(b->texture);
         int bc, full;
         d->tex[0] = rt_tex(b->texture, &full);
         if (!d->tex[0])
@@ -835,7 +853,7 @@ static void rec_draw2(const Nv2aSurface *s, const Nv2aRenderState *rs, const Nv2
         xc.uvscale[st][0] = xc.uvscale[st][1] = 1.0f;
         if (!wanted || !dd->tex_valid[st]) continue;
         {
-            const Rt *src = cube ? NULL : rt_find(t->offset);
+            const Rt *src = cube ? NULL : rt_find_tex(t);
             int full = 0;
             uint32_t sub = cube ? 0 : rt_tex(t, &full);
             if (sub && !full) {
@@ -934,7 +952,12 @@ static void frame_of(GpFrame *f)
 /* The executor's GPU-vs-CPU check: everything recorded so far, drawn now. */
 static void rec_sync(void)
 {
+    static uint32_t last_frame = ~0u;
     GpFrame f;
+    if (last_frame != s_frame) {             /* first sync of a checked frame */
+        last_frame = s_frame;
+        gp_d3d11_writeback_swizzled();
+    }
     frame_of(&f);
     gp_d3d11_sync(&f);
     if (s_probe.n) {

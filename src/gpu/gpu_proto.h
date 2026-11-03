@@ -159,6 +159,7 @@ int  gp_d3d11_ready(void);
  * level 0 only (as the CPU reference does), and write every target it drew
  * back to guest memory, swizzled targets swizzled. */
 void gp_d3d11_sync(const GpFrame *f);
+void gp_d3d11_writeback_swizzled(void);
 /* Run vertex shader `vs` on n program input vertices with the given XF and
  * VS constants and return what it outputs, through stream output: per vertex
  * GP_PROBE_FLOATS floats -- SV_Position, COLOR0, COLOR1, TEXCOORD0-3 (4

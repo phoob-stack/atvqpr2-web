@@ -425,7 +425,9 @@ static ID3D11SamplerState *sampler(uint32_t key, uint32_t border)
     int b = (key & GP_SMP_BORDER) != 0;
     if (s || s_nsamp >= MAX_STATE) return s;
     memset(&sd, 0, sizeof sd);
-    if (s_checking || !(key & GP_SMP_FILTER)) {
+    static int no_mips = -1;
+    if (no_mips < 0) no_mips = getenv("RECOMP_GPU_NO_MIPS") != NULL;   /* A/B: level 0 only */
+    if (s_checking || no_mips || !(key & GP_SMP_FILTER)) {
         sd.Filter = (key & GP_SMP_LINEAR) ? D3D11_FILTER_MIN_MAG_MIP_LINEAR : D3D11_FILTER_MIN_MAG_MIP_POINT;
         sd.MaxLOD = 0.0f;             /* level 0 only, as the CPU rasteriser */
     } else {
@@ -901,6 +903,19 @@ void gp_d3d11_sync(const GpFrame *f)
     s_checking = 1;
     consume_draws(f, 1);
     s_checking = 0;
+}
+
+/* Every swizzled target into guest memory, once at the start of a checked
+ * frame: textures the CPU reference samples from targets drawn in earlier
+ * frames (shadow maps, impostors) are otherwise whatever memory last held. */
+void gp_d3d11_writeback_swizzled(void)
+{
+    int j;
+    if (!s_dev) return;
+    for (j = 0; j < s_nrt_ids; j++) {
+        Res *r = res(s_rt_ids[j]);
+        if (r && r->kind == R_RT && r->swz) writeback_swz(r);
+    }
 }
 
 /* Stream output of a program's vertex shader (gpu_proto.h). The GS is made
