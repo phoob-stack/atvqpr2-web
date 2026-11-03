@@ -8,7 +8,8 @@
 //             &threads=0      single-threaded even when threads.js is there
 //             &dev=1|0        game files from the dev server's /data/ (1) or
 //                             never from it (0); see loader.js
-//             &forget=1       delete the imported game files first
+//             &forget=1       delete the imported game files first (saves stay)
+//             &saves=off      saves in memory only, starting empty (saves.js)
 //
 // Served by web/host/serve.mjs (127.0.0.1 only, COOP/COEP so that
 // SharedArrayBuffer and shared WebAssembly.Memory exist). The game files are
@@ -21,6 +22,7 @@ import { Input } from './input.js';
 import { requestDevice } from '../gpu/layout.js';
 import { IO_BYTES, IO_HOST_PTR } from './io.js';
 import { prepareGame, loaderState } from './loader.js';
+import { SaveStore, wireSavesUI } from './saves.js';
 
 // What run.ps1 sets for a native run, minus the Win32-only parts.
 export const DEFAULT_ENV = {
@@ -128,8 +130,9 @@ async function boot() {
       else if (m.type === 'error') { log(`[page] I/O worker: ${m.message}`, 'err'); reject(new Error(m.message)); }
       else if (m.type === 'log') log(m.text, m.fd === 2 ? 'err' : '');
       else if (m.type === 'stats') state.vfs = m.vfs;
+      else if (m.type === 'saves') saves.apply(m.ops);
     };
-    ioWorker.postMessage({ type: 'init', memory, io, traceWasi: q.get('trace') === '1',
+    ioWorker.postMessage({ type: 'init', memory, io, traceWasi: q.get('trace') === '1', saves: saves.mode,
       game: game.source === 'opfs' ? { source: 'opfs', dir: game.dir } : { source: 'server', base: game.base } });
   });
   const host = { io };
@@ -277,8 +280,13 @@ ${m.stack ?? ''}`, 'err'); };
   return { memory };
 }
 
+// Saves (saves.js): kept in OPFS, the "Saves" panel exports and imports them.
+const saves = new SaveStore({ log, mode: q.get('saves') === 'off' ? 'off' : 'opfs' });
+saves.lock().then((ok) => { if (!ok) log(`[saves] not kept by this tab: ${saves.frozen}`, 'err'); });
+wireSavesUI(saves);
+
 window.atv = {
-  state, log: logLines, loader: loaderState,
+  state, log: logLines, loader: loaderState, saves,
   stage: () => stageName(state.stage),
   snapshot: async () => {
     const png = await window.atv.presenter?.snapshot();

@@ -3,6 +3,11 @@
 //
 //   node web/tools/race.mjs [seconds=30] [--out dir] [--profile secs] [--warm secs=6]
 //        [--env K=V,...] [--wasm url] [--shots] [--keep-profiles] [--opfs] [--profile dir] [--port n]
+//        [--keep-saves]
+//
+// The route needs the no-save menus, so the page runs with ?saves=off (saves
+// in memory, starting empty) unless --keep-saves: with a kept --profile the
+// saves in OPFS would otherwise change the menus from run to run.
 //
 // --opfs: the dev server has no /data/; the game files are the ones imported
 // into OPFS (web/tools/import.mjs with the same --profile and --port).
@@ -53,6 +58,7 @@ await new Promise((r) => srv.stdout.once('data', r));
 const qs = new URLSearchParams();
 qs.set('env', env);
 if (wasm) qs.set('wasm', wasm);
+if (!argv.includes('--keep-saves')) qs.set('saves', 'off');
 const b = await launch(`http://127.0.0.1:${port}/host/index.html?${qs}`, { profile: opt('--profile') });
 const t0 = Date.now();
 const el = () => `${((Date.now() - t0) / 1000).toFixed(0).padStart(4)}s`;

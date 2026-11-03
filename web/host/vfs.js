@@ -12,7 +12,9 @@
 //            server. The cache is dropped when the manifest (names, sizes,
 //            mtimes) changes.
 //   /save  the save side (xbox_path_init's save dir): directories and sparse
-//          files in memory. ponytail: persist UDATA/TDATA to OPFS.
+//          files in memory. Its UDATA and TDATA (the game's saves) are kept in
+//          OPFS by saves.js, which watches memGen to see that something here
+//          changed.
 //
 // Names are matched case-insensitively, as on the Xbox and on Windows.
 // Nothing here is ever uploaded anywhere: reads go to the local dev server.
@@ -27,6 +29,9 @@ export const E = { ACCES: 2, BADF: 8, EXIST: 20, INVAL: 28, IO: 29, ISDIR: 31, N
   NOSYS: 52, NOTDIR: 54, NOTEMPTY: 55, NOTSUP: 58, ROFS: 69, SPIPE: 70 };
 
 let inoNext = 1;
+/** Bumped by every change to an in-memory file or directory (/save);
+ *  MemFile.gen is the value of its last change (saves.js SaveSync). */
+export const memGen = { gen: 0 };
 const nowNs = () => BigInt(Math.round(Date.now() * 1e6));
 
 export class Dir {
@@ -36,7 +41,7 @@ export class Dir {
     this.ino = inoNext++; this.mtime = nowNs();
   }
   get(name) { return this.children.get(name.toLowerCase()); }
-  add(node) { this.children.set(node.name.toLowerCase(), node); return node; }
+  add(node) { this.children.set(node.name.toLowerCase(), node); if (!this.readOnly) memGen.gen++; return node; }
   get size() { return 0; }
 }
 
@@ -66,14 +71,14 @@ export class MemFile {
       done += take;
     }
     this.size = Math.max(this.size, pos + src.length);
-    this.mtime = nowNs();
+    this.mtime = nowNs(); this.gen = ++memGen.gen;
     return src.length;
   }
   truncate(size) {
     for (const k of [...this.chunks.keys()]) if (k * MEM_CHUNK >= size) this.chunks.delete(k);
     const ci = Math.floor(size / MEM_CHUNK);
     if (size % MEM_CHUNK && this.chunks.has(ci)) this.chunks.get(ci).fill(0, size % MEM_CHUNK);
-    this.size = size; this.mtime = nowNs();
+    this.size = size; this.mtime = nowNs(); this.gen = ++memGen.gen;
   }
 }
 
@@ -287,5 +292,6 @@ export class Vfs {
     if (!wantDir && n.kind === 'dir') throw new FsError(E.ISDIR, name);
     if (wantDir && n.children.size) throw new FsError(E.NOTEMPTY, name);
     parent.children.delete(name.toLowerCase());
+    memGen.gen++;
   }
 }

@@ -3,7 +3,7 @@
 //   node web/tools/boot.mjs [seconds=60] [--env K=V,K=V] [--keys 20:13,25:90:3000] [--shots 30,60] [--out dir]
 //        [--anchor <status text>] [--pad 20:9,25:0:3000] [--until <log text>] [--movies]
 //        [--game <folder>] [--wasm <url>] [--args a,b] [--overlay <dir>] [--audio]
-//        [--opfs] [--profile <dir>] [--port <n>]
+//        [--opfs] [--profile <dir>] [--port <n>] [--saves off]
 //
 // The game files come from the dev server's /data/ (--game, default
 // game/atv2). --opfs starts the server without /data/, so the page boots from
@@ -59,6 +59,7 @@ const qs = new URLSearchParams();
 if (env) qs.set('env', env);
 if (wasm) qs.set('wasm', wasm);
 if (args) qs.set('args', args);
+if (opt('--saves')) qs.set('saves', opt('--saves'));   // off: saves in memory only (saves.js)
 const url = `http://127.0.0.1:${port}/host/index.html${qs.size ? `?${qs}` : ''}`;
 const b = await launch(url, { profile: opt('--profile') });
 const t0 = Date.now();
