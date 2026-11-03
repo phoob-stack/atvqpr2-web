@@ -3,7 +3,7 @@
 //
 //   node web/tools/race.mjs [seconds=30] [--out dir] [--profile secs] [--warm secs=6]
 //        [--env K=V,...] [--wasm url] [--shots] [--keep-profiles] [--opfs] [--profile dir] [--port n]
-//        [--keep-saves]
+//        [--keep-saves] [--qs 'res=2&msaa=4'] [--window 1920,1440]
 //
 // The route needs the no-save menus, so the page runs with ?saves=off (saves
 // in memory, starting empty) unless --keep-saves: with a kept --profile the
@@ -61,7 +61,7 @@ if (wasm) qs.set('wasm', wasm);
 if (!argv.includes('--keep-saves')) qs.set('saves', 'off');
 // --qs 'res=2&msaa=4&widescreen=1': more page parameters (main.js), e.g. the display options.
 for (const [k, v] of new URLSearchParams(opt('--qs', ''))) qs.set(k, v);
-const b = await launch(`http://127.0.0.1:${port}/host/index.html?${qs}`, { profile: opt('--profile') });
+const b = await launch(`http://127.0.0.1:${port}/host/index.html?${qs}`, { profile: opt('--profile'), windowSize: opt('--window') });
 const t0 = Date.now();
 const el = () => `${((Date.now() - t0) / 1000).toFixed(0).padStart(4)}s`;
 const status = () => b.eval(`(() => { const h = atv.presenter?.i32, s = atv.presenter?.stats ?? {};

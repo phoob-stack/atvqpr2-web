@@ -148,7 +148,9 @@ export class Presenter {
       if (r.va === va || ((r.va ^ va) & 0x03ffffff) === 0) { if (!best || !r.swz) best = { id, r }; }
     }
     if (!best) { this.stats.shown = `no RT for ${va.toString(16)}`; return null; }
-    this.stats.shown = `rt ${best.id} ${best.r.w}x${best.r.h} @${va.toString(16)}`;
+    this.stats.shown = `rt ${best.id} ${best.r.w}x${best.r.h}` +
+      (best.r.sw && (best.r.sw !== best.r.w || best.r.sh !== best.r.h) ? ` drawn ${best.r.sw}x${best.r.sh}` : '') +
+      ` @${va.toString(16)}`;
     return best.r.texture;
   }
 

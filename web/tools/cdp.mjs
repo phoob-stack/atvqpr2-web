@@ -61,7 +61,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // the page's feature messages).
 // waitReady: false returns as soon as the page target is there (to set up
 // injected scripts and then Page.navigate).
-export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500), headless = true, profile, extraArgs = [], waitReady = true } = {}) {
+// windowSize: 'W,H' headless window size (window-sized resolution tests).
+export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500), headless = true, profile, extraArgs = [], waitReady = true, windowSize } = {}) {
   const exe = findBrowser();
   const temp = !profile;
   if (temp) mkdirSync(TEMP_PROFILES, { recursive: true });
@@ -69,6 +70,7 @@ export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500
   const args = [
     ...extraArgs,
     headless ? '--headless=new' : '',
+    windowSize ? `--window-size=${windowSize}` : '',   // e.g. '1920,1440' (window-sized resolution tests)
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     '--no-first-run', '--no-default-browser-check', '--disable-extensions',
