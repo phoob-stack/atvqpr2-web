@@ -586,10 +586,14 @@ static int fast_decode(const Nv2aTexture *t, uint32_t *out)
 
 static int decode_level(const Nv2aTexture *lt, uint32_t *out)
 {
-    static int check = -1;
-    if (check < 0) check = getenv("RECOMP_GPU_DECODE_CHECK") != NULL;
+    static int check = -1, fast = -1;
+    if (check < 0) {
+        const char *e = getenv("RECOMP_GPU_FAST_DECODE");
+        check = getenv("RECOMP_GPU_DECODE_CHECK") != NULL;
+        fast = !(e && *e == '0');                /* =0: the reference decoder only (A/B) */
+    }
     /* While the executor checks a frame, decode as its CPU pass does. */
-    if (nv2a_check_active() || !fast_decode(lt, out))
+    if (!fast || nv2a_check_active() || !fast_decode(lt, out))
         return nv2a_backend_decode_texture(lt, out);
     if (check) {
         static uint32_t *ref;
@@ -638,10 +642,27 @@ static int decode_level(const Nv2aTexture *lt, uint32_t *out)
 #define VER_PROBE 16
 #define VER_IDLE  60
 #define VER_OLD_BYTES (64ull << 20)
-typedef struct { uint64_t key; uint32_t id, used, bytes, cur; } Ver;   /* cur: entries showing it */
+typedef struct { uint64_t key, full; uint32_t id, used, bytes, cur; } Ver;   /* cur: entries showing it */
 static Ver s_ver[VER_HASH];
 static uint64_t s_ver_old_bytes;             /* bytes of versions with cur == 0 */
 static uint32_t s_ver_hits, s_ver_made, s_ver_freed;
+static int s_tex_reuse = -1;
+
+/* RECOMP_GPU_REUSE_CHECK=1: every version also gets a hash of all its bytes
+ * (the content hash samples large textures), and every rebind compares it
+ * with the bytes in memory now. */
+static int s_reuse_check = -1;
+static uint32_t s_rc_ok, s_rc_bad;
+
+static uint64_t full_hash(const Nv2aTexture *t, uint32_t faces, uint32_t stride, uint32_t fbytes)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint64_t h = FNV0;
+    uint32_t f;
+    for (f = 0; f < faces; f++) h = fnv(mem + t->offset + f * stride, fbytes, h);
+    if (t->color == 0x0B && t->palette) h = fnv(mem + t->palette, 1024, h);
+    return h;
+}
 
 static void ver_drop(Ver *v)
 {
@@ -766,12 +787,25 @@ static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
      * in h, and riders share one P8 texture with a palette each. */
     kk[5] = levels;
     vkey = fnv(&h, sizeof h, fnv(kk, sizeof kk, FNV0) ^ (uint64_t)cube) | 1;
-    if ((v = ver_find(vkey))) {                  /* contents seen before: bind them again */
+    if (s_tex_reuse < 0) {                       /* RECOMP_GPU_TEX_REUSE=0: never (A/B) */
+        const char *r = getenv("RECOMP_GPU_TEX_REUSE");
+        s_tex_reuse = !(r && *r == '0');
+    }
+    if (s_tex_reuse && (v = ver_find(vkey))) {   /* contents seen before: bind them again */
         ver_hold(v);
         v->used = s_frame;
         e->id = v->id;
         e->ver = (uint32_t)(v - s_ver);
         s_ver_hits++;
+        if (s_reuse_check > 0) {
+            if (full_hash(t, faces, stride, fbytes) == v->full) s_rc_ok++;
+            else if (s_rc_bad++ < 20)
+                fprintf(stderr, "  [GPUREC] reuse check: 0x%08X %ux%u fmt %02X rebound to id %u but its bytes"
+                        " differ from that version's\n", t->offset, t->width, t->height, t->color, v->id);
+            if (((s_rc_ok + s_rc_bad) & 255) == 0)
+                fprintf(stderr, "  [GPUREC] reuse check: %u rebinds compared in full, %u differ\n",
+                        s_rc_ok + s_rc_bad, s_rc_bad);
+        }
         if (s_timing > 0) gp_time_add(GP_T_REC_TEX, gp_now_ms() - t_start, 0);
         return e->id;
     }
@@ -821,6 +855,8 @@ static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
         }
     }
     v = ver_add(vkey, id, gpu_bytes);
+    if (s_reuse_check < 0) s_reuse_check = getenv("RECOMP_GPU_REUSE_CHECK") != NULL;
+    if (s_reuse_check > 0) v->full = full_hash(t, faces, stride, fbytes);
     e->id = id;
     e->ver = (uint32_t)(v - s_ver);
     if (s_timing > 0) gp_time_add(GP_T_REC_TEX, gp_now_ms() - t_start, 1);

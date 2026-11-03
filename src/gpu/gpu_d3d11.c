@@ -206,6 +206,7 @@ typedef struct ShJob {
     ID3DBlob *code;
     char *err;
     LONG done;
+    int from_disk;
     struct ShJob *next;
 } ShJob;
 static SRWLOCK s_sh_lock = SRWLOCK_INIT;
@@ -316,7 +317,8 @@ static void CALLBACK sh_job_run(PTP_CALLBACK_INSTANCE inst, void *arg)
 {
     ShJob *j = (ShJob *)arg;
     (void)inst;
-    if (!(j->code = sh_disk_load(j->key, j->key2, j->len))) {
+    j->from_disk = (j->code = sh_disk_load(j->key, j->key2, j->len)) != NULL;
+    if (!j->code) {
         j->code = sh_compile(j->src, j->len, j->entry, j->target, &j->err);
         if (j->code) sh_disk_store(j->key, j->key2, j->len, j->code);
     }
@@ -406,7 +408,8 @@ static ID3DBlob *compile_v(const char *src, size_t len, const char *entry, const
     if ((j = sh_take_job(k1, k2, len)) != NULL) {
         code = j->code;
         err = j->err;
-        if (code || err) s_sh_st.early++;
+        if (j->from_disk) s_sh_st.disk++;
+        else if (code || err) s_sh_st.early++;
         free(j->src);
         free(j);
         if (!code && !err) goto sync;             /* never ran (no thread pool) */
