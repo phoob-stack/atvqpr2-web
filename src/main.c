@@ -448,7 +448,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * thread, disabled SOF after the enable, and the new endpoint was never
      * serviced: the pad's interrupt pipe never opened (5 boots in 12 with no
      * input), and the same overlap is how a cancel walked off a TD list
-     * (the sub_001ABCF2 crash). With the gate: 12 of 12. */
+     * (the sub_001ABCF2 crash). With the gate: 39 of 39 boots. */
     if (!getenv("RECOMP_DISPATCH_GATE")) {
 #ifdef _WIN32
         _putenv_s("RECOMP_DISPATCH_GATE", "1");
