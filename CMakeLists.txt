@@ -83,13 +83,16 @@ add_executable(${PROJECT_NAME} WIN32
 # it needs a webgpu.h implementation (wgpu-native or Dawn) that is not in the
 # tree. See WEBGPU.md for the exact download.
 option(ATV2_WGPU "Build the WebGPU back end (src/gpu/gpu_wgpu.c) against wgpu-native" OFF)
-set(WGPU_NATIVE_DIR "" CACHE PATH "wgpu-native release folder (include/webgpu/webgpu.h, lib/wgpu_native.dll.lib)")
+set(WGPU_NATIVE_DIR "" CACHE PATH "wgpu-native release folder (include/webgpu/webgpu.h, lib/wgpu_native.dll.lib), e.g. third_party/wgpu-native/v29.0.1.1")
 if(ATV2_WGPU)
     target_sources(${PROJECT_NAME} PRIVATE src/gpu/gpu_wgpu.c)
     target_compile_definitions(${PROJECT_NAME} PRIVATE ATV2_WGPU=1)
     target_include_directories(${PROJECT_NAME} PRIVATE ${WGPU_NATIVE_DIR}/include)
-    find_library(WGPU_NATIVE_LIB NAMES wgpu_native.dll.lib wgpu_native PATHS ${WGPU_NATIVE_DIR}/lib REQUIRED)
+    set(WGPU_NATIVE_LIB ${WGPU_NATIVE_DIR}/lib/wgpu_native.dll.lib)   # import library of the DLL
     target_link_libraries(${PROJECT_NAME} PRIVATE ${WGPU_NATIVE_LIB})
+    # The exe loads wgpu_native.dll from its own folder.
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${WGPU_NATIVE_DIR}/lib/wgpu_native.dll $<TARGET_FILE_DIR:${PROJECT_NAME}>)
 endif()
 
 # Link against the xboxrecomp umbrella target (all 6 runtime libraries)
