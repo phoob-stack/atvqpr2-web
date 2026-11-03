@@ -20,7 +20,8 @@ mkdir -p "$OUT/gen" "$OUT/rt" "$OUT/fuzz"
 
 CFLAGS="--target=wasm32-wasip1-threads -pthread -msimd128 -mbulk-memory -mnontrapping-fptoint -mtail-call
   -O2 -fno-delete-null-pointer-checks -mllvm -wasm-enable-sjlj
-  -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -Wno-everything"
+  -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -Wno-everything
+  -include $GAME/src/web/wasm_compat.h"
 INC="-I$GEN -I$RT/include -I$RT/src -I$RT/src/kernel -I$RT/src/d3d -I$RT/src/platform -I$RT/src/usb
   -I$RT/src/nv2a -I$RT/src/apu -I$RT/src/audio -I$RT/src/video -I$RT/src/input -I$GAME/src -I$GAME/src/gpu"
 
@@ -31,12 +32,18 @@ compile() {  # dir src -> prints OK/FAIL line
 }
 
 echo "== generated shards"
+# SKIP_GEN=1 reuses the shard objects of the last run (they take most of the time).
+if [ "${SKIP_GEN:-0}" != 1 ]; then
 n=0; for f in "$GEN"/*.c; do compile "$OUT/gen" "$f" & n=$((n+1)); [ $((n % 8)) = 0 ] && wait; done; wait
+fi
 echo "== runtime and game sources"
 # Skipped on purpose: the D3D8->D3D11 HLE (d3d8_*), SDL and Win32-only input/video
-# back ends, and the D3D11 GPU consumer -- the web build replaces them.
-for f in "$RT"/src/{apu,audio,kernel,nv2a,platform,usb,video,input}/*.c "$GAME"/src/*.c \
-         "$GAME"/src/control/*.c "$GAME"/src/gpu/gpu_rec.c "$GAME"/src/gpu/gpu_shadergen*.c \
+# back ends, and the D3D11 GPU consumer -- the web build replaces them. main.c and
+# the control channel (winsock) are native only: src/web is the browser's main,
+# libc shims and the audio/input/present back ends (web/host is the page).
+rm -f "$OUT"/rt/main.o "$OUT"/rt/control*.o
+for f in "$RT"/src/{apu,audio,kernel,nv2a,platform,usb,video,input}/*.c "$GAME"/src/recomp_manual.c \
+         "$GAME"/src/web/*.c "$GAME"/src/gpu/gpu_rec.c "$GAME"/src/gpu/gpu_shadergen*.c \
          "$GAME"/src/gpu/gpu_wgsl_tap.c; do
   case "$(basename "$f")" in *sdl*|d3d8_*|mkb_input.c|xinput_device.c) continue;; esac
   compile "$OUT/rt" "$f"
@@ -51,6 +58,18 @@ grep "undefined symbol: " "$OUT/link.err" | sed 's/.*undefined symbol: //' | sor
 echo "$(wc -l < "$OUT/undefined.txt") undefined symbols (build-wasm/undefined.txt):"
 tr '\n' ' ' < "$OUT/undefined.txt"; echo
 [ -f "$OUT/game.wasm" ] && ls -la "$OUT/game.wasm"
+
+echo "== game module for the page (build-wasm/atv2.wasm, loaded by web/host)"
+# The runtime goes in through an archive, so only what the game reaches is
+# linked (nv2a_pb_replay & co. drop out, as in the native static libraries).
+# --allow-undefined is bring-up only: whatever is still missing becomes an
+# "env" import, and web/host stubs each one with a function that logs its name
+# when called -- so a run shows exactly which missing piece it reached first.
+# Memory and thread flags are placeholders for wasm-mem / wasm-threads to set.
+rm -f "$OUT/rt.a"; "$SDK/bin/llvm-ar" rcs "$OUT/rt.a" "$OUT"/rt/*.o
+$CC --target=wasm32-wasip1-threads -pthread "$OUT"/gen/*.o "$OUT/rt.a" -o "$OUT/atv2.wasm"   -Wl,--import-memory,--export-memory,--shared-memory,--max-memory=4294967296   -Wl,-z,stack-size=8388608 -Wl,--allow-undefined -Wl,--error-limit=0   -mllvm -wasm-enable-sjlj -lsetjmp -lwasi-emulated-mman -lwasi-emulated-signal -lwasi-emulated-process-clocks   2> "$OUT/link-web.err"
+grep -v "^$" "$OUT/link-web.err" | head -20
+[ -f "$OUT/atv2.wasm" ] && ls -la "$OUT/atv2.wasm"
 
 echo "== WGSL generator in wasm vs native"
 $CC --target=wasm32-wasip1 -O2 -Wno-everything -I"$GAME/src/gpu" "$GAME/web/tools/wgsl_fuzz.c" \

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATV 2 (browser)</title>
+<!--
+  The browser build's host page. Serve it with web/host/serve.mjs, which
+  binds 127.0.0.1 only and reads the game files from your own game folder;
+  nothing here is meant to be hosted anywhere else.
+  Keys: Enter = START, Z = A, X = B, C = X, V = Y, arrows = d-pad,
+  W/A/S/D = left stick, Backspace = BACK. A gamepad works too.
+-->
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; color: #ccc; font: 12px ui-monospace, Consolas, monospace; }
+  body { display: flex; flex-direction: column; }
+  #screen { flex: 1 1 auto; width: 100%; min-height: 0; display: block; background: #000; }
+  #status { padding: 4px 8px; background: #111; border-top: 1px solid #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #log { height: 22vh; overflow-y: auto; padding: 4px 8px; background: #0a0a0a; border-top: 1px solid #333; white-space: pre-wrap; }
+  #log .err { color: #e8b86b; }
+  body.nolog #log { display: none; }
+</style>
+</head>
+<body>
+<canvas id="screen" width="1280" height="960" tabindex="0"></canvas>
+<div id="status">loading…</div>
+<div id="log"></div>
+<script type="module" src="./main.js"></script>
+<script>
+  // Keep the canvas backing store at the element's size (letterboxing is in present.js).
+  const cv = document.getElementById('screen');
+  new ResizeObserver(() => { cv.width = Math.max(1, Math.round(cv.clientWidth * devicePixelRatio));
+    cv.height = Math.max(1, Math.round(cv.clientHeight * devicePixelRatio)); }).observe(cv);
+  addEventListener('keydown', (e) => { if (e.code === 'F2') document.body.classList.toggle('nolog'); });
+</script>
+</body>
+</html>
