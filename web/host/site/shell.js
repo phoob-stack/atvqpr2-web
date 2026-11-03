@@ -5,7 +5,7 @@
 // in the address it shows the start page and loads nothing of the game.
 // Play / Free Ride switch the page to the game in place (the click is the
 // user gesture that allows fullscreen and sound), put ?play=1 (or
-// ?play=freeride) in the address so Retry and a reload start the same way,
+// ?play=freeride, ?play=freeride-pick) in the address so Retry and a reload start the same way,
 // and import main.js, which boots as before. Any of main.js's own parameters
 // (?env=, ?wasm=, ?dev=, ?forget= ...: what web/tools/*.mjs and the
 // launchers use) also boots straight away, so the tools are unchanged.
@@ -52,7 +52,7 @@ export async function enterFullscreen() {
   } catch (e) { siteLog(`fullscreen: ${e.message}`); return false; }
 }
 
-/** Start the game in this page. kind: 'play' | 'freeride'. Call from a click for fullscreen. */
+/** Start the game in this page. kind: 'play' | 'freeride' | 'freeride-pick'. Call from a click for fullscreen. */
 async function startGame(kind, { fromClick = false } = {}) {
   if (site.kind) return;
   site.kind = kind;
@@ -60,13 +60,16 @@ async function startGame(kind, { fromClick = false } = {}) {
   if (fromClick && settings.fullscreen) enterFullscreen();       // must run inside the click
   const useSettings = q.get('settings') !== 'off';
   const env = useSettings ? settingsEnv(settings) : {};
+  // Free Ride (src/freeride.c): 1 = Freestyle, Unlimited Time, Stadium: Main Event; pick = the player picks rider and ATV.
+  // Either one also skips the movies.
   if (kind === 'freeride') env.RECOMP_FREERIDE = '1';
+  if (kind === 'freeride-pick') env.RECOMP_FREERIDE = 'pick';
   site.env = env;
   // The display options are page parameters main.js reads from the address when it loads. A ?play= start
   // (Play, Free Ride, Retry) takes them from the settings; a start by the tools' parameters keeps its own.
   if (fromClick || q.has('play')) {
     const u = new URL(location.href);
-    if (fromClick) { u.search = ''; u.searchParams.set('play', kind === 'freeride' ? 'freeride' : '1'); }
+    if (fromClick) { u.search = ''; u.searchParams.set('play', kind === 'play' ? '1' : kind); }
     for (const [k, v] of Object.entries(useSettings ? settingsQuery(settings) : {})) {
       if (v === null) u.searchParams.delete(k); else u.searchParams.set(k, v);
     }
@@ -98,7 +101,7 @@ async function showHome() {
   await home.init({ startGame, enterFullscreen });
 }
 
-const kindFromQuery = () => (q.get('play') === 'freeride' ? 'freeride' : 'play');
+const kindFromQuery = () => (['freeride', 'freeride-pick'].includes(q.get('play')) ? q.get('play') : 'play');
 if (BOOT_PARAMS.some((k) => q.has(k))) startGame(kindFromQuery());
 else showHome();
 // Back from the game to the start page (history): the game cannot be stopped in place, so reload.

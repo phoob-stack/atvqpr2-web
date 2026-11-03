@@ -66,6 +66,8 @@ button.play:active:not(:disabled) { transform: translateY(3px); box-shadow: 0 3p
 button.freeride { padding: 13px; border-radius: var(--radius); cursor: pointer; font: 800 20px var(--display); font-style: italic;
   text-transform: uppercase; letter-spacing: 0.08em; color: var(--sand); background: transparent; border: 2px solid var(--sand); }
 button.freeride:hover:not(:disabled) { background: rgba(233, 194, 126, 0.1); }
+.fr-pick { display: flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; margin-top: -2px; }
+.fr-pick input { width: 16px; height: 16px; accent-color: var(--sand); }
 .launch button:disabled { opacity: 0.4; cursor: default; filter: grayscale(0.6); }
 .game-state { padding: 8px 12px; border-radius: 8px; background: var(--panel); border-left: 4px solid var(--muted); font-size: 14px; }
 .game-state.ok { border-left-color: var(--ok); }

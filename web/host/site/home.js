@@ -3,7 +3,7 @@
 // first time), and the buttons that start the game.
 import { importedGame, prepareGame } from '../loader.js';
 import { siteLog, downloadLog } from './logs.js';
-import { loadSettings, CHANGED_EVENT } from './settings.js';
+import { loadSettings, setSetting, CHANGED_EVENT } from './settings.js';
 import { h } from './settings-ui.js';
 
 const $ = (id) => document.getElementById(id);
@@ -18,7 +18,11 @@ export async function init(c) {
   addEventListener('hashchange', route);
   route();
   $('btn-play').onclick = () => ctx.startGame('play', { fromClick: true });
-  $('btn-freeride').onclick = () => ctx.startGame('freeride', { fromClick: true });
+  $('btn-freeride').onclick = () => ctx.startGame(loadSettings().freeride_pick ? 'freeride-pick' : 'freeride', { fromClick: true });
+  const pick = $('fr-pick');
+  pick.checked = loadSettings().freeride_pick;
+  pick.onchange = () => setSetting('freeride_pick', pick.checked);
+  addEventListener(CHANGED_EVENT, () => { pick.checked = loadSettings().freeride_pick; });
   $('btn-homelog').onclick = () => { $('home-note').textContent = `Saved ${downloadLog()} to your downloads.`; };
   addEventListener(CHANGED_EVENT, summary);
   summary();

@@ -49,6 +49,8 @@ export const SETTINGS = [
   { key: 'skip_movies', section: 'game', label: 'Skip the movies', type: 'bool', def: false, next: true,
     help: 'Straight to PRESS START; in-game movies are skipped too (RECOMP_SKIP_MOVIES). On anyway when the movies were not imported.',
     env: (v) => (v ? { RECOMP_SKIP_MOVIES: '1' } : {}) },
+  { key: 'freeride_pick', section: 'game', label: 'Free Ride: choose the rider and ATV', type: 'bool', def: false,
+    help: 'Free Ride stops at RIDER SELECT and ATV SELECT instead of taking the defaults (RECOMP_FREERIDE=pick).' },
   { key: 'volume', section: 'audio', label: 'Volume', type: 'int', min: 0, max: 100, def: 100, page: true,
     help: 'The game\'s sound, 0-100.' },
   { key: 'show_status', section: 'page', label: 'Status bar and log under the game', type: 'bool', def: false, page: true,

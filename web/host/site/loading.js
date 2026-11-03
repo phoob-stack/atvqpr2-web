@@ -25,7 +25,7 @@ function phaseText(atv) {
 export function watch({ kind }) {
   const card = $('loading');
   const title = $('loading-title'), msg = $('loading-msg'), time = $('loading-time');
-  title.textContent = kind === 'freeride' ? 'Free Ride' : 'ATV Quad Power Racing 2';
+  title.textContent = kind === 'freeride' ? 'Free Ride' : kind === 'freeride-pick' ? 'Free Ride: choose your rider' : 'ATV Quad Power Racing 2';
   card.hidden = false;
   $('ld-retry').onclick = () => location.reload();
   $('ld-reload').onclick = () => { location.href = location.pathname; };

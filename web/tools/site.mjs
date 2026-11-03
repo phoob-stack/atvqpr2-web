@@ -240,11 +240,31 @@ try {
     await click('#mn-quit'); await sleep(100); await click('#mn-quit');
     check(await until(`document.body.classList.contains('mode-home') && !location.search`, 10), 'Quit: back on the start page');
   }
-  // Free Ride: the env gets RECOMP_FREERIDE=1 (the address is what the button pushes).
+  // Free Ride: the toggle on the Play tab picks RECOMP_FREERIDE=1 or =pick (src/freeride.c walks the menus).
+  await b.eval(`localStorage.removeItem('atv2.settings.v1')`);
+  await b.send('Page.navigate', { url: `${base}/host/index.html` });
+  await until(`document.body.classList.contains('mode-home') && !document.getElementById('btn-freeride').disabled`, 20);
+  await click('#fr-pick');
+  check(await b.eval(`JSON.parse(localStorage.getItem('atv2.settings.v1') ?? '{}').values?.freeride_pick === true`), 'Free Ride toggle: "choose my rider and ATV" stored');
+  await click('#btn-freeride');
+  check(await until(`location.search.includes('play=freeride-pick') && (window.atv?.log ?? []).some((l) => l.startsWith('[page] env:') && l.includes('RECOMP_FREERIDE=pick'))`, 30),
+    'Free Ride (pick): RECOMP_FREERIDE=pick in the env');
+  check(await until(`atv.log.some((l) => l.includes('[FREERIDE] on:'))`, 60), 'Free Ride (pick): the runtime took it: ' +
+    await b.eval(`atv.log.find((l) => l.includes('[FREERIDE] on:')) ?? ''`));
   await b.eval(`localStorage.removeItem('atv2.settings.v1')`);
   await b.send('Page.navigate', { url: `${base}/host/index.html?play=freeride` });
   check(await until(`(window.atv?.log ?? []).some((l) => l.startsWith('[page] env:') && l.includes('RECOMP_FREERIDE=1'))`, 30), 'Free Ride: RECOMP_FREERIDE=1 in the env');
-  check(await b.eval(`document.getElementById('loading-title').textContent === 'Free Ride'`), 'Free Ride: loading card title');
+  check(await until(`document.getElementById('loading-title').textContent === 'Free Ride'`, 5), 'Free Ride: loading card title: ' + await b.eval(`location.search + ' ' + document.getElementById('loading-title').textContent`));
+  if (!argv.includes('--skip-game')) {
+    const riding = await until(`atv.log.some((l) => l.includes('[FREERIDE] riding'))`, 150);
+    check(riding, 'Free Ride: riding: ' + await b.eval(`atv.log.filter((l) => l.startsWith('[FREERIDE]')).slice(-1)[0] ?? ''`));
+    if (riding) {
+      await b.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', code: 'KeyZ', key: 'z', windowsVirtualKeyCode: 90 });
+      await sleep(4000);
+      await shot('game-freeride.png');
+      await b.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'KeyZ', key: 'z', windowsVirtualKeyCode: 90 });
+    }
+  }
   // A start that fails: the card says so and offers Retry / Reload / Download log.
   await b.send('Page.navigate', { url: `${base}/host/index.html?play=1&wasm=no-such-module.wasm` });
   check(await until(`document.getElementById('loading').classList.contains('failed')`, 30), 'failed start: ' +
