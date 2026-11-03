@@ -51,7 +51,12 @@ const ADDR = { 1: 'repeat', 2: 'mirror-repeat' };
 function rectOf(d, rt) {
   const x0 = d.rect[0] & 0xFFFF, y0 = d.rect[0] >>> 16;
   const x1 = Math.min(d.rect[1] & 0xFFFF, rt.w), y1 = Math.min(d.rect[1] >>> 16, rt.h);
-  if (!d.rect[1] || (x0 <= 0 && y0 <= 0 && x1 >= rt.w && y1 >= rt.h)) return { x: 0, y: 0, w: rt.w, h: rt.h, full: true };
+  if (!d.rect[1] || (x0 <= 0 && y0 <= 0 && x1 >= rt.w && y1 >= rt.h)) return { x: 0, y: 0, w: rt.sw ?? rt.w, h: rt.sh ?? rt.h, full: true };
+  if (rt.sw !== undefined) {
+    // Display options: the target is drawn at sw x sh; both edges scale.
+    const X = (v) => Math.floor(v * rt.sw / rt.w + 0.5), Y = (v) => Math.floor(v * rt.sh / rt.h + 0.5);
+    return { x: X(Math.min(x0, x1)), y: Y(Math.min(y0, y1)), w: Math.max(0, X(x1) - X(x0)), h: Math.max(0, Y(y1) - Y(y0)), full: false };
+  }
   return { x: Math.min(x0, x1), y: Math.min(y0, y1), w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0), full: false };
 }
 
@@ -550,6 +555,7 @@ export class GpEncoder {
         vertex: { module: this.clr.module, entryPoint: 'vs' },
         fragment: { module: this.clr.module, entryPoint: 'fs', targets: [{ format: 'bgra8unorm', writeMask }] },
         primitive: { topology: 'triangle-list', cullMode: 'none' },
+        multisample: { count: this.msaa },
         depthStencil: hasDs ? { format: this.dsFormat, depthWriteEnabled: dw, depthCompare: 'always',
           stencilFront: face, stencilBack: face, stencilReadMask: 0xFF, stencilWriteMask: sten ? 0xFF : 0 } : undefined });
       this.pipes.set(key, pipe);

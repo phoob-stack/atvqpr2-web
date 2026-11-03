@@ -794,7 +794,12 @@ static int draw_rect(const GpDraw *d, const Res *rt, D3D11_RECT *r)
     if (!d->rect[1] || (r->left <= 0 && r->top <= 0 && r->right >= (LONG)rt->w
                         && r->bottom >= (LONG)rt->h)) {
         r->left = r->top = 0; r->right = (LONG)rt->w; r->bottom = (LONG)rt->h;
+        if (s_active) { r->right = (LONG)rt->sw; r->bottom = (LONG)rt->sh; }
         return 0;
+    }
+    if (s_active) {      /* target pixels at the display scale (both edges scaled) */
+        r->left = (LONG)gp_scaled((uint32_t)r->left, s_sx); r->right = (LONG)gp_scaled((uint32_t)r->right, s_sx);
+        r->top = (LONG)gp_scaled((uint32_t)r->top, s_sy); r->bottom = (LONG)gp_scaled((uint32_t)r->bottom, s_sy);
     }
     return 1;
 }
@@ -1117,6 +1122,11 @@ static void blit(ID3D11ShaderResourceView *src, uint32_t srcw, uint32_t srch,
     ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &dst, NULL);
     ID3D11DeviceContext_RSSetViewports(s_ctx, 1, &vp);
     ID3D11DeviceContext_RSSetState(s_ctx, s_rs);
+    {   /* s_rs scissors (GpDraw.rect): the blit's own rectangle */
+        D3D11_RECT sc;
+        sc.left = (LONG)x; sc.top = (LONG)y; sc.right = (LONG)(x + w + 0.5f); sc.bottom = (LONG)(y + h + 0.5f);
+        ID3D11DeviceContext_RSSetScissorRects(s_ctx, 1, &sc);
+    }
     ID3D11DeviceContext_OMSetBlendState(s_ctx, NULL, NULL, 0xFFFFFFFF);
     ID3D11DeviceContext_OMSetDepthStencilState(s_ctx, NULL, 0);
     ID3D11DeviceContext_IASetInputLayout(s_ctx, NULL);
