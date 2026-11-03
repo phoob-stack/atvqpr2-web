@@ -107,6 +107,17 @@ static ID3D11RasterizerState *s_rs;
 static ID3D11VertexShader *s_vs_pass, *s_vs_tv;
 static ID3D11InputLayout *s_lay_pass, *s_lay_tv;
 static ID3D11PixelShader *s_ps_tv;
+/* A clear of part of a target (GpDraw.rect smaller than the target: a split
+ * screen view's viewport): a triangle over the target, cut to the rect by the
+ * scissor, writing the clear colour and depth. */
+static ID3D11VertexShader *s_vs_clr;
+static ID3D11PixelShader *s_ps_clr;
+static const char s_clr_hlsl[] =
+"cbuffer C : register(b0) { float4 col; float z; float3 pad; };\n"
+"float4 vs(uint id : SV_VertexID) : SV_Position {\n"
+"  float2 p = float2((id << 1) & 2, id & 2);\n"
+"  return float4(p * float2(2, -2) + float2(-1, 1), z, 1); }\n"
+"float4 ps() : SV_Target { return col; }\n";
 
 static const char s_tv_hlsl[] =
 "cbuffer CB : register(b0) { float2 surf; float zscale; float textured;\n"
@@ -263,7 +274,18 @@ static int ensure_device(void)
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
     rd.DepthClipEnable = FALSE;
+    rd.ScissorEnable = TRUE;            /* GpDraw.rect: the window clip */
     ID3D11Device_CreateRasterizerState(s_dev, &rd, &s_rs);
+    if ((b = compile(s_clr_hlsl, sizeof s_clr_hlsl - 1, "vs", "vs_5_0", 3))) {
+        ID3D11Device_CreateVertexShader(s_dev, ID3D10Blob_GetBufferPointer(b),
+                                        ID3D10Blob_GetBufferSize(b), NULL, &s_vs_clr);
+        ID3D10Blob_Release(b);
+    }
+    if ((b = compile(s_clr_hlsl, sizeof s_clr_hlsl - 1, "ps", "ps_5_0", 2))) {
+        ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(b),
+                                       ID3D10Blob_GetBufferSize(b), NULL, &s_ps_clr);
+        ID3D10Blob_Release(b);
+    }
 
     s_failed = 0;
     fprintf(stderr, "  [GPU11] packet consumer ready\n");
@@ -686,11 +708,59 @@ static Res *bind_target(const GpDraw *d, int *have_ds)
 
 static struct { uint64_t draws, tris, skipped, clears, no_vs, no_ps, no_rt, no_buf; } s_st;
 
+/* GpDraw.rect as a D3D11 rect; 0 if it covers the whole target. */
+static int draw_rect(const GpDraw *d, const Res *rt, D3D11_RECT *r)
+{
+    r->left = (LONG)(d->rect[0] & 0xFFFF); r->top = (LONG)(d->rect[0] >> 16);
+    r->right = (LONG)(d->rect[1] & 0xFFFF); r->bottom = (LONG)(d->rect[1] >> 16);
+    if (!d->rect[1] || (r->left <= 0 && r->top <= 0 && r->right >= (LONG)rt->w
+                        && r->bottom >= (LONG)rt->h)) {
+        r->left = r->top = 0; r->right = (LONG)rt->w; r->bottom = (LONG)rt->h;
+        return 0;
+    }
+    return 1;
+}
+
 static void do_clear(const GpDraw *d)
 {
     int have_ds;
+    D3D11_RECT rc;
     Res *rt = bind_target(d, &have_ds);
     if (!rt) return;
+    if (draw_rect(d, rt, &rc) && s_vs_clr && s_ps_clr) {
+        /* Part of the target: draw it (ClearView would do colour only). */
+        struct { float col[4], z, pad[3]; } cc;
+        GpState st;
+        uint32_t a = d->clr_argb, f = d->clr_flags;
+        cc.col[0] = ((a >> 16) & 0xFF) / 255.0f; cc.col[1] = ((a >> 8) & 0xFF) / 255.0f;
+        cc.col[2] = (a & 0xFF) / 255.0f; cc.col[3] = (a >> 24) / 255.0f;
+        cc.z = d->zeta_format == 1 ? (float)(d->clr_zs & 0xFFFF) / 65535.0f
+                                   : (float)(d->clr_zs >> 8) / 16777215.0f;
+        cc.pad[0] = cc.pad[1] = cc.pad[2] = 0;
+        memset(&st, 0, sizeof st);
+        /* CLEAR_SURFACE: Z 0x1, stencil 0x2, R 0x10 G 0x20 B 0x40 A 0x80 */
+        st.color_mask = ((f & 0x10) ? 0x00010000u : 0) | ((f & 0x20) ? 0x100u : 0)
+                      | ((f & 0x40) ? 0x1u : 0) | ((f & 0x80) ? 0x01000000u : 0);
+        st.depth_test = (f & 3) != 0; st.depth_func = 0x207; st.depth_write = (f & 1) != 0;
+        st.stencil_en = (f & 2) != 0; st.stencil_func = 0x207;
+        st.stencil_fmask = st.stencil_wmask = 0xFF;
+        st.stencil_fail = st.stencil_zfail = 0x1E00; st.stencil_zpass = 0x1E01;
+        upload_cb(s_cb_xf, &cc, sizeof cc);
+        ID3D11DeviceContext_VSSetConstantBuffers(s_ctx, 0, 1, &s_cb_xf);
+        ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 0, 1, &s_cb_xf);
+        ID3D11DeviceContext_IASetInputLayout(s_ctx, NULL);
+        ID3D11DeviceContext_IASetPrimitiveTopology(s_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D11DeviceContext_VSSetShader(s_ctx, s_vs_clr, NULL, 0);
+        ID3D11DeviceContext_PSSetShader(s_ctx, s_ps_clr, NULL, 0);
+        ID3D11DeviceContext_RSSetState(s_ctx, s_rs);
+        ID3D11DeviceContext_RSSetScissorRects(s_ctx, 1, &rc);
+        ID3D11DeviceContext_OMSetBlendState(s_ctx, blend_state(&st), NULL, 0xFFFFFFFF);
+        ID3D11DeviceContext_OMSetDepthStencilState(s_ctx, depth_state(&st, have_ds),
+                                                   d->clr_zs & 0xFF);
+        ID3D11DeviceContext_Draw(s_ctx, 3, 0);
+        s_st.clears++;
+        return;
+    }
     if (d->clr_flags & 0xF0) {
         uint32_t a = d->clr_argb;
         float c[4] = { ((a >> 16) & 0xFF) / 255.0f, ((a >> 8) & 0xFF) / 255.0f,
@@ -786,6 +856,11 @@ static void do_draw(const GpFrame *f, const GpDraw *d)
     ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 4, srv);
     ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 4, smp);
     ID3D11DeviceContext_RSSetState(s_ctx, s_rs);
+    {
+        D3D11_RECT rc;
+        draw_rect(d, rt, &rc);
+        ID3D11DeviceContext_RSSetScissorRects(s_ctx, 1, &rc);
+    }
 
     bf[0] = ((d->st.blend_color >> 16) & 0xFF) / 255.0f;
     bf[1] = ((d->st.blend_color >> 8) & 0xFF) / 255.0f;

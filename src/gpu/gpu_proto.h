@@ -62,6 +62,11 @@ typedef struct {
     uint32_t xfc_off;            /* GpXfConsts or GpTvConsts */
     uint32_t psc_off;            /* GpPsConsts, or ~0 */
     uint32_t clr_flags, clr_argb, clr_zs;       /* GP_CLEAR */
+    /* Target pixels a draw may touch, or a clear covers: x0 | y0 << 16,
+     * x1 | y1 << 16, [x0, x1) x [y0, y1), within the target. The window clip
+     * (D3D's viewport) for a draw, the clear rect for a clear: split screen
+     * draws each player's view into its own part of one target. */
+    uint32_t rect[2];
 } GpDraw;
 
 #define GP_SMP_LINEAR   0x1
@@ -144,7 +149,7 @@ typedef struct {
 } GpFrame;
 
 _Static_assert(sizeof(GpState) == 17 * 4, "GpState layout");
-_Static_assert(sizeof(GpDraw) == 30 * 4 + sizeof(GpState), "GpDraw layout");
+_Static_assert(sizeof(GpDraw) == 32 * 4 + sizeof(GpState), "GpDraw layout");
 _Static_assert(sizeof(GpXfVertex) == 128, "GpXfVertex layout");
 _Static_assert(sizeof(GpTVertex) == 28, "GpTVertex layout");
 _Static_assert(sizeof(GpXfConsts) == 112, "GpXfConsts layout");
