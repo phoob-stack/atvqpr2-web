@@ -162,10 +162,10 @@ try {
   // (a fresh browser profile has no save: A creates one, A picks the rider,
   // A on OK names it)
   let mm = false;
-  for (let i = 0; i < 14 && !(mm = await mainMenu()); i++) {
+  for (let i = 0; i < 20 && !(mm = await mainMenu()); i++) {
     s = await screen();
     await press(0, s === 'title' ? 'start' : 'a');
-    for (let k = 0; k < 10 && !(mm = await mainMenu()); k++) await sleep(300);
+    for (let k = 0; k < 12 && !(mm = await mainMenu()); k++) await sleep(400);
     if (mm) break;
   }
   if (!mm) throw new Error(`lost at ${await screen()} before the main menu`);
