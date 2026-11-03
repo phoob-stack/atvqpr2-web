@@ -1,7 +1,7 @@
 // Boot the browser build in headless Edge and report how far it gets.
 //
 //   node web/tools/boot.mjs [seconds=60] [--env K=V,K=V] [--keys 20:13,25:90:3000] [--shots 30,60] [--out dir]
-//        [--anchor <status text>] [--pad 20:9,25:0:3000] [--until <log text>]
+//        [--anchor <status text>] [--pad 20:9,25:0:3000] [--until <log text>] [--movies]
 //        [--game <folder>] [--wasm <url>] [--args a,b] [--overlay <dir>] [--audio]
 //
 // Starts web/host/serve.mjs (127.0.0.1, a free port), opens the page, polls
@@ -20,7 +20,9 @@ const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const secs = Number(argv[0] && /^\d+$/.test(argv[0]) ? argv[0] : 60);
 const out = resolve(opt('--out', join(ROOT, 'build-wasm')));
-const env = opt('--env', '');
+// RECOMP_SKIP_MOVIES=1 by default: the title skips its FMVs and PRESS START is
+// up in ~15 s instead of ~75 s. --movies plays them (the page's own default).
+const env = [argv.includes('--movies') ? '' : 'RECOMP_SKIP_MOVIES=1', opt('--env', '')].filter(Boolean).join(',');
 // --keys sec:vk[:holdms],...   --shots sec,sec,...  (snapshots of the presented frame)
 const keys = (opt('--keys', '') || '').split(',').filter(Boolean).map((s) => s.split(':').map(Number));
 const shots = (opt('--shots', '') || '').split(',').filter(Boolean).map(Number);
