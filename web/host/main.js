@@ -3,7 +3,9 @@
 //
 //   index.html?env=K=V,K=V   extra/overriding environment variables
 //             &trace=1        log every WASI call
-//             &wasm=<url>     module (default /wasm/atv2.wasm)
+//             &wasm=<name|url> module (default atv2.wasm, from build-wasm/)
+//             &args=a,b       argv[1..]
+//             &threads=0      single-threaded even when threads.js is there
 //
 // Served by web/host/serve.mjs (127.0.0.1 only, COOP/COEP so that
 // SharedArrayBuffer and shared WebAssembly.Memory exist). The game files are
@@ -78,7 +80,9 @@ function memoryImportLimits(bytes) {
 
 async function boot() {
   if (!crossOriginIsolated) throw new Error('not cross-origin isolated: serve with web/host/serve.mjs (COOP/COEP)');
-  const wasmUrl = q.get('wasm') ?? '/wasm/atv2.wasm';
+  // A bare name is a module in build-wasm/ (served at /wasm/).
+  const wasmUrl = ((w) => (w.includes('/') ? w : `/wasm/${w}`))(q.get('wasm') ?? 'atv2.wasm');
+  const args = ['atv2', ...(q.get('args') ?? '').split(',').filter(Boolean)];
   const env = { ...DEFAULT_ENV };
   for (const kv of (q.get('env') ?? '').split(',').filter(Boolean)) {
     const i = kv.indexOf('=');
@@ -125,7 +129,7 @@ ${m.stack ?? ''}`, 'err'); };
   try { threads = await import('./threads.js'); } catch { /* not merged yet */ }
   if (threads?.WasmThreads && q.get('threads') !== '0') {
     const wt = new threads.WasmThreads({ module, memory, importsUrl: new URL('./imports.js', import.meta.url).href,
-      env, args: ['atv2'], host, pool: 14, spare: 2, max: 64, onExit: (c) => onExit(c), onTrap });
+      env, args, host, pool: 14, spare: 2, max: 64, onExit: (c) => onExit(c), onTrap });
     await wt.start();
     log('[page] threads: worker pool up; running _start');
     wt.runMain().catch((e) => log(`[page] runMain: ${e.message}`, 'err'));
@@ -137,7 +141,7 @@ ${m.stack ?? ''}`, 'err'); };
       else if (m.type === 'exit') onExit(m.code, m.missing);
     };
     worker.onerror = (e) => log(`[page] worker error: ${e.message}`, 'err');
-    worker.postMessage({ type: 'start', module, memory, env, args: ['atv2'], host });
+    worker.postMessage({ type: 'start', module, memory, env, args, host });
     log('[page] threads: none (single-threaded bring-up)');
   }
 

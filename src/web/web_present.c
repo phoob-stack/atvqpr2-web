@@ -31,7 +31,7 @@
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
 static GpFrame s_frame;          /* the mailbox: GpFrame as the page reads it */
-static uint32_t s_gp_frames;     /* GPU frames since the last display */
+static uint32_t s_gp_ever;       /* the recorder has handed over a frame */
 
 /* The recorder's queue carries HLSL (the D3D11 back end's language); the
  * WGSL twin of every shader is kept by id in gpu_wgsl_tap.c (on when
@@ -114,7 +114,7 @@ void gp_web_consume(const GpFrame *f)
     h->last_draws = f->draw_count;
     seq = __atomic_add_fetch(&h->gp_seq, 1, __ATOMIC_SEQ_CST);
     __builtin_wasm_memory_atomic_notify((int *)&h->gp_seq, ~0u);
-    s_gp_frames++;
+    s_gp_ever = 1;
 
     if (!__atomic_load_n(&h->page_attached, __ATOMIC_SEQ_CST))
         return;
@@ -185,7 +185,7 @@ void web_fb_present(uint32_t fb_va, uint32_t pitch, uint32_t aa)
     if (!fb_va || !pitch)
         return;
     h->disp_cpu = 0;
-    if (!s_gp_frames) {
+    if (!s_gp_ever) {
         /* No recorder frames: the guest framebuffer holds the picture. */
         int next = s_cpu_idx ^ 1;
         if (!s_cpu_fb[next])
@@ -198,7 +198,6 @@ void web_fb_present(uint32_t fb_va, uint32_t pitch, uint32_t aa)
             h->disp_cpu = 1;
         }
     }
-    s_gp_frames = 0;
     h->disp_va = fb_va;
     h->disp_pitch = pitch;
     h->disp_aa = aa;

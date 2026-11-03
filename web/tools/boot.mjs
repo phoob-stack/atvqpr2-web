@@ -1,6 +1,7 @@
 // Boot the browser build in headless Edge and report how far it gets.
 //
 //   node web/tools/boot.mjs [seconds=60] [--env K=V,K=V] [--keys 20:13,25:90] [--out dir]
+//        [--game <folder>] [--wasm <url>] [--args a,b]   (tests: another module/folder)
 //
 // Starts web/host/serve.mjs (127.0.0.1, a free port), opens the page, polls
 // the boot stage and the status line, presses keys at the given seconds
@@ -16,17 +17,23 @@ import { launch } from './cdp.mjs';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
-const secs = Number(argv.find((a) => /^\d+$/.test(a)) ?? 60);
+const secs = Number(argv[0] && /^\d+$/.test(argv[0]) ? argv[0] : 60);
 const out = resolve(opt('--out', join(ROOT, 'build-wasm')));
 const env = opt('--env', '');
 const keys = (opt('--keys', '') || '').split(',').filter(Boolean).map((s) => s.split(':').map(Number));
 mkdirSync(out, { recursive: true });
 
 const port = 8600 + Math.floor(Math.random() * 300);
-const srv = spawn(process.execPath, [join(ROOT, 'web/host/serve.mjs'), '--port', String(port), '--log', join(out, 'serve-web.log')],
+const game = opt('--game'), wasm = opt('--wasm'), args = opt('--args');
+const srv = spawn(process.execPath, [join(ROOT, 'web/host/serve.mjs'), '--port', String(port), '--log', join(out, 'serve-web.log'),
+  ...(game ? ['--game', game] : [])],
   { stdio: ['ignore', 'pipe', 'inherit'] });
 await new Promise((r) => srv.stdout.once('data', r));
-const url = `http://127.0.0.1:${port}/host/index.html${env ? `?env=${encodeURIComponent(env)}` : ''}`;
+const qs = new URLSearchParams();
+if (env) qs.set('env', env);
+if (wasm) qs.set('wasm', wasm);
+if (args) qs.set('args', args);
+const url = `http://127.0.0.1:${port}/host/index.html${qs.size ? `?${qs}` : ''}`;
 const b = await launch(url);
 const t0 = Date.now();
 let last = '', snap = null;
