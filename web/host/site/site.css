@@ -214,3 +214,6 @@ progress { width: 100%; accent-color: var(--orange); }
   button.play { font-size: 34px; }
 }
 .cards.about { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
+/* The loading card's buttons inside compat.js's message box (loading.js). */
+#atv-problem .row.ld-in-problem { margin-top: 16px; justify-content: flex-start; }
+#atv-problem #loading-note { color: #bbb; font: 13px system-ui, sans-serif; margin: 6px 0 0; }

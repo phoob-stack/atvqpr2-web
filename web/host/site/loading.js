@@ -33,7 +33,22 @@ export function watch({ kind }) {
   $('ld-log').onclick = () => { const n = downloadLog(); $('loading-note').textContent = `Saved ${n} to your downloads.`; };
   const t0 = performance.now();
   let shown = false;
+  // compat.js's message box (#atv-problem: browser checks, start failures, crashes, a lost GPU) is the one
+  // place a problem is explained. The card's Retry / Reload / Download log row moves into it, so the
+  // player sees one box with the explanation and the buttons; it moves back if the box goes away.
+  const row = card.querySelector('.row'), note = $('loading-note'), home = card.querySelector('.ld-card');
+  const adopt = () => {
+    const box = document.querySelector('#atv-problem .card');
+    if (box) {
+      if (!box.contains(row)) { row.classList.add('ld-in-problem'); box.append(row, note); }
+      card.hidden = true;
+      return true;
+    }
+    if (!home.contains(row)) { row.classList.remove('ld-in-problem'); home.append(row, note); }
+    return false;
+  };
   const tick = () => {
+    const problem = adopt();
     const atv = window.atv;
     const st = atv?.state;
     const failed = st?.error || st?.trap || (st?.exit !== null && st?.exit !== undefined);
@@ -49,8 +64,10 @@ export function watch({ kind }) {
         return;
       }
     }
-    if (failed) {
-      card.hidden = false; card.classList.add('failed');
+    if (failed || problem) {
+      card.classList.add('failed');
+      if (problem) { setTimeout(tick, 500); return; }
+      card.hidden = false;
       title.textContent = 'The game stopped';
       msg.textContent = st.error ? `Start failed: ${String(st.error).split('\n')[0]}` :
         st.trap ? `The game hit an error: ${String(st.trap.message).slice(0, 200)}` : `The game ended (code ${st.exit}).`;
