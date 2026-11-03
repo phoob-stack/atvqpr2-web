@@ -13,6 +13,7 @@
  * vertex programs and combiners on the GPU (draw2); RECOMP_GPU=simple keeps
  * milestone 1's path (CPU transform, stage 0 only) for A/B comparisons.
  */
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,6 +48,9 @@ static Buf s_queue, s_draws, s_vtx, s_idx, s_consts;
 /* One id space for every resource -- render targets, depth, textures and
  * shaders -- above the built-in shader ids, never reused. */
 static uint32_t s_frame, s_next_id = 64;
+/* Bumped whenever the arenas are emptied (every flip, and every sync while a
+ * frame is being checked): offsets into them are only valid within one. */
+static uint32_t s_epoch;
 static int s_simple;
 
 static void q_cmd(uint32_t op, uint32_t id, uint32_t a, uint32_t b, uint32_t c,
@@ -224,6 +228,77 @@ static const Rt *rt_find(uint32_t va)
     return NULL;
 }
 
+/* A texture that lies inside a render target without starting at it: a tile
+ * of an atlas the title drew (ATV 2 draws distant riders as impostors into
+ * 256x256 swizzled targets and samples them as smaller swizzled textures at
+ * offsets into them). The GPU target is the only up-to-date copy -- a
+ * swizzled target is never written back -- so the tile is copied out of it
+ * on the GPU, in draw order (GP_SUB_CREATE, then the consumer copies the
+ * region before each draw that samples it). Read from guest memory instead,
+ * it was whatever the memory held before: black squares. */
+static uint32_t pext(uint32_t v, uint32_t mask)
+{
+    uint32_t r = 0, bit = 1;
+    while (mask) {
+        uint32_t low = mask & (~mask + 1u);
+        if (v & low) r |= bit;
+        bit <<= 1;
+        mask &= mask - 1u;
+    }
+    return r;
+}
+
+#define MAX_SUB 256
+static struct { uint32_t rt, x0, y0, w, h, id; } s_sub[MAX_SUB];
+static int s_nsub, s_sub_next;
+
+/* GP_TEX_RT | id for a texture that is a whole target, a GP_SUB_CREATE id for
+ * a tile of one, 0 for neither. *full: the whole target (coordinates are
+ * then scaled to it). */
+static uint32_t rt_tex(const Nv2aTexture *t, int *full)
+{
+    int i;
+    const Rt *r = rt_find(t->offset);
+    uint32_t x0, y0, d, k;
+    *full = 0;
+    if (r) { *full = 1; return GP_TEX_RT | r->id; }
+    for (i = 0; i < s_nrt; i++) {
+        r = &s_rt[i];
+        if (t->offset > r->va && t->offset - r->va < r->h * (r->swz ? r->w * r->bpp : r->pitch))
+            break;
+    }
+    if (i == s_nrt || r->bpp != 4) return 0;
+    d = t->offset - r->va;
+    if (size_from_format(t->color)) {
+        uint32_t mx, my;
+        if ((r->w & (r->w - 1)) || (r->h & (r->h - 1)) || d3d8_format_dxt_block_bytes(t->color))
+            return 0;
+        xbox_swizzle_masks(r->w, r->h, &mx, &my);
+        x0 = pext(d / 4, mx); y0 = pext(d / 4, my);
+    } else {
+        if (t->pitch != r->pitch) return 0;
+        x0 = (d % r->pitch) / 4; y0 = d / r->pitch;
+    }
+    if (x0 + t->width > r->w || y0 + t->height > r->h) return 0;
+    for (k = 0; k < (uint32_t)s_nsub; k++)
+        if (s_sub[k].rt == r->id && s_sub[k].x0 == x0 && s_sub[k].y0 == y0
+            && s_sub[k].w == t->width && s_sub[k].h == t->height)
+            return s_sub[k].id;
+    k = s_nsub < MAX_SUB ? (uint32_t)s_nsub++ : (uint32_t)(s_sub_next++ % MAX_SUB);
+    if (s_sub[k].id) defer_free(s_sub[k].id);
+    s_sub[k].rt = r->id; s_sub[k].x0 = x0; s_sub[k].y0 = y0;
+    s_sub[k].w = t->width; s_sub[k].h = t->height; s_sub[k].id = s_next_id++;
+    q_cmd(GP_SUB_CREATE, s_sub[k].id, r->id, t->width, t->height, x0 | (y0 << 16), 0, NULL, 0);
+    {
+        static int shown;
+        if (shown++ < 16)
+            fprintf(stderr, "  [GPUREC] texture 0x%08X %ux%u fmt %02X is a tile of target %u"
+                    " (0x%08X %ux%u%s) at %u,%u\n", t->offset, t->width, t->height, t->color,
+                    r->id, r->va, r->w, r->h, r->swz ? " swizzled" : "", x0, y0);
+    }
+    return s_sub[k].id;
+}
+
 #define MAX_DS 16
 typedef struct { uint32_t id, va, w, h; } Ds;
 static Ds s_ds[MAX_DS];
@@ -250,7 +325,7 @@ static uint32_t ds_get(uint32_t va, uint32_t w, uint32_t h)
 
 #define TEX_HASH 4096
 typedef struct {
-    uint32_t offset, w, h, color, pitch, cube, used;
+    uint32_t offset, w, h, color, pitch, cube, used, levels, palette;
     uint32_t id, checked_frame;
     uint64_t hash;
 } Tex;
@@ -310,12 +385,48 @@ static uint64_t hash_span(const uint8_t *p, uint32_t n, uint64_t h)
     return fnv(p + n - 4096, 4096, h);
 }
 
+/* Mip levels to upload: the format word's count for swizzled and DXT
+ * textures, none below 1x1 (xemu pgraph_get_texture_shape); linear ones have
+ * one. */
+static uint32_t tex_levels(const Nv2aTexture *t)
+{
+    uint32_t l = t->levels ? t->levels : 1, full = 1, m = t->width > t->height ? t->width : t->height;
+    if (!size_from_format(t->color)) return 1;
+    while ((1u << (full - 1)) < m) full++;
+    if (l > full) l = full;
+    return l > 16 ? 16 : l;
+}
+
+/* Bytes of level `lv` (DXT levels below 4x4 still take a whole block). */
+static uint32_t level_bytes(const Nv2aTexture *t, uint32_t lv)
+{
+    uint32_t bb = d3d8_format_dxt_block_bytes(t->color);
+    uint32_t lw = (t->width >> lv) ? (t->width >> lv) : 1;
+    uint32_t lh = (t->height >> lv) ? (t->height >> lv) : 1;
+    if (lv == 0) return level0_bytes(t);
+    return bb ? ((lw + 3) / 4) * ((lh + 3) / 4) * bb : lw * lh * texel_bytes(t->color);
+}
+
+static void tex_undecodable(const Nv2aTexture *t, int cube)
+{
+    static uint32_t seen[64];
+    static int nseen;
+    int k;
+    for (k = 0; k < nseen && seen[k] != t->color; k++) ;
+    if (k == nseen && nseen < 64) {
+        seen[nseen++] = t->color;
+        fprintf(stderr, "  [GPUREC] texture format 0x%02X (%ux%u at 0x%08X%s) not decodable: white\n",
+                t->color, t->width, t->height, t->offset, cube ? ", cube" : "");
+    }
+}
+
 static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
 {
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
-    uint32_t bb = d3d8_format_dxt_block_bytes(t->color), faces = cube ? 6 : 1, f;
-    uint32_t l0 = level0_bytes(t), stride = cube ? face_stride(t) : 0;
-    uint64_t key = fnv(t, sizeof *t, FNV0) ^ (uint64_t)cube, h = FNV0;
+    uint32_t bb = d3d8_format_dxt_block_bytes(t->color), faces = cube ? 6 : 1, f, lv;
+    uint32_t levels = tex_levels(t), fbytes = 0, stride, l0 = level0_bytes(t);
+    uint32_t kk[6] = { t->offset, t->width, t->height, t->color, t->pitch, t->palette };
+    uint64_t key = fnv(kk, sizeof kk, FNV0) ^ (uint64_t)cube, h = FNV0;
     uint32_t slot = (uint32_t)(key ^ (key >> 32)) & (TEX_HASH - 1), probe;
     Tex *e = NULL, *victim = NULL;
     int bc = bb && (t->width & 3) == 0 && (t->height & 3) == 0;
@@ -323,17 +434,23 @@ static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
     *is_bc = bc;
     if (!t->offset || !t->width || !t->height || t->width > 4096 || t->height > 4096 || !l0)
         return 0;
+    for (lv = 0; lv < levels; lv++)
+        fbytes += level_bytes(t, lv);
+    stride = cube ? face_stride(t) : 0;
     for (probe = 0; probe < 16; probe++) {
         Tex *c = &s_tex[(slot + probe) & (TEX_HASH - 1)];
         if (c->id && c->offset == t->offset && c->w == t->width && c->h == t->height
-            && c->color == t->color && c->pitch == t->pitch && c->cube == (uint32_t)cube) {
+            && c->color == t->color && c->pitch == t->pitch && c->cube == (uint32_t)cube
+            && c->levels == levels && c->palette == t->palette) {
             e = c; break;
         }
         if (!victim || !c->id || (victim->id && c->used < victim->used)) victim = c;
     }
     if (e && e->checked_frame == s_frame) { e->used = s_frame; return e->id; }
     for (f = 0; f < faces; f++)
-        h = hash_span(mem + t->offset + f * stride, l0, h);
+        h = hash_span(mem + t->offset + f * stride, fbytes, h);
+    if (t->color == 0x0B && t->palette)          /* P8: the palette is half the texture */
+        h = fnv(mem + t->palette, 1024, h);
     if (e && e->hash == h) { e->checked_frame = e->used = s_frame; return e->id; }
 
     if (!e) e = victim;
@@ -342,39 +459,68 @@ static uint32_t tex_get(const Nv2aTexture *t, int cube, int *is_bc)
     e->id = s_next_id++;
     e->offset = t->offset; e->w = t->width; e->h = t->height;
     e->color = t->color; e->pitch = t->pitch; e->cube = (uint32_t)cube;
+    e->levels = levels; e->palette = t->palette;
     e->hash = h; e->checked_frame = e->used = s_frame;
 
+    /* Payload: per face, level 0 then each smaller level -- the order the
+     * NV2A stores them in (xemu: levels follow level 0, each swizzled or
+     * block-compressed on its own), so BC is a straight copy. */
     if (bc) {
-        uint8_t *p = (uint8_t *)q_cmd_reserve(GP_TEX_CREATE, e->id, 0, t->width, t->height,
+        uint8_t *p = (uint8_t *)q_cmd_reserve(GP_TEX_CREATE, e->id, levels, t->width, t->height,
                                               t->color == 0x0C ? GP_FMT_BC1
                                               : t->color == 0x0E ? GP_FMT_BC2 : GP_FMT_BC3,
-                                              faces, l0 * faces);
+                                              faces, fbytes * faces);
         if (p)
             for (f = 0; f < faces; f++)
-                memcpy(p + f * l0, mem + t->offset + f * stride, l0);
+                memcpy(p + (size_t)f * fbytes, mem + t->offset + f * stride, fbytes);
     } else {
-        uint32_t px = t->width * t->height;
-        uint32_t *p = (uint32_t *)q_cmd_reserve(GP_TEX_CREATE, e->id, 0, t->width, t->height,
-                                                GP_FMT_BGRA8, faces, px * 4 * faces);
+        uint32_t total = 0, at = 0;
+        uint32_t *p;
+        for (lv = 0; lv < levels; lv++) {
+            uint32_t lw = (t->width >> lv) ? (t->width >> lv) : 1;
+            uint32_t lh = (t->height >> lv) ? (t->height >> lv) : 1;
+            total += lw * lh;
+        }
+        p = (uint32_t *)q_cmd_reserve(GP_TEX_CREATE, e->id, levels, t->width, t->height,
+                                      GP_FMT_BGRA8, faces, total * 4 * faces);
         for (f = 0; p && f < faces; f++) {
-            Nv2aTexture face = *t;
-            face.offset += f * stride;
-            if (!nv2a_backend_decode_texture(&face, p + (size_t)f * px)) {
-                /* Not decodable (palettised, say): as the CPU, read white. */
-                static uint32_t seen[64];
-                static int nseen;
-                int k;
-                memset(p + (size_t)f * px, 0xFF, (size_t)px * 4);
-                for (k = 0; k < nseen && seen[k] != t->color; k++) ;
-                if (k == nseen && nseen < 64) {
-                    seen[nseen++] = t->color;
-                    fprintf(stderr, "  [GPUREC] texture format 0x%02X (%ux%u at 0x%08X%s) not decodable: white\n",
-                            t->color, t->width, t->height, t->offset, cube ? ", cube" : "");
+            uint32_t src = t->offset + f * stride;
+            for (lv = 0; lv < levels; lv++) {
+                Nv2aTexture lt = *t;
+                uint32_t px;
+                lt.width = (t->width >> lv) ? (t->width >> lv) : 1;
+                lt.height = (t->height >> lv) ? (t->height >> lv) : 1;
+                lt.offset = src;
+                lt.levels = 1;
+                px = lt.width * lt.height;
+                if (!nv2a_backend_decode_texture(&lt, p + at)) {
+                    /* Not decodable (palettised, say): as the CPU, read white. */
+                    memset(p + at, 0xFF, (size_t)px * 4);
+                    tex_undecodable(t, cube);
                 }
+                at += px;
+                src += level_bytes(t, lv);
             }
         }
     }
     return e->id;
+}
+
+/* The sampler key for a stage: rc_texel()'s one linear switch (what the check
+ * compares against), plus the filter word for drawing with mip levels. */
+static uint32_t smp_key(const Nv2aTexture *t, int border)
+{
+    uint32_t mag = (t->filter >> 24) & 0xF, min = (t->filter >> 16) & 0xFF;
+    int32_t bias = (int32_t)(t->filter & 0x1FFF);
+    uint32_t k = ((mag == 2 || min == 2 || min == 4 || min == 6) ? GP_SMP_LINEAR : 0)
+               | GP_SMP_U(t->addr_u) | GP_SMP_V(t->addr_v) | (border ? GP_SMP_BORDER : 0);
+    if (bias & 0x1000) bias -= 0x2000;           /* signed, 1/256 of a level */
+    bias /= 16;
+    if (bias < -128) bias = -128;
+    if (bias > 127) bias = 127;
+    if (min <= 7 && mag <= 4)
+        k |= GP_SMP_FILTER | GP_SMP_MIN(min) | GP_SMP_MAG(mag) | GP_SMP_BIAS(bias);
+    return k;
 }
 
 /* ---- shaders ------------------------------------------------------------- */
@@ -421,6 +567,124 @@ static uint32_t ps_get(const GpPsKey *k)
         }
     }
     return 0;
+}
+
+
+/* ---- vertex-level check (RECOMP_GPU_CHECK) --------------------------------
+ *
+ * While the executor checks a frame, each vertex-program draw also has up to
+ * GP_PROBE_MAX of its vertices run through the CPU interpreter
+ * (nv2a_vsh_run, the reference gpu_shadergen mirrors) here, at record time
+ * when the program and constants are the ones the draw uses, and through the
+ * generated HLSL on the GPU (stream output) once the draw has been synced.
+ * The CPU result goes through the same screen-to-clip mapping the HLSL's
+ * finish() applies, so both sides are the vertex shader's output. */
+static struct {
+    uint32_t n, vs, hash, slots;
+    GpXfConsts xc;
+    GpVsConsts vc;
+    GpProgVertex in[GP_PROBE_MAX];
+    uint32_t idx[GP_PROBE_MAX];
+    float cpu[GP_PROBE_MAX][GP_PROBE_FLOATS];
+} s_probe;
+static uint32_t s_probe_draws, s_probe_verts, s_probe_bad_draws, s_probe_bad_verts;
+
+/* fog_factor() in nv2a_pb_exec.c, as the HLSL has it. */
+static float probe_fog(const GpXfConsts *x, float d)
+{
+    float f;
+    int m = (int)x->fog_mode;
+    if (x->fog_on < 0.5f) return 1.0f;
+    if (m == 0x800 || m == 0x802) f = x->fog_p0 + exp2f(d * x->fog_p1 * 16.0f) - 1.5f;
+    else if (m == 0x801 || m == 0x803) f = x->fog_p0 + exp2f(-d * d * x->fog_p1 * x->fog_p1 * 32.0f) - 1.5f;
+    else f = x->fog_p0 + d * x->fog_p1 - 1.0f;
+    if (m == 0x802 || m == 0x803 || m == 0x804) f = fabsf(f);
+    if (f != f) f = 1.0f;
+    return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+}
+
+static float sat(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+static void probe_prepare(const Nv2aDraw *dd, const GpXfConsts *xc, uint32_t vs)
+{
+    uint32_t i, n = dd->vertex_count < GP_PROBE_MAX ? dd->vertex_count : GP_PROBE_MAX;
+    s_probe.n = 0;
+    s_probe.vs = vs;
+    s_probe.slots = dd->program_len;
+    s_probe.hash = (uint32_t)fnv(dd->program, (size_t)dd->program_len * 16, FNV0);
+    s_probe.xc = *xc;
+    memcpy(&s_probe.vc, dd->constants, sizeof s_probe.vc);
+    for (i = 0; i < n; i++) {
+        uint32_t v = (uint32_t)(((uint64_t)i * dd->vertex_count) / n), k, st;
+        Nv2aVshOutput o;
+        float *c = s_probe.cpu[i], x, y, w;
+        s_probe.idx[i] = v;
+        memcpy(s_probe.in[i].v, dd->inputs[v], sizeof s_probe.in[i].v);
+        if (!nv2a_vsh_run((const float (*)[4])dd->inputs[v], &o))
+            return;
+        /* transform_vertex(): +0 w draws at w = 1; oPos is in logical pixels. */
+        if (o.pos[3] == 0.0f && !signbit(o.pos[3])) o.pos[3] = 1.0f;
+        x = o.pos[0] * xc->aa[0]; y = o.pos[1] * xc->aa[1]; w = o.pos[3];
+        c[0] = (x / xc->surf[0] * 2.0f - 1.0f) * w;
+        c[1] = (1.0f - y / xc->surf[1] * 2.0f) * w;
+        c[2] = sat(o.pos[2] * xc->zscale) * w;
+        c[3] = w;
+        for (k = 0; k < 4; k++) { c[4 + k] = o.d0[k]; c[8 + k] = o.d1[k]; }
+        for (st = 0; st < 4; st++) {
+            c[12 + st * 4 + 0] = o.tex[st][0] * xc->uvscale[st][0];
+            c[12 + st * 4 + 1] = o.tex[st][1] * xc->uvscale[st][1];
+            c[12 + st * 4 + 2] = o.tex[st][2];
+            c[12 + st * 4 + 3] = o.tex[st][3];
+        }
+        c[28] = probe_fog(xc, o.fog[0]);
+    }
+    s_probe.n = n;
+}
+
+static const char *probe_name(int k)
+{
+    static const char *n[] = { "pos", "d0", "d1", "t0", "t1", "t2", "t3", "fog" };
+    return n[k / 4 > 7 ? 7 : k / 4];
+}
+
+static void probe_compare(void)
+{
+    static float gpu[GP_PROBE_MAX * GP_PROBE_FLOATS];
+    uint32_t n = gp_d3d11_vs_probe(s_probe.vs, &s_probe.xc, &s_probe.vc, s_probe.in,
+                                   s_probe.n, gpu), i, k, bad = 0;
+    float worst = 0.0f;
+    int wi = -1, wk = 0;
+
+    s_probe_draws++;
+    if (n != s_probe.n) {
+        nv2a_check_note("  vtx: program %08X: stream output failed (%u of %u)\n",
+                        s_probe.hash, n, s_probe.n);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        int vbad = 0;
+        for (k = 0; k < GP_PROBE_FLOATS; k++) {
+            float a = s_probe.cpu[i][k], b = gpu[i * GP_PROBE_FLOATS + k], d, m;
+            if (a != a && b != b) continue;            /* both NaN */
+            d = fabsf(a - b);
+            m = fmaxf(fabsf(a), fabsf(b));
+            if (!(d <= 1e-3f + 2e-4f * m)) {           /* NaN on one side fails too */
+                float r = d / (1e-3f + 2e-4f * m);
+                vbad = 1;
+                if (!(r <= worst)) { worst = r; wi = (int)i; wk = (int)k; }
+            }
+        }
+        bad += (uint32_t)vbad;
+    }
+    s_probe_verts += n;
+    if (bad) {
+        s_probe_bad_draws++;
+        s_probe_bad_verts += bad;
+        nv2a_check_note("  vtx: program %08X (%u slots): %u of %u vertices differ; worst v%u %s.%c"
+                        " cpu %g gpu %g\n", s_probe.hash, s_probe.slots, bad, n,
+                        s_probe.idx[wi], probe_name(wk), "xyzw"[wk & 3],
+                        s_probe.cpu[wi][wk], gpu[wi * GP_PROBE_FLOATS + wk]);
+    }
 }
 
 /* ---- records ------------------------------------------------------------- */
@@ -470,12 +734,12 @@ static uint32_t put_consts(const void *p, uint32_t bytes)
 /* The VS constant file is 3 KB and usually unchanged between draws. */
 static uint32_t put_vs_consts(const float (*c)[4])
 {
-    static uint32_t last_off = ~0u, last_frame = ~0u;
-    if (last_off != ~0u && last_frame == s_frame
+    static uint32_t last_off = ~0u, last_epoch = ~0u;
+    if (last_off != ~0u && last_epoch == s_epoch
         && !memcmp(s_consts.p + last_off, c, sizeof(GpVsConsts)))
         return last_off;
     last_off = put_consts(c, sizeof(GpVsConsts));
-    last_frame = s_frame;
+    last_epoch = s_epoch;
     return last_off;
 }
 
@@ -511,10 +775,9 @@ static void rec_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     tc.texsize[0] = tc.texsize[1] = 1.0f;
     if (b->texture) {
         const Rt *src = rt_find(b->texture->offset);
-        int bc;
-        if (src)
-            d->tex[0] = GP_TEX_RT | src->id;
-        else
+        int bc, full;
+        d->tex[0] = rt_tex(b->texture, &full);
+        if (!d->tex[0])
             d->tex[0] = tex_get(b->texture, 0, &bc);
         if (d->tex[0]) {
             tc.textured = 1.0f;
@@ -567,13 +830,21 @@ static void rec_draw2(const Nv2aSurface *s, const Nv2aRenderState *rs, const Nv2
         int wanted = dd->rc_seen ? (mode >= 1 && mode <= 3) : (st == 0 && dd->textured);
         int cube = dd->rc_seen && mode == 3 && dd->tex_cube[st];
         int bc;
-        uint32_t lin, au, av;
+        uint32_t au, av;
 
         xc.uvscale[st][0] = xc.uvscale[st][1] = 1.0f;
         if (!wanted || !dd->tex_valid[st]) continue;
         {
             const Rt *src = cube ? NULL : rt_find(t->offset);
-            if (src) {
+            int full = 0;
+            uint32_t sub = cube ? 0 : rt_tex(t, &full);
+            if (sub && !full) {
+                d->tex[st] = sub;                  /* a tile: sized like the texture */
+                if (!size_from_format(t->color)) {
+                    xc.uvscale[st][0] = 1.0f / (float)t->width;
+                    xc.uvscale[st][1] = 1.0f / (float)t->height;
+                }
+            } else if (src) {
                 d->tex[st] = GP_TEX_RT | src->id;
                 xc.uvscale[st][0] = (size_from_format(t->color) ? (float)t->width : 1.0f) / (float)src->w;
                 xc.uvscale[st][1] = (size_from_format(t->color) ? (float)t->height : 1.0f) / (float)src->h;
@@ -588,14 +859,8 @@ static void rec_draw2(const Nv2aSurface *s, const Nv2aRenderState *rs, const Nv2
         if (!d->tex[st]) continue;
         key.valid |= 1u << st;
         if (cube) key.cube |= 1u << st;
-        /* rc_texel(): tent when MAG is 2 or MIN is 2/4/6, else nearest. */
-        {
-            uint32_t mag = (t->filter >> 24) & 0xF, min = (t->filter >> 16) & 0xFF;
-            lin = (mag == 2 || min == 2 || min == 4 || min == 6) ? GP_SMP_LINEAR : 0;
-        }
         au = t->addr_u; av = t->addr_v;
-        d->smp[st] = lin | GP_SMP_U(au) | GP_SMP_V(av)
-                   | ((dd->tex_border_color[st] && (au == 4 || av == 4)) ? GP_SMP_BORDER : 0);
+        d->smp[st] = smp_key(t, dd->tex_border_color[st] && (au == 4 || av == 4));
         d->border[st] = dd->tex_border[st];
     }
 
@@ -633,6 +898,8 @@ static void rec_draw2(const Nv2aSurface *s, const Nv2aRenderState *rs, const Nv2
         uint32_t *ix;
         d->vs = vs_get(dd->program, dd->program_len);
         d->vsc_off = put_vs_consts(dd->constants);
+        if (d->vs && nv2a_check_active())
+            probe_prepare(dd, &xc, d->vs);
         if (!(v = buf_take(&s_vtx, dd->vertex_count * sizeof(GpProgVertex), 16))) return;
         memcpy(v, dd->inputs, dd->vertex_count * sizeof(GpProgVertex));
         d->vtx_off = (uint32_t)((uint8_t *)v - s_vtx.p);
@@ -654,6 +921,30 @@ static void rec_draw2(const Nv2aSurface *s, const Nv2aRenderState *rs, const Nv2
         d->kind = ~0u;                       /* shader failed: skip, logged below */
 }
 
+static void frame_of(GpFrame *f)
+{
+    f->queue = s_queue.p; f->queue_bytes = s_queue.n;
+    f->draws = (const GpDraw *)s_draws.p; f->draw_count = s_draws.n / sizeof(GpDraw);
+    f->vtx = s_vtx.p; f->vtx_bytes = s_vtx.n;
+    f->idx = (const uint32_t *)s_idx.p; f->idx_count = s_idx.n / 4;
+    f->consts = s_consts.p; f->const_bytes = s_consts.n;
+    f->frame = s_frame;
+}
+
+/* The executor's GPU-vs-CPU check: everything recorded so far, drawn now. */
+static void rec_sync(void)
+{
+    GpFrame f;
+    frame_of(&f);
+    gp_d3d11_sync(&f);
+    if (s_probe.n) {
+        probe_compare();
+        s_probe.n = 0;
+    }
+    s_queue.n = s_draws.n = s_vtx.n = s_idx.n = s_consts.n = 0;
+    s_epoch++;
+}
+
 static void rec_flip(void)
 {
     GpFrame f;
@@ -668,12 +959,7 @@ static void rec_flip(void)
     }
     s_nfree = k;
 
-    f.queue = s_queue.p; f.queue_bytes = s_queue.n;
-    f.draws = (const GpDraw *)s_draws.p; f.draw_count = s_draws.n / sizeof(GpDraw);
-    f.vtx = s_vtx.p; f.vtx_bytes = s_vtx.n;
-    f.idx = (const uint32_t *)s_idx.p; f.idx_count = s_idx.n / 4;
-    f.consts = s_consts.p; f.const_bytes = s_consts.n;
-    f.frame = s_frame;
+    frame_of(&f);
     gp_d3d11_consume(&f);
     /* The consumer wrote this frame's targets back: remember what the guest
      * now holds, so a later CPU write to them can be told apart. */
@@ -686,11 +972,17 @@ static void rec_flip(void)
         s_rt_resyncs = 0;
     }
 
+    if (s_probe_draws) {
+        fprintf(stderr, "  [GPUREC] vertex check: %u draws, %u vertices; %u draws and %u vertices"
+                " differ\n", s_probe_draws, s_probe_verts, s_probe_bad_draws, s_probe_bad_verts);
+        s_probe_draws = s_probe_verts = s_probe_bad_draws = s_probe_bad_verts = 0;
+    }
     s_queue.n = s_draws.n = s_vtx.n = s_idx.n = s_consts.n = 0;
+    s_epoch++;
     s_frame++;
 }
 
-static Nv2aBackend s_backend = { rec_clear, rec_draw, rec_flip, rec_draw2 };
+static Nv2aBackend s_backend = { rec_clear, rec_draw, rec_flip, rec_draw2, rec_sync };
 
 void atv2_gpu_backend_install(void)
 {
