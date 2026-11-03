@@ -622,6 +622,43 @@ static void pump_in(double now)
     }
 }
 
+/* ---- ghost: no collisions with the puppets -------------------------------------------
+ * The broadphase (0x709B0) calls a pair handler from the table at 0x1CBEF0
+ * (cdecl handler(colliderA, colliderB) -> contacts) for every pair of active
+ * objects whose boxes overlap; the call returns to 0x70B17. Pairs where one
+ * side is a puppet's racer or unit collider (object +0x1C) are skipped. */
+#define RET_PAIR 0x00070B17u
+static uint32_t s_ghost[2 * RT_MAX];
+static int s_nghost;
+
+static void ghost_refresh(void)
+{
+    int i, n = 0;
+    for (i = 1; i <= s_slots && i < RT_MAX; i++) {
+        uint32_t r = racer(i), u = part_unit(racer_part(r));
+        if (!r || !u) break;
+        s_ghost[n++] = rd32(r + 0x1C);
+        s_ghost[n++] = rd32(u + 0x1C);
+    }
+    s_nghost = n;
+}
+
+static int is_ghost(uint32_t c)
+{
+    int i;
+    for (i = 0; i < s_nghost; i++)
+        if (s_ghost[i] == c && c) return 1;
+    return 0;
+}
+
+static uint32_t s_ghost_skips;
+static void skip_pair(void)
+{
+    g_eax = 0;
+    g_esp += 4;
+    s_ghost_skips++;
+}
+
 /* ---- per tick (game thread) --------------------------------------------------------- */
 
 static double s_last_tick;
@@ -636,6 +673,7 @@ static void local_tick(uint32_t r0)
     uint8_t pkt[4 + 2 + SNAP_BYTES];
 
     pump_in(now);
+    ghost_refresh();
     if (!u)
         return;
     if (!s_qchecked)
@@ -672,6 +710,7 @@ static void local_tick(uint32_t r0)
     if (now - s_stat_t0 >= 10000) {
         double dt = (now - s_stat_t0) / 1000.0;
         int i;
+        fprintf(stderr, "[ROAM] ghost: %u puppet pairs skipped\n", s_ghost_skips);
         fprintf(stderr, "[ROAM] stats: sent %u snaps (%.1f/s, %.0f B/s payload), recv %u snaps (%.1f/s, %.0f B/s)\n",
                 s_sent_snaps, s_sent_snaps / dt, s_sent_bytes / dt, s_recv_snaps, s_recv_snaps / dt, s_recv_bytes / dt);
         for (i = 0; i < MAXP; i++)
@@ -772,10 +811,59 @@ static void hook_setup_fs(void)
 
 typedef void (*roam_func_t)(void);
 
+/* RE aid (RECOMP_ROAM_TRACE=1): indirect calls on the local unit or puppet 1,
+ * counted apart while the two are near (< 2.2 m) and far (> 4 m). */
+static int s_trace;
+#define TRN 1024
+static struct { uint32_t va, ret, who; uint32_t n[2]; } s_tr[TRN];
+static int s_trn, s_tr_frames[2];
+static void trace_call(uint32_t va)
+{
+    static uint32_t u0, u1, cnt;
+    static int near_;
+    uint32_t e = g_ecx, who = 0, ret, k;
+    if ((cnt++ & 1023) == 0) {
+        float a[3], b[3], d = 0;
+        int i;
+        u0 = part_unit(racer_part(racer(0)));
+        u1 = part_unit(racer_part(racer(1)));
+        if (!u0 || !u1) return;
+        rdv(u0 + B_POS, a, 3); rdv(u1 + B_POS, b, 3);
+        for (i = 0; i < 3; i++) d += (a[i] - b[i]) * (a[i] - b[i]);
+        near_ = d < 2.2f * 2.2f ? 1 : d > 16.0f ? 0 : -1;
+        if (near_ >= 0) s_tr_frames[near_]++;
+    }
+    if (near_ < 0 || !u0) return;
+    if (e >= u0 && e < u0 + 0x1200) who = 1 | ((e - u0) << 4);
+    else if (e >= u1 && e < u1 + 0x1200) who = 2 | ((e - u1) << 4);
+    else return;
+    ret = MEM32(g_esp);
+    for (k = 0; k < (uint32_t)s_trn; k++)
+        if (s_tr[k].va == va && s_tr[k].ret == ret && s_tr[k].who == who) break;
+    if (k == (uint32_t)s_trn) { if (s_trn == TRN) return; s_tr[k].va = va; s_tr[k].ret = ret; s_tr[k].who = who; s_trn++; }
+    s_tr[k].n[near_]++;
+}
+static void trace_dump(void)
+{
+    int k;
+    fprintf(stderr, "[ROAM] trace: samples far %d near %d\n", s_tr_frames[0], s_tr_frames[1]);
+    for (k = 0; k < s_trn; k++)
+        fprintf(stderr, "[ROAM] tr %05X ret %05X %s+%X far %u near %u\n", s_tr[k].va, s_tr[k].ret,
+                (s_tr[k].who & 15) == 1 ? "local" : "puppet", s_tr[k].who >> 4, s_tr[k].n[0], s_tr[k].n[1]);
+    fflush(stderr);
+}
+
 roam_func_t atv2_roam_lookup(uint32_t va)
 {
     if (s_checked <= 0)
         return 0;
+    if (s_trace) {
+        trace_call(va);
+        if (s_tr_frames[1] > 200 && s_tr_frames[0] > 200 && s_trace == 1) { s_trace = 2; trace_dump(); }
+    }
+    if (s_nghost && MEM32(g_esp) == RET_PAIR &&
+        (is_ghost(MEM32(g_esp + 4)) || is_ghost(MEM32(g_esp + 8))))
+        return skip_pair;
     if (va == FN_PART_AI) return hook_part_ai;
     if (va == FN_PART_HUMAN) return hook_part_human;
     if (va == FN_SETUP_FS) return hook_setup_fs;
@@ -819,12 +907,14 @@ void atv2_roam_init(void)
     if (!e || !*e || !strcmp(e, "0"))
         return;
     snprintf(buf, sizeof buf, "%s", e);
-    for (tok = strtok_r(buf, ",", &ctx); tok; tok = strtok_r(NULL, ",", &ctx)) {
+    for (tok = strtok_r(buf, ",;", &ctx); tok; tok = strtok_r(NULL, ",;", &ctx)) {
         if (!strncmp(tok, "name=", 5)) snprintf(s_name, sizeof s_name, "%s", tok + 5);
         else if (!strncmp(tok, "slots=", 6)) s_slots = atoi(tok + 6);
         else if (!strncmp(tok, "test=", 5)) s_test = atoi(tok + 5);
         else if (!s_addr[0]) snprintf(s_addr, sizeof s_addr, "%s", tok);
     }
+    if (getenv("RECOMP_ROAM_TRACE")) s_trace = 1;
+    if (getenv("RECOMP_ROAM_NAME")) snprintf(s_name, sizeof s_name, "%s", getenv("RECOMP_ROAM_NAME"));
     if (s_slots < 1) s_slots = 1;
     if (s_slots > RT_MAX - 1) s_slots = RT_MAX - 1;
     { char *c; for (c = s_name; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char)*c < 32) *c = '_'; }
