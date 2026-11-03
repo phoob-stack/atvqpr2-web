@@ -742,6 +742,16 @@ static GpDraw *new_draw(uint32_t kind, const Nv2aSurface *s, const Nv2aRenderSta
     d->zeta_format = s->zeta_format;
     state_of(rs, &d->st);
     d->vsc_off = d->xfc_off = d->psc_off = ~0u;
+    {
+        const uint32_t *q = kind == GP_CLEAR ? rs->clear_rect : rs->scissor;
+        uint32_t x0 = q[0], y0 = q[1], x1 = q[2], y1 = q[3];
+        if (x1 > r->w) x1 = r->w;
+        if (y1 > r->h) y1 = r->h;
+        if (x0 > x1) x0 = x1;
+        if (y0 > y1) y0 = y1;
+        d->rect[0] = x0 | y0 << 16;
+        d->rect[1] = x1 | y1 << 16;
+    }
     *rt_out = r;
     return d;
 }

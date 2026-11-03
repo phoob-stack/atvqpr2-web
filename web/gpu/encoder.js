@@ -36,6 +36,28 @@ const STENCIL_OP = { 0x0000: 'zero', 0x1E01: 'replace', 0x1E02: 'increment-clamp
   0x1E03: 'decrement-clamp', 0x150A: 'invert', 0x8507: 'increment-wrap', 0x8508: 'decrement-wrap' };
 const ADDR = { 1: 'repeat', 2: 'mirror-repeat' };
 
+// GpDraw.rect (x0 | y0 << 16, x1 | y1 << 16) within the target: the window
+// clip of a draw, the area of a clear. Split screen draws each player's view
+// into its own part of one target. full: it covers the target.
+function rectOf(d, rt) {
+  const x0 = d.rect[0] & 0xFFFF, y0 = d.rect[0] >>> 16;
+  const x1 = Math.min(d.rect[1] & 0xFFFF, rt.w), y1 = Math.min(d.rect[1] >>> 16, rt.h);
+  if (!d.rect[1] || (x0 <= 0 && y0 <= 0 && x1 >= rt.w && y1 >= rt.h)) return { x: 0, y: 0, w: rt.w, h: rt.h, full: true };
+  return { x: Math.min(x0, x1), y: Math.min(y0, y1), w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0), full: false };
+}
+
+// A clear of part of a target: a triangle over the target, cut to the rect by
+// the scissor, writing the clear colour and depth (one 256-byte uniform slot
+// per such clear in a frame).
+const CLEAR_WGSL = `struct C { col: vec4f, z: f32 };
+@group(0) @binding(0) var<uniform> c: C;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(p * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), c.z, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return c.col; }`;
+const CLEAR_SLOTS = 64;
+
 const unpack = (c) => [((c >>> 16) & 255) / 255, ((c >>> 8) & 255) / 255, (c & 255) / 255, (c >>> 24) / 255];
 
 // GpDraw / GpState field offsets in words.
@@ -66,7 +88,8 @@ function readDraws(bytes, n) {
       vtx_off: u[b + DO.vtx_off], vtx_count: u[b + DO.vtx_count], vtx_stride: u[b + DO.vtx_stride],
       idx_off: u[b + DO.idx_off], idx_count: u[b + DO.idx_count], vsc_off: u[b + DO.vsc_off],
       xfc_off: u[b + DO.xfc_off], psc_off: u[b + DO.psc_off],
-      clr_flags: u[b + DO.clr_flags], clr_argb: u[b + DO.clr_argb], clr_zs: u[b + DO.clr_zs], slots: null };
+      clr_flags: u[b + DO.clr_flags], clr_argb: u[b + DO.clr_argb], clr_zs: u[b + DO.clr_zs],
+      rect: [u[b + DO.rect], u[b + DO.rect + 1]], slots: null };
   }
   return out;
 }
@@ -320,7 +343,7 @@ export class GpEncoder {
     this.pass = this.enc.beginRenderPass(desc);
     this.pass.setViewport(0, 0, rt.w, rt.h, 0, 1);
     // What this pass has bound: set again only when it changes.
-    this.bound = { pipe: null, g1: null, bc: -1, sref: -1, vb: -1, vbn: -1, ib: false };
+    this.bound = { pipe: null, g1: null, bc: -1, sref: -1, vb: -1, vbn: -1, ib: false, sc: 0 };
     this.stats.passes++;
   }
 
@@ -341,9 +364,63 @@ export class GpEncoder {
     return { rt, ds };
   }
 
+  /** A clear of part of the target, drawn inside the current pass. */
+  clearRect(d, rc) {
+    const t = this.bindTarget(d);
+    if (!t) return this.skip('clear: no target');
+    if (!this.clr) {
+      const dev = this.dev, module = dev.createShaderModule({ label: 'clear_rect', code: CLEAR_WGSL });
+      const bgl = dev.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform', hasDynamicOffset: true } }] });
+      const buf = dev.createBuffer({ label: 'clear_rect', size: CLEAR_SLOTS * 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      this.clr = { module, layout: dev.createPipelineLayout({ bindGroupLayouts: [bgl] }), buf,
+        group: dev.createBindGroup({ layout: bgl, entries: [{ binding: 0, resource: { buffer: buf, offset: 0, size: 32 } }] }),
+        data: new Float32Array(8) };
+    }
+    if (this.clrSlot >= CLEAR_SLOTS) return this.skip('clear: too many partial clears');
+    const f = d.clr_flags, hasDs = !!t.ds;
+    const writeMask = (f & 0x10 ? 1 : 0) | (f & 0x20 ? 2 : 0) | (f & 0x40 ? 4 : 0) | (f & 0x80 ? 8 : 0);
+    const dw = hasDs && (f & 1) !== 0, sten = hasDs && (f & 2) !== 0;
+    const key = `clear|${hasDs ? 1 : 0}|${writeMask}|${dw ? 1 : 0}|${sten ? 1 : 0}`;
+    let pipe = this.pipes.get(key);
+    if (!pipe) {
+      const face = sten ? { compare: 'always', failOp: 'keep', depthFailOp: 'keep', passOp: 'replace' } : {};
+      pipe = this.dev.createRenderPipeline({ label: key, layout: this.clr.layout,
+        vertex: { module: this.clr.module, entryPoint: 'vs' },
+        fragment: { module: this.clr.module, entryPoint: 'fs', targets: [{ format: 'bgra8unorm', writeMask }] },
+        primitive: { topology: 'triangle-list', cullMode: 'none' },
+        depthStencil: hasDs ? { format: this.dsFormat, depthWriteEnabled: dw, depthCompare: 'always',
+          stencilFront: face, stencilBack: face, stencilReadMask: 0xFF, stencilWriteMask: sten ? 0xFF : 0 } : undefined });
+      this.pipes.set(key, pipe);
+    }
+    const c = this.clr.data;
+    c.set(unpack(d.clr_argb));
+    c[4] = d.zeta_format === 1 ? (d.clr_zs & 0xFFFF) / 65535 : (d.clr_zs >>> 8) / 16777215;
+    const off = this.clrSlot++ * 256;
+    this.dev.queue.writeBuffer(this.clr.buf, off, c);
+    const pass = this.pass, b = this.bound;
+    pass.setPipeline(pipe); b.pipe = pipe;
+    pass.setBindGroup(0, this.clr.group, [off]);
+    b.g1 = null;
+    if (hasDs && sten) { b.sref = d.clr_zs & 0xFF; pass.setStencilReference(b.sref); }
+    this.scissor(rc);
+    pass.draw(3);
+    this.stats.clears++;
+  }
+
+  /** Scissor for the current pass (a pass starts with the whole target). */
+  scissor(rc) {
+    const k = rc.full ? 0 : rc.x + rc.y * 4096 + (rc.w + rc.h * 4096) * 16777216;
+    if (k === this.bound.sc) return;
+    this.pass.setScissorRect(rc.x, rc.y, rc.w, rc.h);
+    this.bound.sc = k;
+  }
+
   doClear(d) {
     const rt = this.res.get(d.target);
     if (!rt || rt.kind !== 'rt') return this.skip('clear: no target');
+    const rc = rectOf(d, rt);
+    if (!rc.full) return this.clearRect(d, rc);
     let ds = d.zeta ? this.res.get(d.zeta) : null;
     if (ds && (ds.kind !== 'ds' || ds.w !== rt.w || ds.h !== rt.h)) ds = null;
     const clear = {};
@@ -409,6 +486,7 @@ export class GpEncoder {
       this.groups1.set(key, g1);
     }
     const pass = this.pass, b = this.bound;
+    this.scissor(rectOf(d, t.rt));
     const pipe = this.pipeline(d, kind, vs, ps.module, cube, !!t.ds);
     if (pipe !== b.pipe) { pass.setPipeline(pipe); b.pipe = pipe; }
     pass.setBindGroup(0, this.group0, [d.slots.xf, d.slots.vsc, d.slots.ps, d.slots.smp]);
@@ -454,7 +532,7 @@ export class GpEncoder {
   /** The command buffer for a staged frame. */
   encode(draws) {
     this.enc = this.dev.createCommandEncoder();
-    this.pass = null; this.curTarget = this.curZeta = -1;
+    this.pass = null; this.curTarget = this.curZeta = -1; this.clrSlot = 0;
     for (const d of draws) {
       if (d.kind === P.GP_CLEAR) this.doClear(d);
       else if (d.kind === P.GP_DRAW) this.doDraw(d);

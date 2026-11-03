@@ -2,15 +2,17 @@
 // browser and no hardware: a fake standard-mapping gamepad is polled into a
 // host block, and the pad_* fields are compared with the Xbox layout
 // (XINPUT_GAMEPAD: wButtons, bAnalogButtons[A B X Y Black White LT RT],
-// thumbs with +Y up).
+// thumbs with +Y up). Gamepads map by index: getGamepads()[n] is Xbox port
+// n + 1 (pad_* for port 1, pad_x[n - 1] for ports 2-4); the keyboard drives
+// the first port with no gamepad.
 //
 //   node web/tests/input/pad-map.mjs
 import { Input } from '../../host/input.js';
-import { Host } from '../../host/abi.js';
+import { Host, HOST_PADX_OFFSET, PadX } from '../../host/abi.js';
 
-let pad = null;
+let pad = null, pads = null;
 globalThis.addEventListener = () => {};
-Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { getGamepads: () => [null, pad] } });
+Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { getGamepads: () => pads ?? [pad, null, null, null] } });
 
 const memory = { buffer: new SharedArrayBuffer(4096) };
 const input = new Input(memory, 64);
@@ -60,6 +62,35 @@ eq('pad name', input.padName, 'fake standard pad');
 // Disconnect clears it.
 pad = null; input.pollGamepad();
 eq('unplugged', i32[at.pad_connected], 0);
+
+// By index: a pad at index 2 is port 3 (pad_x[1]); ports 1 and 2 have none,
+// so the keyboard is port 1 (live from the start, as before).
+const x32 = (port) => new Int32Array(memory.buffer, 64 + HOST_PADX_OFFSET + (port - 2) * PadX.size, PadX.words);
+const x8 = (port) => [...new Uint8Array(memory.buffer, 64 + HOST_PADX_OFFSET + (port - 2) * PadX.size + PadX.at.analog * 4, 8)];
+pads = [null, null, makePad({ 0: 1, 9: 1 }, {}, [0, -1, 0, 0]), null]; input.pollGamepad();
+eq('index 2 -> port 3 connected', x32(3)[PadX.at.connected], 1);
+eq('port 3 START', x32(3)[PadX.at.buttons], 0x10);
+eq('port 3 A', x8(3)[0], 255);
+eq('port 3 LY up', x32(3)[PadX.at.thumb + 1], 32767);
+eq('port 1 not connected', i32[at.pad_connected], 0);
+eq('port 2 not connected', x32(2)[PadX.at.connected], 0);
+eq('keyboard on port 1, live', [i32[at.kb_port], i32[at.kb_live]], [0, 1]);
+eq('status', input.status(), 'P1 keyboard, P3 fake standard pad');
+
+// Pads at 0 and 1: the keyboard moves to port 3 and joins on a key press.
+pads = [makePad({ 1: 1 }), makePad({ 2: 1 }), null, null]; input.pollGamepad();
+eq('port 1 B', analog()[1], 255);
+eq('port 2 X', x8(2)[2], 255);
+eq('keyboard on port 3, not yet live', [i32[at.kb_port], i32[at.kb_live]], [2, 0]);
+input.key(0x0d, 1); input.pollGamepad(); input.key(0x0d, 0);
+eq('keyboard on port 3, live after a key', [i32[at.kb_port], i32[at.kb_live]], [2, 1]);
+eq('status, 3 players', input.status(), 'P1 fake standard pad, P2 fake standard pad, P3 keyboard');
+
+// Four pads: no port left for the keyboard.
+pads = [makePad(), makePad(), makePad(), makePad({ 7: 1 })]; input.pollGamepad();
+eq('port 4 RT', x8(4)[7], 255);
+eq('keyboard: no port', i32[at.kb_port], -1);
+eq('seq even', i32[at.pad_seq] % 2, 0);
 
 console.log(fail ? `${fail} FAILED` : 'PASS');
 process.exit(fail ? 1 : 0);

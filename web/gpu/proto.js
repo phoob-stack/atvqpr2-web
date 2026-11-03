@@ -40,7 +40,7 @@ export const GpDraw = layout([
   ['st', GpState.size / 4],
   ['vtx_off'], ['vtx_count'], ['vtx_stride'], ['idx_off'], ['idx_count'],
   ['vsc_off'], ['xfc_off'], ['psc_off'],
-  ['clr_flags'], ['clr_argb'], ['clr_zs'],
+  ['clr_flags'], ['clr_argb'], ['clr_zs'], ['rect', 2],
 ]);
 
 export const GpCmd = layout([['op'], ['id'], ['a'], ['b'], ['c'], ['d'], ['e'], ['bytes']]);

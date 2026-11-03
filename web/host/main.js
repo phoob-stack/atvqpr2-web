@@ -366,7 +366,7 @@ async function boot() {
       const s = presenter?.stats ?? {};
       $('status').textContent = `${stageName(state.stage)} | flips ${i[Host.at.flips]} (${fps.toFixed(0)}/s) | ` +
         `GPU frames ${s.frames ?? 0}, draws ${s.lastDraws ?? 0}, dropped ${i[Host.at.gp_dropped]}, errors ${s.errors ?? 0} | ` +
-        `${s.shown ?? ''} | audio ${state.audio} | pad ${input?.padName || 'keyboard'}` +
+        `${s.shown ?? ''} | audio ${state.audio} | pads ${input?.status() ?? 'keyboard'}` +
         (state.vfs ? ` | data ${state.vfs.fetched} blocks fetched, ${state.vfs.opfsHits} from OPFS` : '');
     }
     requestAnimationFrame(tick);
