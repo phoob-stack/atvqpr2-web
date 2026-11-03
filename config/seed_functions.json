@@ -1,1 +1,72 @@
-[{"start": "0x000AB8B0", "observed": true, "note": "Indirect-call target observed at runtime (4,561 failed ICALLs in one run)."}]
+[
+ {
+  "start": "0x000AB8B0",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime (4,561 failed ICALLs in one run)."
+ },
+ {
+  "start": "0x000CC58C",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C1B70 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x000CC786",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C1B80 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x0012C767",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C6F98 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x0012C7C4",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C6FA8 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x0012CD02",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C6FC0 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x0012D98D",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C7468 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x00130ED4",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C7890 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x0013116F",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C78A0 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x00131F09",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C78DC (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x00132B89",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C7918 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x00132C42",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C7928 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x00132CE8",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C7938 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ },
+ {
+  "start": "0x00132DFC",
+  "observed": false,
+  "note": "SEH __finally handler: scope-table entry {-1, 0, handler} at 0x001C7948 (.rdata); reached only through the SEH unwinder (indirect). Not observed at runtime; latent."
+ }
+]
