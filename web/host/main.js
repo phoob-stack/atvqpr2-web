@@ -10,6 +10,12 @@
 //                             never from it (0); see loader.js
 //             &forget=1       delete the imported game files first (saves stay)
 //             &saves=off      saves in memory only, starting empty (saves.js)
+//             &res=1|2|3|4|<n>|window   internal resolution: n times 640x480,
+//                             or the size the canvas shows the picture at
+//             &msaa=0|4       multisampling (WebGPU has 4; 2 asks for 4)
+//             &widescreen=1   the title is told the TV is 16:9 (it renders
+//                             anamorphic) and the canvas shows 16:9
+//             (the site's Settings page sets these: web/host/site/settings.js)
 //
 // Served by web/host/serve.mjs (127.0.0.1 only, COOP/COEP so that
 // SharedArrayBuffer and shared WebAssembly.Memory exist). The game files are
@@ -46,6 +52,23 @@ export const DEFAULT_ENV = {
 
 const $ = (id) => document.getElementById(id);
 const q = new URLSearchParams(location.search);
+
+// Display options (present.js / encoder.js; src/gpu/gpu_display.h natively).
+const display = (() => {
+  const r = (q.get('res') ?? '1').toLowerCase(), win = r === 'window' || r === 'w';
+  const n = Number(r);
+  return { window: win, scale: win || !(n >= 1) ? 1 : Math.min(8, n),
+    msaa: Number(q.get('msaa') ?? 0) > 1 ? 4 : 1, widescreen: q.get('widescreen') === '1' };
+})();
+
+// F11 toggles fullscreen (the site keeps F11 for the page, settings.js
+// RESERVED_CODES; its menu's Fullscreen item does the same).
+addEventListener('keydown', (e) => {
+  if (e.code !== 'F11' || e.repeat) return;
+  e.preventDefault();
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+}, { capture: true });
 const logLines = [];
 let logPending = [];
 const state = { stage: 0, exit: null, trap: null, missing: null, vfs: null, audio: 'off (click or press a key)' };
@@ -102,6 +125,12 @@ async function boot() {
     const i = kv.indexOf('=');
     env[i < 0 ? kv : kv.slice(0, i)] = i < 0 ? '1' : kv.slice(i + 1);
   }
+  // Widescreen is the title's own 16:9 mode (dashboard video setting, read by
+  // XGetVideoFlags and D3D): the kernel reports it (kernel_xbox.c).
+  if (display.widescreen) env.RECOMP_WIDESCREEN = '1';
+  else display.widescreen = !!env.RECOMP_WIDESCREEN && env.RECOMP_WIDESCREEN !== '0';
+  log(`[page] display: ${display.window ? 'window-sized' : `${display.scale}x`} internal resolution, ` +
+    `MSAA ${display.msaa > 1 ? `${display.msaa}x` : 'off'}, ${display.widescreen ? '16:9' : '4:3'}`);
 
   // The GPU (and the Worker-side checks) come up while the module compiles
   // and, when the game files are already there, while the threads start.
@@ -266,7 +295,7 @@ async function boot() {
     hostView(memory, hostPtr);
     input = new Input(memory, hostPtr);
     presenter = new Presenter({ device: gpu.device, features: gpu.features, canvas: $('screen'),
-      memory, hostPtr, onError: (s) => log(`[page] ${s}`, 'err') });
+      memory, hostPtr, onError: (s) => log(`[page] ${s}`, 'err'), display });
     window.atv.presenter = presenter; window.atv.input = input;
     log(`[page] host block at 0x${hostPtr.toString(16)}`);
   })();
@@ -381,7 +410,7 @@ saves.lock().then((ok) => { if (!ok) log(`[saves] not kept by this tab: ${saves.
 wireSavesUI(saves);
 
 window.atv = {
-  state, log: logLines, loader: loaderState, timings, saves,
+  state, log: logLines, loader: loaderState, timings, saves, display,
   stage: () => stageName(state.stage),
   snapshot: async () => {
     const png = await window.atv.presenter?.snapshot();

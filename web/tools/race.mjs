@@ -59,6 +59,8 @@ const qs = new URLSearchParams();
 qs.set('env', env);
 if (wasm) qs.set('wasm', wasm);
 if (!argv.includes('--keep-saves')) qs.set('saves', 'off');
+// --qs 'res=2&msaa=4&widescreen=1': more page parameters (main.js), e.g. the display options.
+for (const [k, v] of new URLSearchParams(opt('--qs', ''))) qs.set(k, v);
 const b = await launch(`http://127.0.0.1:${port}/host/index.html?${qs}`, { profile: opt('--profile') });
 const t0 = Date.now();
 const el = () => `${((Date.now() - t0) / 1000).toFixed(0).padStart(4)}s`;

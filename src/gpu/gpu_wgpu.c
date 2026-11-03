@@ -1179,7 +1179,11 @@ static int display_init(void)
     s_active = 1;
     gp_display_scale_for(0, 0, &s_sx, &s_sy);
     s_want_sx = s_sx; s_want_sy = s_sy;
-    s_msaa = g->msaa > 4 ? 4 : g->msaa;   /* WebGPU guarantees 1 and 4; 2 is allowed for BGRA8 by wgpu */
+    /* WebGPU has 1 and 4 samples (others need an adapter-specific feature):
+     * 2x and 8x ask for 4. */
+    s_msaa = g->msaa > 1 ? 4 : 1;
+    if (g->msaa > 1 && g->msaa != 4)
+        fprintf(stderr, "  [WGPU] MSAA %dx: WebGPU has 4x; using 4x\n", g->msaa);
     memset(e, 0, sizeof e);
     e[0].binding = 0; e[0].visibility = WGPUShaderStage_Fragment;
     e[0].texture.sampleType = WGPUTextureSampleType_Float; e[0].texture.viewDimension = WGPUTextureViewDimension_2D;

@@ -16,6 +16,15 @@
 //   - no depth-clip-disable: not needed, z is saturated in the VS;
 //   - pipelines (blend/depth/stencil/write mask are baked) are cached by key;
 //     nfsu2-web additionally prewarms them with createRenderPipelineAsync.
+//
+// Display options (new GpEncoder(device, features, { sx, sy, msaa, window })),
+// as src/gpu/gpu_display.h natively: render targets, depth and render-target
+// tiles at sx x sy times the guest size (the vertex shaders map guest surface
+// pixels to clip space by the guest size, so only the viewport changes; guest
+// pixels going in are scaled up), and/or 4x multisampled targets resolved
+// wherever they are read (sampled, copied, shown). setScale() rebuilds every
+// target at a new scale before the next frame ("window"). Off (1x, no MSAA):
+// none of that code runs.
 import * as P from './proto.js';
 import { makeLayouts, UNIFORM_SLOTS, vertexLayout, cubeMaskOf, inputMaskOf } from './layout.js';
 
@@ -94,8 +103,30 @@ function readDraws(bytes, n) {
   return out;
 }
 
+const BLIT_WGSL = `
+struct B { ratio: vec2f, srcsize: vec2f, origin: vec2f, pad: vec2f };
+@group(0) @binding(0) var t: texture_2d<f32>;
+@group(0) @binding(1) var s: sampler;
+@group(0) @binding(2) var<uniform> u: B;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let q = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(q * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+  let d = p.xy - u.origin;
+  if (u.ratio.x <= 1.0 && u.ratio.y <= 1.0) { return textureSampleLevel(t, s, d * u.ratio / u.srcsize, 0.0); }
+  let nx = max(i32(ceil(u.ratio.x - 0.001)), 1);
+  let ny = max(i32(ceil(u.ratio.y - 0.001)), 1);
+  let p0 = floor(d) * u.ratio;
+  let st = u.ratio / vec2f(f32(nx), f32(ny));
+  var c = vec4f(0.0);
+  for (var y = 0; y < ny; y++) { for (var x = 0; x < nx; x++) {
+    c += textureSampleLevel(t, s, (p0 + (vec2f(f32(x), f32(y)) + 0.5) * st) / u.srcsize, 0.0); } }
+  return c / f32(nx * ny);
+}`;
+
 export class GpEncoder {
-  constructor(device, features = []) {
+  constructor(device, features = [], opts = {}) {
     this.dev = device;
     this.L = makeLayouts(device);
     this.bc = features.includes('texture-compression-bc');
@@ -115,6 +146,110 @@ export class GpEncoder {
       usage: GPUTextureUsage.TEXTURE_BINDING });     // zero-initialised: reads 0, as a NULL SRV
     this.dummy2d = z(false).createView();
     this.dummyCube = z(true).createView({ dimension: 'cube' });
+    // Display options. WebGPU has 1 and 4 samples (2x asks for 4).
+    this.msaa = opts.msaa > 1 ? 4 : 1;
+    this.sx = opts.sx ?? 1; this.sy = opts.sy ?? 1;
+    this.active = !!opts.window || this.sx !== 1 || this.sy !== 1 || this.msaa > 1;
+    this.want = null;
+    if (this.active) {
+      const module = device.createShaderModule({ label: 'blit', code: BLIT_WGSL });
+      this.blitPipes = new Map();
+      this.blitModule = module;
+      this.blitSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    }
+  }
+
+  // ---- display options -------------------------------------------------------
+
+  scaled(v, s) { return s === 1 ? v : Math.floor(v * s + 0.5); }
+
+  /** "window": the scale the next frame is drawn at. */
+  setScale(sx, sy) { if (sx !== this.sx || sy !== this.sy) this.want = [sx, sy]; }
+
+  blitPipe(format, samples) {
+    const key = `${format}/${samples}`;
+    let p = this.blitPipes.get(key);
+    if (!p) {
+      p = this.dev.createRenderPipeline({ label: `blit ${key}`, layout: 'auto',
+        vertex: { module: this.blitModule, entryPoint: 'vs' },
+        fragment: { module: this.blitModule, entryPoint: 'fs', targets: [{ format }] },
+        primitive: { topology: 'triangle-list' }, multisample: { count: samples } });
+      this.blitPipes.set(key, p);
+    }
+    return p;
+  }
+
+  /** src (sw x sh) scaled into x,y,w,h of dst, in encoder `e`: bilinear
+   * enlarging, a box filter reducing (blit() in gpu_d3d11.c). */
+  blit(e, srcView, sw, sh, dstView, samples, x, y, w, h, format = 'bgra8unorm', clear = false) {
+    const pipe = this.blitPipe(format, samples);
+    const ub = this.dev.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.dev.queue.writeBuffer(ub, 0, new Float32Array([sw / w, sh / h, sw, sh, x, y, 0, 0]));
+    const g = this.dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: srcView }, { binding: 1, resource: this.blitSampler }, { binding: 2, resource: { buffer: ub } }] });
+    const pass = e.beginRenderPass({ colorAttachments: [{ view: dstView, loadOp: clear ? 'clear' : 'load',
+      clearValue: [0, 0, 0, 1], storeOp: 'store' }] });
+    pass.setViewport(x, y, w, h, 0, 1);
+    pass.setPipeline(pipe); pass.setBindGroup(0, g); pass.draw(3);
+    pass.end();
+  }
+
+  /** A blit in its own command buffer, submitted now (queue order keeps it
+   * after the writes before it and before the frame's draws). */
+  blitNow(...args) {
+    const e = this.dev.createCommandEncoder();
+    this.blit(e, ...args);
+    this.dev.queue.submit([e.finish()]);
+  }
+
+  /** MSAA: the multisampled picture into r.texture, in encoder `e`. */
+  resolveIn(e, r) {
+    if (!r.ms || !r.msDirty) return;
+    e.beginRenderPass({ colorAttachments: [{ view: r.msView, resolveTarget: r.view, loadOp: 'load', storeOp: 'store' }] }).end();
+    r.msDirty = false;
+  }
+
+  /** In the frame's encoder, between passes. */
+  resolve(r) { if (r.ms && r.msDirty) { this.endPass(); this.resolveIn(this.enc, r); } }
+
+  makeRt(w, h, id) {
+    const sw = this.scaled(w, this.sx), sh = this.scaled(h, this.sy);
+    const texture = this.dev.createTexture({ label: `rt_${id}`, size: [sw, sh], format: 'bgra8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+           | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
+    const o = { texture, view: texture.createView(), sw, sh, ms: null, msView: null, msDirty: false };
+    if (this.msaa > 1) {
+      o.ms = this.dev.createTexture({ label: `rt_${id}_ms`, size: [sw, sh], format: 'bgra8unorm', sampleCount: this.msaa,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      o.msView = o.ms.createView();
+    }
+    return o;
+  }
+
+  /** "window": every target remade at the new scale, its picture scaled
+   * across (the title samples some of them frames later); depth and tiles
+   * remade (depth is cleared by the next frame, tiles copied before use). */
+  rescale(sx, sy) {
+    const e = this.dev.createCommandEncoder(), old = [];
+    this.sx = sx; this.sy = sy;
+    for (const [id, r] of this.res) {
+      if (r.kind === 'rt') {
+        this.resolveIn(e, r);
+        const o = this.makeRt(r.w, r.h, id);
+        this.blit(e, r.view, r.sw, r.sh, o.msView ?? o.view, o.ms ? this.msaa : 1, 0, 0, o.sw, o.sh);
+        old.push(r.texture, r.ms);
+        Object.assign(r, o, { serial: ++this.serial, msDirty: !!o.ms });
+      } else if (r.kind === 'ds') {
+        old.push(r.texture);
+        this.dsCreate({ id, b: r.w, c: r.h }, true);
+      } else if (r.kind === 'sub') {
+        old.push(r.texture);
+        this.subCreate({ id, a: r.src, b: r.w, c: r.h, d: r.x0 | (r.y0 << 16) }, true);
+      }
+    }
+    this.dev.queue.submit([e.finish()]);
+    for (const t of old) t?.destroy();
+    this.groups1.clear();
   }
 
   skip(why) { this.stats.skipped++; this.stats.reasons[why] = (this.stats.reasons[why] ?? 0) + 1; }
@@ -150,11 +285,28 @@ export class GpEncoder {
   free(id) {
     const r = this.res.get(id);
     if (r?.texture) r.texture.destroy();
+    if (r?.ms) r.ms.destroy();
     this.res.delete(id);
   }
 
   rtCreate(c, payload) {
     this.free(c.id);
+    if (this.active) {
+      // Scaled and/or multisampled: the guest pixels go in through a
+      // guest-size texture, scaled up into the draw target.
+      const o = this.makeRt(c.b, c.c, c.id);
+      if (c.bytes) {
+        const tmp = this.dev.createTexture({ size: [c.b, c.c], format: 'bgra8unorm',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+        this.dev.queue.writeTexture({ texture: tmp }, payload, { bytesPerRow: c.b * 4 }, [c.b, c.c]);
+        this.blitNow(tmp.createView(), c.b, c.c, o.msView ?? o.view, o.ms ? this.msaa : 1, 0, 0, o.sw, o.sh);
+        tmp.destroy();                    // after the submit: the queue still runs it
+        o.msDirty = !!o.ms;
+      }
+      this.res.set(c.id, { kind: 'rt', serial: ++this.serial, ...o, w: c.b, h: c.c, va: c.a,
+        bpp: c.d & 255, fmt: (c.d >> 8) & 255, swz: (c.d >> 16) & 1, pitch: c.e, dirty: false });
+      return;
+    }
     const texture = this.dev.createTexture({ label: `rt_${c.id}`, size: [c.b, c.c], format: 'bgra8unorm',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
            | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
@@ -163,9 +315,12 @@ export class GpEncoder {
       bpp: c.d & 255, fmt: (c.d >> 8) & 255, swz: (c.d >> 16) & 1, pitch: c.e, dirty: false });
   }
 
-  dsCreate(c) {
-    this.free(c.id);
-    const texture = this.dev.createTexture({ label: `ds_${c.id}`, size: [c.b, c.c], format: this.dsFormat,
+  dsCreate(c, keep = false) {
+    if (!keep) this.free(c.id);
+    const texture = this.active
+      ? this.dev.createTexture({ label: `ds_${c.id}`, size: [this.scaled(c.b, this.sx), this.scaled(c.c, this.sy)],
+        format: this.dsFormat, sampleCount: this.msaa, usage: GPUTextureUsage.RENDER_ATTACHMENT })
+      : this.dev.createTexture({ label: `ds_${c.id}`, size: [c.b, c.c], format: this.dsFormat,
       usage: GPUTextureUsage.RENDER_ATTACHMENT });
     this.res.set(c.id, { kind: 'ds', serial: ++this.serial, texture, view: texture.createView(), w: c.b, h: c.c });
   }
@@ -201,12 +356,16 @@ export class GpEncoder {
 
   /** GP_SUB_CREATE: a tile of a render target, copied out of it before
    * every draw that samples it. */
-  subCreate(c) {
-    this.free(c.id);
-    const texture = this.dev.createTexture({ label: `sub_${c.id}`, size: [c.b, c.c], format: 'bgra8unorm',
+  subCreate(c, keep = false) {
+    if (!keep) this.free(c.id);
+    const x0 = c.d & 0xFFFF, y0 = c.d >>> 16;
+    // Scaled: the tile's box in the scaled source, both edges scaled.
+    const bx = this.scaled(x0, this.sx), by = this.scaled(y0, this.sy);
+    const sw = this.scaled(x0 + c.b, this.sx) - bx, sh = this.scaled(y0 + c.c, this.sy) - by;
+    const texture = this.dev.createTexture({ label: `sub_${c.id}`, size: this.active ? [sw, sh] : [c.b, c.c], format: 'bgra8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.res.set(c.id, { kind: 'sub', serial: ++this.serial, texture, view: texture.createView(), w: c.b, h: c.c,
-      src: c.a, x0: c.d & 0xFFFF, y0: c.d >>> 16 });
+      src: c.a, x0, y0, bx, by, sw, sh });
   }
 
   // ---- per-frame buffers ---------------------------------------------------
@@ -319,6 +478,7 @@ export class GpEncoder {
       vertex: { module: vs.module, entryPoint: 'main', buffers: vertexLayout(kind, vs.inputs, d.vtx_stride) },
       fragment: { module: ps, entryPoint: 'main', targets: [{ format: 'bgra8unorm', blend, writeMask }] },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: this.msaa },
       depthStencil: hasDs ? { format: this.dsFormat, depthWriteEnabled: !!dw,
         depthCompare: dt ? CMP[st.depth_func] ?? 'always' : 'always',
         stencilFront: face, stencilBack: face,
@@ -335,13 +495,14 @@ export class GpEncoder {
 
   beginPass(rt, ds, clear = {}) {
     this.endPass();
-    const desc = { colorAttachments: [{ view: rt.view, storeOp: 'store',
+    const desc = { colorAttachments: [{ view: rt.msView ?? rt.view, storeOp: 'store',
       loadOp: clear.color ? 'clear' : 'load', clearValue: clear.color ?? [0, 0, 0, 0] }] };
     if (ds) desc.depthStencilAttachment = { view: ds.view,
       depthLoadOp: clear.depth !== undefined ? 'clear' : 'load', depthClearValue: clear.depth ?? 1, depthStoreOp: 'store',
       stencilLoadOp: clear.stencil !== undefined ? 'clear' : 'load', stencilClearValue: clear.stencil ?? 0, stencilStoreOp: 'store' };
     this.pass = this.enc.beginRenderPass(desc);
-    this.pass.setViewport(0, 0, rt.w, rt.h, 0, 1);
+    if (this.active) { this.pass.setViewport(0, 0, rt.sw, rt.sh, 0, 1); if (rt.ms) rt.msDirty = true; }
+    else this.pass.setViewport(0, 0, rt.w, rt.h, 0, 1);
     // What this pass has bound: set again only when it changes.
     this.bound = { pipe: null, g1: null, bc: -1, sref: -1, vb: -1, vbn: -1, ib: false, sc: 0 };
     this.stats.passes++;
@@ -445,10 +606,21 @@ export class GpEncoder {
     if (!d.vtx_count) return this.skip('no vertices');
     // Tiles of render targets are copied out first; a copy ends the pass.
     for (const id of d.tex) {
+      if (this.active && id && (id & P.GP_TEX_RT)) {        // MSAA: sampled from texture
+        const rid = (id & ~P.GP_TEX_RT) >>> 0, r = rid !== d.target && this.res.get(rid);
+        if (r && r.kind === 'rt') this.resolve(r);
+        continue;
+      }
       const r = id && !(id & P.GP_TEX_RT) && this.res.get(id);
       if (!r || r.kind !== 'sub') continue;
       const src = this.res.get(r.src);
       if (!src || src.kind !== 'rt' || r.src === d.target || r.x0 + r.w > src.w || r.y0 + r.h > src.h) continue;
+      if (this.active) {
+        this.resolve(src);
+        this.endPass();
+        this.enc.copyTextureToTexture({ texture: src.texture, origin: [r.bx, r.by, 0] }, { texture: r.texture }, [r.sw, r.sh]);
+        continue;
+      }
       this.endPass();
       this.enc.copyTextureToTexture({ texture: src.texture, origin: [r.x0, r.y0, 0] }, { texture: r.texture }, [r.w, r.h]);
     }
@@ -519,6 +691,7 @@ export class GpEncoder {
    * The frame may be views straight into the shared wasm memory, which the
    * recorder may reuse as soon as this returns. */
   stage(frame) {
+    if (this.want) { const [sx, sy] = this.want; this.want = null; this.rescale(sx, sy); }
     this.drainQueue(frame.queue);
     const draws = readDraws(frame.draws, frame.drawCount);
     const vbuf = this.buffer('vtx', frame.vtx.byteLength + 4, GPUBufferUsage.VERTEX);
@@ -539,6 +712,8 @@ export class GpEncoder {
       else this.skip('kind');
     }
     this.endPass();
+    if (this.active)        // MSAA: what the page shows is resolved
+      for (const r of this.res.values()) if (r.kind === 'rt') this.resolveIn(this.enc, r);
     this.dev.queue.submit([this.enc.finish()]);
     this.enc = null;
     // The writeback of linear dirty targets into guest memory goes here in
@@ -549,15 +724,16 @@ export class GpEncoder {
   async readTarget(id) {
     const r = this.res.get(id);
     if (!r || r.kind !== 'rt') return null;
-    const bpr = (r.w * 4 + 255) & ~255;
-    const buf = this.dev.createBuffer({ size: bpr * r.h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const w = r.sw ?? r.w, h = r.sh ?? r.h;          // scaled: the full-size picture
+    const bpr = (w * 4 + 255) & ~255;
+    const buf = this.dev.createBuffer({ size: bpr * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = this.dev.createCommandEncoder();
-    enc.copyTextureToBuffer({ texture: r.texture }, { buffer: buf, bytesPerRow: bpr }, [r.w, r.h]);
+    enc.copyTextureToBuffer({ texture: r.texture }, { buffer: buf, bytesPerRow: bpr }, [w, h]);
     this.dev.queue.submit([enc.finish()]);
     await buf.mapAsync(GPUMapMode.READ);
-    const src = new Uint8Array(buf.getMappedRange()), out = new Uint8Array(r.w * r.h * 4);
-    for (let y = 0; y < r.h; y++) out.set(src.subarray(y * bpr, y * bpr + r.w * 4), y * r.w * 4);
+    const src = new Uint8Array(buf.getMappedRange()), out = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) out.set(src.subarray(y * bpr, y * bpr + w * 4), y * w * 4);
     buf.unmap(); buf.destroy();
-    return { w: r.w, h: r.h, px: out };
+    return { w, h, px: out };
   }
 }

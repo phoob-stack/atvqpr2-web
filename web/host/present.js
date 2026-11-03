@@ -8,7 +8,10 @@
 //    a race (10-25 MB a frame).
 //  - display: on every animation frame, shows the render target the encoder
 //    holds for the guest framebuffer the title last flipped to (disp_va), or
-//    the CPU-converted framebuffer (disp_cpu), letterboxed 4:3 on the canvas.
+//    the CPU-converted framebuffer (disp_cpu), letterboxed 4:3 on the canvas
+//    (16:9 with the widescreen option: the title then renders anamorphic).
+//  - display options (main.js: ?res=2|4|window, ?msaa=4, ?widescreen=1): the
+//    encoder draws at that scale / with MSAA; "window" follows the canvas.
 import { Host, GpFrame } from './abi.js';
 import { GpEncoder } from '../gpu/encoder.js';
 import * as P from '../gpu/proto.js';
@@ -23,11 +26,31 @@ struct V { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 }
 @fragment fn fs(v: V) -> @location(0) vec4f { return vec4f(textureSample(src, smp, v.uv).rgb, 1.0); }`;
 
+/** The encoder scale for a 640x480 guest frame (gp_display_scale_for in
+ * src/gpu/gpu_display.c): fixed, or for "window" the letterboxed picture in
+ * a cw x ch canvas. Height decides; the width follows the display aspect
+ * (a 16:9 frame gets square pixels). 1..8, window sizes in 1/64 steps. */
+export function scaleFor(d, cw, ch) {
+  const [aw, ah] = d.aspect;
+  let h;
+  if (!d.window) { if (d.scale === 1) return [1, 1]; h = 480 * d.scale; }
+  else if (!cw || !ch) return [1, 1];
+  else h = Math.min(cw * ah / aw, ch);
+  const clamp = (v) => Math.min(8, Math.max(1, v));
+  let sy = clamp(h / 480), sx = clamp(h * aw / ah / 640);
+  if (d.window) { sx = Math.round(sx * 64) / 64; sy = Math.round(sy * 64) / 64; }
+  return [sx, sy];
+}
+
 export class Presenter {
-  constructor({ device, features, canvas, memory, hostPtr, onError }) {
+  constructor({ device, features, canvas, memory, hostPtr, onError, display = {} }) {
     this.dev = device; this.memory = memory; this.ptr = hostPtr;
     this.i32 = new Int32Array(memory.buffer, hostPtr, Host.words);
-    this.enc = new GpEncoder(device, features);
+    this.display = { aspect: display.widescreen ? [16, 9] : [4, 3], window: !!display.window,
+      scale: display.scale ?? 1, msaa: display.msaa ?? 1 };
+    const [sx, sy] = this.display.window ? [1, 1] : scaleFor(this.display, 0, 0);
+    this.enc = new GpEncoder(device, features, { sx, sy, msaa: this.display.msaa, window: this.display.window });
+    this.winScale = { want: null, same: 0 };
     this.onError = onError ?? ((m) => console.warn(m));
     this.stats = { frames: 0, presented: 0, cpuFrames: 0, copyMs: 0, encodeMs: 0, errors: 0, lastDraws: 0, shown: '',
       vtxBytes: 0, idxBytes: 0, constBytes: 0, queueBytes: 0 };
@@ -137,9 +160,17 @@ export class Presenter {
     this.lastDisp = d;
     const tex = this.source();
     if (!tex) return;
-    const cv = this.canvas, cw = cv.width, ch = cv.height;
-    let w = cw, h = Math.round(cw * 3 / 4);
-    if (h > ch) { h = ch; w = Math.round(ch * 4 / 3); }
+    const cv = this.canvas, cw = cv.width, ch = cv.height, [aw, ah] = this.display.aspect;
+    let w = cw, h = Math.round(cw * ah / aw);
+    if (h > ch) { h = ch; w = Math.round(ch * aw / ah); }
+    if (this.display.window) {
+      // "window": the encoder's scale follows the picture's size on the
+      // canvas, once a size has held for 20 frames (a resize drag does not
+      // rebuild every target on each step).
+      const [sx, sy] = scaleFor(this.display, cw, ch), ws = this.winScale;
+      if (!ws.want || ws.want[0] !== sx || ws.want[1] !== sy) { ws.want = [sx, sy]; ws.same = 0; }
+      else if (++ws.same === 20) this.enc.setScale(sx, sy);
+    }
     let g = this.groups.get(tex);
     if (!g) {
       g = this.dev.createBindGroup({ layout: this.blit.getBindGroupLayout(0),

@@ -60,6 +60,8 @@ if (env) qs.set('env', env);
 if (wasm) qs.set('wasm', wasm);
 if (args) qs.set('args', args);
 if (opt('--saves')) qs.set('saves', opt('--saves'));   // off: saves in memory only (saves.js)
+// --qs 'res=2&msaa=4&widescreen=1': more page parameters (main.js), e.g. the display options.
+for (const [k, v] of new URLSearchParams(opt('--qs', ''))) qs.set(k, v);
 const url = `http://127.0.0.1:${port}/host/index.html${qs.size ? `?${qs}` : ''}`;
 const b = await launch(url, { profile: opt('--profile') });
 const t0 = Date.now();
