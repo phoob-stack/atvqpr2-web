@@ -5,6 +5,7 @@
 import { downloadLog } from './logs.js';
 
 const $ = (id) => document.getElementById(id);
+const BUSY = 'atv2.busyRetries';
 
 function phaseText(atv) {
   const L = atv?.loader?.phase;
@@ -36,6 +37,18 @@ export function watch({ kind }) {
     const atv = window.atv;
     const st = atv?.state;
     const failed = st?.error || st?.trap || (st?.exit !== null && st?.exit !== undefined);
+    // The game files are still open in a page that is going away (Quit, then Play again at once): the
+    // browser frees them a moment later, so start again by itself a few times before calling it a failure.
+    if (st?.error && /in use by another tab/.test(String(st.error))) {
+      let n = 0;
+      try { n = Number(sessionStorage.getItem(BUSY) ?? 0); } catch { /* */ }
+      if (n < 8) {
+        try { sessionStorage.setItem(BUSY, String(n + 1)); } catch { /* */ }
+        msg.textContent = 'Waiting for the previous game to close…';
+        setTimeout(() => location.reload(), 1000);
+        return;
+      }
+    }
     if (failed) {
       card.hidden = false; card.classList.add('failed');
       title.textContent = 'The game stopped';
@@ -48,6 +61,7 @@ export function watch({ kind }) {
     const s = atv?.presenter?.stats;
     if (!shown && s && (s.frames > 0 || s.cpuFrames > 0)) {
       shown = true; card.hidden = true;
+      try { sessionStorage.removeItem(BUSY); } catch { /* */ }
       document.body.classList.add('playing');
     }
     if (!shown) {

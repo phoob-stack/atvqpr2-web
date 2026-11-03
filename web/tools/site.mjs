@@ -250,7 +250,7 @@ try {
   check(await until(`location.search.includes('play=freeride-pick') && (window.atv?.log ?? []).some((l) => l.startsWith('[page] env:') && l.includes('RECOMP_FREERIDE=pick'))`, 30),
     'Free Ride (pick): RECOMP_FREERIDE=pick in the env');
   check(await until(`atv.log.some((l) => l.includes('[FREERIDE] on:'))`, 60), 'Free Ride (pick): the runtime took it: ' +
-    await b.eval(`atv.log.find((l) => l.includes('[FREERIDE] on:')) ?? ''`));
+    await b.eval(`atv.log.find((l) => l.includes('[FREERIDE] on:')) ?? JSON.stringify({ st: document.getElementById('status').textContent, loader: atv.loader.phase, n: atv.log.length, last: atv.log.slice(-6) })`));
   await b.eval(`localStorage.removeItem('atv2.settings.v1')`);
   await b.send('Page.navigate', { url: `${base}/host/index.html?play=freeride` });
   check(await until(`(window.atv?.log ?? []).some((l) => l.startsWith('[page] env:') && l.includes('RECOMP_FREERIDE=1'))`, 30), 'Free Ride: RECOMP_FREERIDE=1 in the env');
