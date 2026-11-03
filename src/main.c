@@ -581,6 +581,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 #ifdef _WIN32
     kick_ack_start();
 #endif
+    /* RECOMP_CONTROL=<port>: loopback test channel (src/control). */
+    {
+        extern void atv2_control_init(void);
+        atv2_control_init();
+    }
 
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");
