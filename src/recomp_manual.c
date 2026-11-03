@@ -87,6 +87,16 @@ extern ptrdiff_t g_xbox_mem_offset;
  */
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
+    /* Free Ride (RECOMP_FREERIDE=1, src/freeride.c): one flag test when off. */
+    {
+        extern volatile int atv2_freeride_hook;
+        extern recomp_func_t atv2_freeride_lookup(uint32_t va);
+        if (atv2_freeride_hook) {
+            recomp_func_t f = atv2_freeride_lookup(xbox_va);
+            if (f)
+                return f;
+        }
+    }
     /*
      * TODO: Add your overrides here. Examples:
      *

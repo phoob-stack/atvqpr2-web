@@ -58,7 +58,7 @@ echo "== runtime and game sources"
 # the control channel (winsock) are native only: src/web is the browser's main,
 # libc shims and the audio/input/present back ends (web/host is the page).
 rm -f "$OUT"/rt/main.o "$OUT"/rt/control*.o
-for f in "$RT"/src/{apu,audio,kernel,nv2a,platform,usb,video,input}/*.c "$GAME"/src/recomp_manual.c \
+for f in "$RT"/src/{apu,audio,kernel,nv2a,platform,usb,video,input}/*.c "$GAME"/src/recomp_manual.c "$GAME"/src/freeride.c \
          "$GAME"/src/web/*.c "$GAME"/src/wasm/*.c "$GAME"/src/gpu/gpu_rec.c "$GAME"/src/gpu/gpu_shadergen*.c \
          "$GAME"/src/gpu/gpu_wgsl_tap.c; do
   case "$(basename "$f")" in *sdl*|d3d8_*|mkb_input.c|xinput_device.c) continue;; esac

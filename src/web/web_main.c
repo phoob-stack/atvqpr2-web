@@ -258,6 +258,12 @@ int main(int argc, char **argv)
     }
     kick_ack_start();
     stage(WEB_STAGE_GPU);
+    /* RECOMP_FREERIDE=1 (?env=RECOMP_FREERIDE=1): straight into Freestyle,
+     * Unlimited Time (src/freeride.c). */
+    {
+        extern void atv2_freeride_init(void);
+        atv2_freeride_init();
+    }
 
     printf("\nStarting game...\n");
     fflush(stdout);

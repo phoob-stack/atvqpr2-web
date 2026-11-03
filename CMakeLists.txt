@@ -52,6 +52,8 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "src/recomp/gen/*.c")
 set(GAME_SOURCES
     src/main.c
     src/recomp_manual.c
+    # Free Ride (RECOMP_FREERIDE=1): straight into Freestyle, Unlimited Time
+    src/freeride.c
     # GPU renderer (RECOMP_GPU=1): recorder -> frame packets -> D3D11 consumer
     src/gpu/gpu_rec.c
     src/gpu/gpu_shadergen.c

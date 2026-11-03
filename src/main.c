@@ -607,6 +607,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         extern void atv2_control_init(void);
         atv2_control_init();
     }
+    /* RECOMP_FREERIDE=1: straight into Freestyle, Unlimited Time (src/freeride.c). */
+    {
+        extern void atv2_freeride_init(void);
+        atv2_freeride_init();
+    }
 
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");
