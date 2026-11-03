@@ -55,7 +55,7 @@ const srv = spawn(process.execPath, [join(ROOT, 'web/host/serve.mjs'), '--port',
   ...(game ? ['--game', game] : []), ...(overlay ? ['--overlay', overlay] : [])],
   { stdio: ['ignore', 'pipe', 'inherit'] });
 await new Promise((r) => srv.stdout.once('data', r));
-const qs = new URLSearchParams();
+const qs = new URLSearchParams({ play: '1' });   // [site] play=1: the game, not the start page, even with no other parameter
 if (env) qs.set('env', env);
 if (wasm) qs.set('wasm', wasm);
 if (args) qs.set('args', args);

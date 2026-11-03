@@ -95,6 +95,8 @@ async function boot() {
   const wasm = loadWasm(wasmUrl);
   const args = ['atv2', ...(q.get('args') ?? '').split(',').filter(Boolean)];
   const env = { ...DEFAULT_ENV };
+  // [site] the player's settings (site/settings.js via site/shell.js), between the defaults and ?env=; null unsets.
+  for (const [k, v] of Object.entries(window.atvSite?.env ?? {})) { if (v === null) delete env[k]; else env[k] = v; }
   for (const kv of (q.get('env') ?? '').split(',').filter(Boolean)) {
     if (kv[0] === '-') { delete env[kv.slice(1)]; continue; }   // -NAME unsets
     const i = kv.indexOf('=');
@@ -296,7 +298,9 @@ async function boot() {
     };
     // A tap on what reaches the destination (the page's audio check reads it).
     const an = new AnalyserNode(audio.ctx, { fftSize: 2048 });
-    node.connect(audio.ctx.destination);
+    // [site] volume: a gain between the worklet and the speakers (site settings / in-game menu).
+    audio.gain = new GainNode(audio.ctx, { gain: window.atvSite?.volume?.() ?? 1 });
+    node.connect(audio.gain).connect(audio.ctx.destination);
     node.connect(an);
     audio.node = node; audio.analyser = an;
     const buf = new Float32Array(an.fftSize);
@@ -331,6 +335,7 @@ async function boot() {
   // stays suspended; the audio check sends a real input event instead.
   window.atv.startAudio = async () => { onGesture(); await tryAttach(); await new Promise((r) => setTimeout(r, 200)); audioState(); };
   window.atv.audio = {
+    setVolume: (v) => { if (audio.gain) audio.gain.gain.value = v; },   // [site] 0..1
     state: () => ({ ctx: audio.ctx?.state ?? 'none', rate: audio.ctx?.sampleRate ?? 0, attached: !!audio.node,
       baseLatency: audio.ctx?.baseLatency ?? 0, outputLatency: audio.ctx?.outputLatency ?? 0,
       ring: ringAddr(), stats: audio.stats, graph: audio.graph,
