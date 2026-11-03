@@ -146,7 +146,12 @@ export class GpEncoder {
     this.groups1 = new Map();  // cube|view serials|sampler keys -> group 1
     this.arena = new Uint8Array(1 << 16);
     this.noMips = false;     // true: level 0 only (RECOMP_GPU_NO_MIPS)
-    this.stats = { draws: 0, clears: 0, skipped: 0, passes: 0, pipelines: 0, noBC: 0, reasons: {} };
+    this.stats = { draws: 0, clears: 0, skipped: 0, passes: 0, pipelines: 0, noBC: 0, reasons: {},
+      // Time spent creating things (ms, running totals): textures (create +
+      // upload), shader modules, render pipelines.
+      texMs: 0, texN: 0, shMs: 0, shN: 0, pipeMs: 0,
+      // stage(): the vertex and index uploads, the constant repack, buffer growth.
+      vtxMs: 0, idxMs: 0, uniMs: 0, growMs: 0, grows: 0 };
     const z = (cube) => device.createTexture({ size: [1, 1, cube ? 6 : 1], format: 'bgra8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING });     // zero-initialised: reads 0, as a NULL SRV
     this.dummy2d = z(false).createView();
@@ -268,6 +273,7 @@ export class GpEncoder {
       const u = (k) => dv.getUint32(off + P.GpCmd.off[k], true);
       const c = { op: u('op'), id: u('id'), a: u('a'), b: u('b'), c: u('c'), d: u('d'), e: u('e'), bytes: u('bytes') };
       const payload = q.subarray(off + P.GpCmd.size, off + P.GpCmd.size + c.bytes);
+      const t0 = performance.now();
       switch (c.op) {
         case P.GP_RT_CREATE: this.rtCreate(c, payload); break;
         case P.GP_DS_CREATE: this.dsCreate(c); break;
@@ -279,10 +285,12 @@ export class GpEncoder {
           const module = this.dev.createShaderModule({ label: `${c.op === P.GP_SHADER_VS ? 'vs' : 'ps'}_${c.id}`, code });
           if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module, inputs: inputMaskOf(code) });
           else this.psMods.set(c.id, { module, cube: cubeMaskOf(code) });
+          this.stats.shMs += performance.now() - t0; this.stats.shN++;
           break;
         }
         default: break;
       }
+      if (c.op === P.GP_TEX_CREATE) { this.stats.texMs += performance.now() - t0; this.stats.texN++; }
       off += P.GpCmd.size + ((c.bytes + 15) & ~15);
     }
   }
@@ -378,9 +386,11 @@ export class GpEncoder {
   buffer(name, bytes, usage) {
     let b = this.bufs[name];
     if (!b || b.size < bytes) {
+      const t0 = performance.now();
       b?.destroy();
       b = this.bufs[name] = this.dev.createBuffer({ label: name, size: Math.max(1 << 16, bytes * 1.5 + 255 & ~255),
         usage: usage | GPUBufferUsage.COPY_DST });
+      this.stats.growMs += performance.now() - t0; this.stats.grows++;
       if (name === 'uniforms') this.group0 = null;
     }
     return b;
@@ -477,6 +487,7 @@ export class GpEncoder {
     }
     const face = sten ? { compare: CMP[st.stencil_func] ?? 'always', failOp: STENCIL_OP[st.stencil_fail] ?? 'keep',
       depthFailOp: STENCIL_OP[st.stencil_zfail] ?? 'keep', passOp: STENCIL_OP[st.stencil_zpass] ?? 'keep' } : {};
+    const t0 = performance.now();
     p = this.dev.createRenderPipeline({
       label: key,
       layout: this.L.pipelineLayout(cube),
@@ -491,6 +502,7 @@ export class GpEncoder {
     });
     this.pipes.set(key, p);
     this.stats.pipelines++;
+    this.stats.pipeMs += performance.now() - t0;
     return p;
   }
 
@@ -700,11 +712,16 @@ export class GpEncoder {
     if (this.want) { const [sx, sy] = this.want; this.want = null; this.rescale(sx, sy); }
     this.drainQueue(frame.queue);
     const draws = readDraws(frame.draws, frame.drawCount);
+    const t0 = performance.now();
     const vbuf = this.buffer('vtx', frame.vtx.byteLength + 4, GPUBufferUsage.VERTEX);
     if (frame.vtx.byteLength) this.dev.queue.writeBuffer(vbuf, 0, frame.vtx);
+    const t1 = performance.now();
     const ibuf = this.buffer('idx', frame.idx.byteLength + 4, GPUBufferUsage.INDEX);
     if (frame.idx.byteLength) this.dev.queue.writeBuffer(ibuf, 0, frame.idx);
+    const t2 = performance.now();
     this.packUniforms(frame, draws);
+    const st = this.stats;
+    st.vtxMs += t1 - t0; st.idxMs += t2 - t1; st.uniMs += performance.now() - t2;
     return draws;
   }
 

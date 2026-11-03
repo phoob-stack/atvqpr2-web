@@ -177,18 +177,256 @@ static const char s_tv_hlsl[] =
 
 static int s_dump_shaders = -1;
 
-static ID3DBlob *compile(const char *src, size_t len, const char *entry, const char *target,
-                         uint32_t id)
+/* ---- shader compiles ---------------------------------------------------------
+ *
+ * D3DCompile takes 10-40 ms per generated shader here, and a race's first
+ * frames bring 6-9 new ones (when the race scene appears and when the
+ * player's view takes over), all compiled at the flip on the walk thread:
+ * 50-80 ms frames. Two things take that off the frame:
+ *  - a disk cache of compiled bytecode (RECOMP_GPU_SHADER_CACHE=<dir>,
+ *    default "shadercache" under the working directory -- inside atv2-web;
+ *    "0" turns it off). Keyed by a hash of the HLSL, the entry point, the
+ *    target and the flags, and checked against a second hash and the source
+ *    length, so a hit is the same HLSL compiled the same way;
+ *  - early compiles: the recorder hands each new shader over the moment it
+ *    generates it (gp_d3d11_prefetch_shader, mid-walk), and a thread-pool
+ *    worker compiles it while the walk goes on. The flip takes the result,
+ *    waiting only if it isn't done yet.
+ * Same source, same flags, same compiler: the bytecode is what the old path
+ * produced, so nothing drawn changes. */
+#define SH_FLAGS (D3DCOMPILE_OPTIMIZATION_LEVEL1)
+#define SH_MAGIC 0x31485347u                  /* "GSH1" */
+
+typedef struct ShJob {
+    uint64_t key, key2;
+    uint32_t variant;                     /* VS input mask (GP_SHADER_VS b), 0 otherwise */
+    char *src;
+    size_t len;
+    char entry[16], target[16];
+    ID3DBlob *code;
+    char *err;
+    LONG done;
+    struct ShJob *next;
+} ShJob;
+static SRWLOCK s_sh_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE s_sh_cv = CONDITION_VARIABLE_INIT;
+static ShJob *s_sh_jobs;
+static struct { uint32_t early, disk, compiled, waited; double compile_ms, wait_ms; } s_sh_st;
+
+static uint64_t sh_fnv(const void *p, size_t n, uint64_t h)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    size_t i;
+    for (i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+static void sh_keys(const char *src, size_t len, const char *entry, const char *target,
+                    uint32_t variant, uint64_t *k1, uint64_t *k2)
+{
+    uint32_t flags = SH_FLAGS;
+    uint64_t h = sh_fnv(entry, strlen(entry) + 1, 1469598103934665603ull);
+    h = sh_fnv(target, strlen(target) + 1, h);
+    h = sh_fnv(&flags, sizeof flags, h);
+    h = sh_fnv(&variant, sizeof variant, h);
+    *k1 = sh_fnv(src, len, h);
+    *k2 = sh_fnv(src, len, h ^ 0x9E3779B97F4A7C15ull);   /* a second, independent hash */
+}
+
+static const char *sh_cache_dir(void)
+{
+    static char dir[MAX_PATH];
+    static int state = -1;                    /* -1 unknown, 0 off, 1 on */
+    if (state < 0) {
+        const char *e = getenv("RECOMP_GPU_SHADER_CACHE");
+        state = 0;
+        if (!e || !*e) e = "shadercache";
+        if (strcmp(e, "0") && _stricmp(e, "off")) {
+            snprintf(dir, sizeof dir, "%s", e);
+            CreateDirectoryA(dir, NULL);
+            state = (GetFileAttributesA(dir) & FILE_ATTRIBUTE_DIRECTORY)
+                    && GetFileAttributesA(dir) != INVALID_FILE_ATTRIBUTES;
+            fprintf(stderr, "  [GPU11] shader cache: %s%s\n", dir, state ? "" : " (cannot create: off)");
+        }
+    }
+    return state > 0 ? dir : NULL;
+}
+
+typedef struct { uint32_t magic, srclen; uint64_t key2; uint32_t bytes, pad; } ShFileHdr;
+
+static ID3DBlob *sh_disk_load(uint64_t k1, uint64_t k2, size_t srclen)
+{
+    const char *dir = sh_cache_dir();
+    char path[MAX_PATH + 32];
+    ShFileHdr hd;
+    ID3DBlob *b = NULL;
+    FILE *f;
+    if (!dir) return NULL;
+    snprintf(path, sizeof path, "%s\\%016llx.dxbc", dir, (unsigned long long)k1);
+    if (!(f = fopen(path, "rb"))) return NULL;
+    if (fread(&hd, sizeof hd, 1, f) == 1 && hd.magic == SH_MAGIC && hd.key2 == k2
+        && hd.srclen == (uint32_t)srclen && hd.bytes && hd.bytes < (64u << 20)
+        && SUCCEEDED(D3DCreateBlob(hd.bytes, &b))
+        && fread(ID3D10Blob_GetBufferPointer(b), 1, hd.bytes, f) != hd.bytes) {
+        ID3D10Blob_Release(b);
+        b = NULL;
+    }
+    fclose(f);
+    return b;
+}
+
+static void sh_disk_store(uint64_t k1, uint64_t k2, size_t srclen, ID3DBlob *b)
+{
+    const char *dir = sh_cache_dir();
+    char path[MAX_PATH + 32], tmp[MAX_PATH + 48];
+    ShFileHdr hd;
+    FILE *f;
+    int ok;
+    if (!dir || !b) return;
+    snprintf(path, sizeof path, "%s\\%016llx.dxbc", dir, (unsigned long long)k1);
+    snprintf(tmp, sizeof tmp, "%s.%lu.tmp", path, GetCurrentThreadId());
+    memset(&hd, 0, sizeof hd);
+    hd.magic = SH_MAGIC; hd.srclen = (uint32_t)srclen; hd.key2 = k2;
+    hd.bytes = (uint32_t)ID3D10Blob_GetBufferSize(b);
+    if (!(f = fopen(tmp, "wb"))) return;
+    ok = fwrite(&hd, sizeof hd, 1, f) == 1
+      && fwrite(ID3D10Blob_GetBufferPointer(b), 1, hd.bytes, f) == hd.bytes;
+    ok = !fclose(f) && ok;
+    /* Another process may have written it meanwhile: either copy is the same. */
+    if (!ok || !MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) DeleteFileA(tmp);
+}
+
+/* D3DCompile itself. On failure, *err gets the compiler's message (malloc'd). */
+static ID3DBlob *sh_compile(const char *src, size_t len, const char *entry, const char *target,
+                            char **err_out)
 {
     ID3DBlob *code = NULL, *err = NULL;
-    HRESULT hr = D3DCompile(src, len, "gpu", NULL, NULL, entry, target,
-                            D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, &code, &err);
+    HRESULT hr = D3DCompile(src, len, "gpu", NULL, NULL, entry, target, SH_FLAGS, 0, &code, &err);
+    *err_out = NULL;
     if (FAILED(hr)) {
+        const char *m = err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "?";
+        if ((*err_out = (char *)malloc(strlen(m) + 1))) strcpy(*err_out, m);
+        code = NULL;
+    }
+    if (err) ID3D10Blob_Release(err);
+    return code;
+}
+
+static void CALLBACK sh_job_run(PTP_CALLBACK_INSTANCE inst, void *arg)
+{
+    ShJob *j = (ShJob *)arg;
+    (void)inst;
+    if (!(j->code = sh_disk_load(j->key, j->key2, j->len))) {
+        j->code = sh_compile(j->src, j->len, j->entry, j->target, &j->err);
+        if (j->code) sh_disk_store(j->key, j->key2, j->len, j->code);
+    }
+    AcquireSRWLockExclusive(&s_sh_lock);
+    j->done = 1;
+    WakeAllConditionVariable(&s_sh_cv);
+    ReleaseSRWLockExclusive(&s_sh_lock);
+}
+
+static int sh_early_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *b = getenv("RECOMP_GPU_BACKEND"), *e = getenv("RECOMP_GPU_EARLY_COMPILE");
+        on = !(b && !_stricmp(b, "wgpu")) && !(e && *e == '0');
+    }
+    return on;
+}
+
+/* The recorder (gpu_rec.c) has just queued shader source: start compiling it. */
+void gp_d3d11_prefetch_shader(int pixel, uint32_t mask, const char *src, size_t len)
+{
+    ShJob *j;
+    if (!sh_early_on() || !(j = (ShJob *)calloc(1, sizeof *j))) return;
+    if (!(j->src = (char *)malloc(len))) { free(j); return; }
+    memcpy(j->src, src, len);
+    j->len = len;
+    strcpy(j->entry, "main");
+    strcpy(j->target, pixel ? "ps_5_0" : "vs_5_0");
+    j->variant = pixel ? 0 : (mask ? mask : 0xFFFF);
+    sh_keys(src, len, j->entry, j->target, j->variant, &j->key, &j->key2);
+    AcquireSRWLockExclusive(&s_sh_lock);
+    {
+        /* The same HLSL from two programs: one compile serves both (the
+         * second flip-time lookup reads the disk cache). */
+        ShJob *o;
+        for (o = s_sh_jobs; o && !(o->key == j->key && o->key2 == j->key2); o = o->next) ;
+        if (o) {
+            ReleaseSRWLockExclusive(&s_sh_lock);
+            free(j->src);
+            free(j);
+            return;
+        }
+    }
+    j->next = s_sh_jobs;
+    s_sh_jobs = j;
+    ReleaseSRWLockExclusive(&s_sh_lock);
+    if (!TrySubmitThreadpoolCallback(sh_job_run, j, NULL)) {
+        /* No pool: the flip compiles it as before. */
+        AcquireSRWLockExclusive(&s_sh_lock);
+        j->done = 1;
+        ReleaseSRWLockExclusive(&s_sh_lock);
+    }
+}
+
+/* An early compile of exactly this source, waited for and unlinked, or NULL. */
+static ShJob *sh_take_job(uint64_t k1, uint64_t k2, size_t len)
+{
+    ShJob **pp, *j = NULL;
+    double t0 = 0;
+    AcquireSRWLockExclusive(&s_sh_lock);
+    for (pp = &s_sh_jobs; *pp; pp = &(*pp)->next)
+        if ((*pp)->key == k1 && (*pp)->key2 == k2 && (*pp)->len == len) {
+            j = *pp;
+            *pp = j->next;
+            break;
+        }
+    if (j && !j->done) {
+        t0 = gp_now_ms();
+        s_sh_st.waited++;
+        while (!j->done) SleepConditionVariableSRW(&s_sh_cv, &s_sh_lock, INFINITE, 0);
+        s_sh_st.wait_ms += gp_now_ms() - t0;
+    }
+    ReleaseSRWLockExclusive(&s_sh_lock);
+    return j;
+}
+
+static ID3DBlob *compile_v(const char *src, size_t len, const char *entry, const char *target,
+                           uint32_t id, uint32_t variant)
+{
+    uint64_t k1, k2;
+    ID3DBlob *code;
+    ShJob *j;
+    char *err = NULL;
+
+    sh_keys(src, len, entry, target, variant, &k1, &k2);
+    if ((j = sh_take_job(k1, k2, len)) != NULL) {
+        code = j->code;
+        err = j->err;
+        if (code || err) s_sh_st.early++;
+        free(j->src);
+        free(j);
+        if (!code && !err) goto sync;             /* never ran (no thread pool) */
+    } else if ((code = sh_disk_load(k1, k2, len)) != NULL) {
+        s_sh_st.disk++;
+    } else {
+        double t0;
+sync:
+        t0 = gp_now_ms();
+        code = sh_compile(src, len, entry, target, &err);
+        s_sh_st.compiled++;
+        s_sh_st.compile_ms += gp_now_ms() - t0;
+        if (code) sh_disk_store(k1, k2, len, code);
+    }
+    if (!code) {
         static int shown;
-        fprintf(stderr, "  [GPU11] shader %u (%s) failed: %s\n", id, target,
-                err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "?");
+        fprintf(stderr, "  [GPU11] shader %u (%s) failed: %s\n", id, target, err ? err : "?");
         if (shown++ < 3) fprintf(stderr, "----\n%.*s\n----\n", (int)len, src);
     }
+    free(err);
     if (s_dump_shaders < 0) s_dump_shaders = getenv("RECOMP_GPU_DUMP_SHADERS") != NULL;
     if (s_dump_shaders) {
         char path[128];
@@ -196,8 +434,13 @@ static ID3DBlob *compile(const char *src, size_t len, const char *entry, const c
         snprintf(path, sizeof path, "gpu_shader_%u_%s.hlsl", id, target);
         if ((f = fopen(path, "wb"))) { fwrite(src, 1, len, f); fclose(f); }
     }
-    if (err) ID3D10Blob_Release(err);
-    return SUCCEEDED(hr) ? code : NULL;
+    return code;
+}
+
+static ID3DBlob *compile(const char *src, size_t len, const char *entry, const char *target,
+                         uint32_t id)
+{
+    return compile_v(src, len, entry, target, id, 0);
 }
 
 static IDXGIAdapter1 *pick_adapter(void)
@@ -663,7 +906,7 @@ static void q_shader_vs(const GpCmd *c, const char *src)
     int i, n;
     if (!r) return;
     res_release(r);
-    if (!(b = compile(src, c->bytes - 1, "main", "vs_5_0", c->id))) return;
+    if (!(b = compile_v(src, c->bytes - 1, "main", "vs_5_0", c->id, c->b ? c->b : 0xFFFF))) return;
     ID3D11Device_CreateVertexShader(s_dev, ID3D10Blob_GetBufferPointer(b),
                                     ID3D10Blob_GetBufferSize(b), NULL, &r->vs);
     /* The inputs the program reads, packed in register order (GP_SHADER_VS
@@ -707,9 +950,13 @@ static void q_shader_ps(const GpCmd *c, const char *src)
 static void drain_queue(const GpFrame *f)
 {
     uint32_t off = 0;
+    double t = gp_now_ms(), t1;
     while (off + sizeof(GpCmd) <= f->queue_bytes) {
         const GpCmd *c = (const GpCmd *)(f->queue + off);
         const uint8_t *payload = (const uint8_t *)(c + 1);
+        int what = c->op == GP_TEX_CREATE ? GP_T_CON_TEX
+                 : c->op == GP_SHADER_VS || c->op == GP_SHADER_PS ? GP_T_CON_SH
+                 : c->op == GP_TEX_FREE ? -1 : GP_T_CON_RT;
         switch (c->op) {
         case GP_RT_CREATE:  q_rt_create(c, payload); break;
         case GP_DS_CREATE:  q_ds_create(c); break;
@@ -721,6 +968,9 @@ static void drain_queue(const GpFrame *f)
 
         default: break;
         }
+        t1 = gp_now_ms();
+        gp_time_add(what, t1 - t, 1);
+        t = t1;
         off += sizeof(GpCmd) + ((c->bytes + 15) & ~15u);
     }
 }
@@ -1484,6 +1734,7 @@ int gp_d3d11_present_pixels(void *hwnd, const uint32_t *px, uint32_t w, uint32_t
 static void consume_draws(const GpFrame *f, int sync)
 {
     uint32_t i;
+    double t_draw;
     s_cur_target = s_cur_zeta = 0;
     s_seq++;
     s_bound.valid = 0;                     /* the window thread may have bound its blit */
@@ -1494,6 +1745,7 @@ static void consume_draws(const GpFrame *f, int sync)
     /* The frame's vertices and indices in one Map each. */
     s_frame_voff = f->vtx_bytes ? ring_put(s_vb, s_vb_bytes, &s_vb_pos, f->vtx, f->vtx_bytes) : ~0u;
     s_frame_ioff = f->idx_count ? ring_put(s_ib, s_ib_bytes, &s_ib_pos, f->idx, f->idx_count * 4) : ~0u;
+    t_draw = gp_now_ms();
     for (i = 0; i < f->draw_count; i++) {
         const GpDraw *d = &f->draws[i];
         if (d->kind == GP_CLEAR) do_clear(d);
@@ -1514,6 +1766,7 @@ static void consume_draws(const GpFrame *f, int sync)
         }
         s_nrt_ids = k;
     }
+    gp_time_add(GP_T_CON_DRAW, gp_now_ms() - t_draw, 0);
 }
 
 void gp_d3d11_sync(const GpFrame *f)
@@ -1634,6 +1887,11 @@ void gp_d3d11_consume(const GpFrame *f)
                 (unsigned long long)s_st.draws, (unsigned long long)s_st.tris,
                 (unsigned long long)s_st.clears, (unsigned long long)s_st.skipped,
                 s_stat_tex, s_stat_shaders);
+        if (s_stat_shaders)
+            fprintf(stderr, "  [GPU11] shaders: %u compiled early, %u from the disk cache, %u compiled at"
+                    " the flip (%.1f ms), %u waited for (%.1f ms)\n", s_sh_st.early, s_sh_st.disk,
+                    s_sh_st.compiled, s_sh_st.compile_ms, s_sh_st.waited, s_sh_st.wait_ms);
+        memset(&s_sh_st, 0, sizeof s_sh_st);
         memset(&s_st, 0, sizeof s_st);
         s_stat_tex = s_stat_shaders = 0;
     }
