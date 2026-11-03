@@ -112,7 +112,7 @@ try {
       vkb: fr ? (st.vtx - prev.vtx) / fr / 1024 : 0 };
     rows.push(row);
     console.log(`${el()} flips ${String(row.flips).padStart(3)}/s  page frames ${String(fr).padStart(3)}  draws ${String(st.draws).padStart(4)}  ` +
-      `copy ${row.copy.toFixed(2)} ms  encode ${row.encode.toFixed(2)} ms  ${row.kb.toFixed(0)} KB (vtx ${row.vkb.toFixed(0)}) per frame`);
+      `stage+claim ${row.copy.toFixed(2)} ms  encode ${row.encode.toFixed(2)} ms  ${row.kb.toFixed(0)} KB (vtx ${row.vkb.toFixed(0)}) per frame`);
     prev = st;
     if (st.exit !== null || st.err) break;
   }
@@ -120,7 +120,7 @@ try {
   const avg = f.reduce((a, x) => a + x, 0) / Math.max(1, f.length);
   const mean = (k) => rows.reduce((a, r) => a + r[k], 0) / Math.max(1, rows.length);
   console.log(`RESULT fps avg ${avg.toFixed(1)} min ${f[0]} median ${f[f.length >> 1]} max ${f[f.length - 1]} over ${f.length} s; ` +
-    `draws avg ${mean('draws').toFixed(0)}; page copy ${mean('copy').toFixed(2)} ms, encode ${mean('encode').toFixed(2)} ms, ` +
+    `draws avg ${mean('draws').toFixed(0)}; page stage ${mean('copy').toFixed(2)} ms, encode ${mean('encode').toFixed(2)} ms, ` +
     `${mean('kb').toFixed(0)} KB (vtx ${mean('vkb').toFixed(0)}) per frame`);
   const end = await b.eval('atv.snapshot()').catch(() => null);
   if (end) writeFileSync(join(out, 'race-end.png'), Buffer.from(end.split(',')[1], 'base64'));

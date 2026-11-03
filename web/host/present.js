@@ -1,8 +1,11 @@
 // The page's half of the present path (src/web/web_present.c):
-//  - frames: waits on gp_seq (Atomics.waitAsync), copies the GpFrame's
-//    arenas out of wasm memory, claims the frame (the game may now reuse the
-//    arenas), then draws it with web/gpu/encoder.js. Copies, not views: the
-//    encoder decodes WGSL with TextDecoder, which refuses shared buffers.
+//  - frames: waits on gp_seq (Atomics.waitAsync), stages the GpFrame with
+//    web/gpu/encoder.js straight from views into wasm memory (resource queue,
+//    records, writeBuffer of the vertex/index/constant arenas: WebGPU copies
+//    at the call), claims the frame (the game may now reuse the arenas), then
+//    encodes the draws. Only WGSL text is copied (TextDecoder refuses shared
+//    buffers). Copying the arenas out first cost 15% of the main thread in
+//    a race (10-25 MB a frame).
 //  - display: on every animation frame, shows the render target the encoder
 //    holds for the guest framebuffer the title last flipped to (disp_va), or
 //    the CPU-converted framebuffer (disp_cpu), letterboxed 4:3 on the canvas.
@@ -62,13 +65,19 @@ export class Presenter {
       }
       seen = seq;
       const t0 = performance.now();
-      let frame;
-      try { frame = this.copyFrame(i[at.gp_frame] >>> 0); } catch (e) { this.onError(`frame copy: ${e.message}`); }
+      // Stage the frame straight out of wasm memory (no copies: writeBuffer
+      // and writeTexture copy at the call), then let the recorder go on, then
+      // encode the draws.
+      let frame, staged;
+      try {
+        frame = this.frameViews(i[at.gp_frame] >>> 0);
+        staged = this.enc.stage(frame);
+      } catch (e) { this.stats.errors++; if (this.stats.errors <= 20) this.onError(`frame stage: ${e.message}`); }
       Atomics.store(i, at.gp_claimed, seq);
       Atomics.notify(i, at.gp_claimed);
       const t1 = performance.now();
-      if (frame) {
-        try { this.enc.consume(frame); } catch (e) { this.stats.errors++; if (this.stats.errors <= 20) this.onError(`encoder: ${e.message}`); }
+      if (staged) {
+        try { this.enc.encode(staged); } catch (e) { this.stats.errors++; if (this.stats.errors <= 20) this.onError(`encoder: ${e.message}`); }
         this.stats.frames++; this.stats.lastDraws = frame.drawCount;
         this.stats.vtxBytes += frame.vtx.byteLength; this.stats.idxBytes += frame.idx.byteLength;
         this.stats.constBytes += frame.consts.byteLength; this.stats.queueBytes += frame.queue.byteLength;
@@ -77,10 +86,11 @@ export class Presenter {
     }
   }
 
-  copyFrame(ptr) {
+  /** The GpFrame's arenas as views into wasm memory (valid until claimed). */
+  frameViews(ptr) {
     const u = new Uint32Array(this.memory.buffer, ptr, GpFrame.words), a = GpFrame.at;
-    const mem = new Uint8Array(this.memory.buffer);
-    const take = (p, n) => mem.slice(p >>> 0, (p >>> 0) + n);
+    const buf = this.memory.buffer;
+    const take = (p, n) => new Uint8Array(buf, p >>> 0, n);
     return {
       frame: u[a.frame], drawCount: u[a.draw_count],
       queue: take(u[a.queue], u[a.queue_bytes]),

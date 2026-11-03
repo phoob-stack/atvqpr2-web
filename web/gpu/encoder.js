@@ -38,17 +38,37 @@ const ADDR = { 1: 'repeat', 2: 'mirror-repeat' };
 
 const unpack = (c) => [((c >>> 16) & 255) / 255, ((c >>> 8) & 255) / 255, (c & 255) / 255, (c >>> 24) / 255];
 
-/** A GpDraw record as an object (field names as in the C struct). */
-function readDraw(dv, at) {
-  const o = P.GpDraw.off, s = P.GpState.off, u = (off) => dv.getUint32(at + off, true);
-  const arr = (off) => [0, 1, 2, 3].map((i) => u(off + 4 * i));
-  const st = {};
-  for (const k of Object.keys(s)) st[k] = u(o.st + s[k]);
-  const d = { st, tex: arr(o.tex), smp: arr(o.smp), border: arr(o.border) };
-  for (const k of ['kind', 'target', 'target_swz', 'zeta', 'zeta_format', 'vs', 'ps', 'vtx_off',
-    'vtx_count', 'vtx_stride', 'idx_off', 'idx_count', 'vsc_off', 'xfc_off', 'psc_off',
-    'clr_flags', 'clr_argb', 'clr_zs']) d[k] = u(o[k]);
-  return d;
+// GpDraw / GpState field offsets in words.
+const DW = P.GpDraw.size / 4;
+const DO = Object.fromEntries(Object.entries(P.GpDraw.off).map(([k, v]) => [k, v / 4]));
+const SO = Object.fromEntries(Object.entries(P.GpState.off).map(([k, v]) => [k, DO.st + v / 4]));
+
+/** The draw records as objects (field names as in the C struct). `bytes`
+ * may be a view into the shared wasm memory: everything is read here. */
+function readDraws(bytes, n) {
+  const u = (bytes.byteOffset & 3) === 0
+    ? new Uint32Array(bytes.buffer, bytes.byteOffset, n * DW) : new Uint32Array(bytes.slice(0, n * DW * 4).buffer);
+  const out = new Array(n);
+  for (let i = 0, b = 0; i < n; i++, b += DW) {
+    const st = {
+      blend_en: u[b + SO.blend_en], blend_src: u[b + SO.blend_src], blend_dst: u[b + SO.blend_dst],
+      blend_eq: u[b + SO.blend_eq], blend_color: u[b + SO.blend_color], color_mask: u[b + SO.color_mask],
+      depth_test: u[b + SO.depth_test], depth_func: u[b + SO.depth_func], depth_write: u[b + SO.depth_write],
+      stencil_en: u[b + SO.stencil_en], stencil_func: u[b + SO.stencil_func], stencil_ref: u[b + SO.stencil_ref],
+      stencil_fmask: u[b + SO.stencil_fmask], stencil_wmask: u[b + SO.stencil_wmask],
+      stencil_fail: u[b + SO.stencil_fail], stencil_zfail: u[b + SO.stencil_zfail], stencil_zpass: u[b + SO.stencil_zpass],
+    };
+    const t = b + DO.tex, m = b + DO.smp, r = b + DO.border;
+    out[i] = { st, kind: u[b + DO.kind], target: u[b + DO.target], target_swz: u[b + DO.target_swz],
+      zeta: u[b + DO.zeta], zeta_format: u[b + DO.zeta_format], vs: u[b + DO.vs], ps: u[b + DO.ps],
+      tex: [u[t], u[t + 1], u[t + 2], u[t + 3]], smp: [u[m], u[m + 1], u[m + 2], u[m + 3]],
+      border: [u[r], u[r + 1], u[r + 2], u[r + 3]],
+      vtx_off: u[b + DO.vtx_off], vtx_count: u[b + DO.vtx_count], vtx_stride: u[b + DO.vtx_stride],
+      idx_off: u[b + DO.idx_off], idx_count: u[b + DO.idx_count], vsc_off: u[b + DO.vsc_off],
+      xfc_off: u[b + DO.xfc_off], psc_off: u[b + DO.psc_off],
+      clr_flags: u[b + DO.clr_flags], clr_argb: u[b + DO.clr_argb], clr_zs: u[b + DO.clr_zs], slots: null };
+  }
+  return out;
 }
 
 export class GpEncoder {
@@ -63,6 +83,9 @@ export class GpEncoder {
     this.pipes = new Map();
     this.samplers = new Map();
     this.bufs = {};
+    this.serial = 0;           // every resource gets a new one: the bind-group cache key
+    this.groups1 = new Map();  // cube|view serials|sampler keys -> group 1
+    this.arena = new Uint8Array(1 << 16);
     this.noMips = false;     // true: level 0 only (RECOMP_GPU_NO_MIPS)
     this.stats = { draws: 0, clears: 0, skipped: 0, passes: 0, pipelines: 0, noBC: 0, reasons: {} };
     const z = (cube) => device.createTexture({ size: [1, 1, cube ? 6 : 1], format: 'bgra8unorm',
@@ -89,7 +112,7 @@ export class GpEncoder {
         case P.GP_TEX_CREATE: this.texCreate(c, payload); break;
         case P.GP_TEX_FREE: this.free(c.id); break;
         case P.GP_SHADER_VS: case P.GP_SHADER_PS: {
-          const code = dec.decode(payload.subarray(0, Math.max(0, c.bytes - 1)));
+          const code = dec.decode(payload.slice(0, Math.max(0, c.bytes - 1)));   // slice: not shared
           const module = this.dev.createShaderModule({ label: `${c.op === P.GP_SHADER_VS ? 'vs' : 'ps'}_${c.id}`, code });
           if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module });
           else this.psMods.set(c.id, { module, cube: cubeMaskOf(code) });
@@ -113,7 +136,7 @@ export class GpEncoder {
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
            | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
     if (c.bytes) this.dev.queue.writeTexture({ texture }, payload, { bytesPerRow: c.b * 4 }, [c.b, c.c]);
-    this.res.set(c.id, { kind: 'rt', texture, view: texture.createView(), w: c.b, h: c.c, va: c.a,
+    this.res.set(c.id, { kind: 'rt', serial: ++this.serial, texture, view: texture.createView(), w: c.b, h: c.c, va: c.a,
       bpp: c.d & 255, fmt: (c.d >> 8) & 255, swz: (c.d >> 16) & 1, pitch: c.e, dirty: false });
   }
 
@@ -121,7 +144,7 @@ export class GpEncoder {
     this.free(c.id);
     const texture = this.dev.createTexture({ label: `ds_${c.id}`, size: [c.b, c.c], format: this.dsFormat,
       usage: GPUTextureUsage.RENDER_ATTACHMENT });
-    this.res.set(c.id, { kind: 'ds', texture, view: texture.createView(), w: c.b, h: c.c });
+    this.res.set(c.id, { kind: 'ds', serial: ++this.serial, texture, view: texture.createView(), w: c.b, h: c.c });
   }
 
   /** GP_TEX_CREATE: a = mip levels; payload per face its levels in order,
@@ -149,7 +172,7 @@ export class GpEncoder {
           { bytesPerRow, rowsPerImage: rows }, [bb ? (lw + 3) & ~3 : lw, bb ? (lh + 3) & ~3 : lh, 1]);
         at += n;
       }
-    this.res.set(c.id, { kind: 'tex', texture, cube: faces === 6, w, h,
+    this.res.set(c.id, { kind: 'tex', serial: ++this.serial, texture, cube: faces === 6, w, h,
       view: texture.createView({ dimension: faces === 6 ? 'cube' : '2d' }) });
   }
 
@@ -159,7 +182,7 @@ export class GpEncoder {
     this.free(c.id);
     const texture = this.dev.createTexture({ label: `sub_${c.id}`, size: [c.b, c.c], format: 'bgra8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    this.res.set(c.id, { kind: 'sub', texture, view: texture.createView(), w: c.b, h: c.c,
+    this.res.set(c.id, { kind: 'sub', serial: ++this.serial, texture, view: texture.createView(), w: c.b, h: c.c,
       src: c.a, x0: c.d & 0xFFFF, y0: c.d >>> 16 });
   }
 
@@ -195,25 +218,28 @@ export class GpEncoder {
       d.slots = s;
       slots.push(d);
     }
-    const arena = new Uint8Array(size);
+    // One arena, reused frame to frame (the slots below 3072 stay zero).
+    if (this.arena.byteLength < size) this.arena = new Uint8Array(Math.max(size, this.arena.byteLength * 2));
+    const arena = this.arena, af = new Float32Array(arena.buffer), au = new Uint32Array(arena.buffer);
     const c = frame.consts;
     for (const d of slots) {
       const s = d.slots;
       if (s.xf) arena.set(c.subarray(d.xfc_off, d.xfc_off + (d.vs === P.GP_VS_TVERT ? P.GpTvConsts.size : P.GpXfConsts.size)), s.xf);
       if (s.ps) arena.set(c.subarray(d.psc_off, d.psc_off + P.GpPsConsts.size), s.ps);
       if (s.vsc) arena.set(c.subarray(d.vsc_off, d.vsc_off + P.GpVsConsts.size), s.vsc);
-      // GpWgslSmp: border colours and which axes are BORDER.
-      const f = new Float32Array(arena.buffer, s.smp, 16), fl = new Uint32Array(arena.buffer, s.smp + 64, 4);
-      const bias = new Float32Array(arena.buffer, s.smp + 80, 4);
+      // GpWgslSmp: border colours (16 floats), which axes are BORDER (4 u32),
+      // LOD bias (4 floats).
+      const w = s.smp >> 2;
       for (let st = 0; st < 4; st++) {
-        f.set(unpack(d.border[st]), st * 4);
-        const k = d.smp[st];
-        if (k & P.GP_SMP_BORDER) fl[st] = (((k >> 4) & 15) === 4 ? 1 : 0) | (((k >> 8) & 15) === 4 ? 2 : 0);
-        bias[st] = this.filtered(k) ? P.GP_SMP_BIAS_OF(k) / 256 : 0;
+        const bc = d.border[st], k = d.smp[st];
+        af[w + st * 4] = ((bc >>> 16) & 255) / 255; af[w + st * 4 + 1] = ((bc >>> 8) & 255) / 255;
+        af[w + st * 4 + 2] = (bc & 255) / 255; af[w + st * 4 + 3] = (bc >>> 24) / 255;
+        au[w + 16 + st] = k & P.GP_SMP_BORDER ? (((k >> 4) & 15) === 4 ? 1 : 0) | (((k >> 8) & 15) === 4 ? 2 : 0) : 0;
+        af[w + 20 + st] = this.filtered(k) ? P.GP_SMP_BIAS_OF(k) / 256 : 0;
       }
     }
     const buf = this.buffer('uniforms', size, GPUBufferUsage.UNIFORM);
-    this.dev.queue.writeBuffer(buf, 0, arena);
+    this.dev.queue.writeBuffer(buf, 0, arena, 0, size);
     if (!this.group0)
       this.group0 = this.dev.createBindGroup({ layout: this.L.group0, entries: UNIFORM_SLOTS.map((u) =>
         ({ binding: u.binding, resource: { buffer: buf, offset: 0, size: u.size } })) });
@@ -293,6 +319,8 @@ export class GpEncoder {
       stencilLoadOp: clear.stencil !== undefined ? 'clear' : 'load', stencilClearValue: clear.stencil ?? 0, stencilStoreOp: 'store' };
     this.pass = this.enc.beginRenderPass(desc);
     this.pass.setViewport(0, 0, rt.w, rt.h, 0, 1);
+    // What this pass has bound: set again only when it changes.
+    this.bound = { pipe: null, g1: null, bc: -1, sref: -1, vb: -1, vbn: -1, ib: false };
     this.stats.passes++;
   }
 
@@ -350,31 +378,54 @@ export class GpEncoder {
     const t = this.bindTarget(d);
     if (!t) return this.skip('no target');
 
-    const cube = ps.cube ?? 0, entries = [];
+    // Group 1 (textures and samplers), cached by what it binds: resource
+    // serials are never reused, so a freed texture's groups just go unused.
+    const cube = ps.cube ?? 0, views = [null, null, null, null];
+    let key = `${cube}`;
     for (let st = 0; st < 4; st++) {
-      let id = d.tex[st], view = null;
+      let id = d.tex[st], view = null, smp = 0, serial = 0;
       if (id) {
         if (id & P.GP_TEX_RT) { id = (id & ~P.GP_TEX_RT) >>> 0; if (id === d.target) id = 0; }
         const r = id && this.res.get(id);
         const subOk = r && (r.kind !== 'sub' || (r.src !== d.target && this.res.get(r.src)?.kind === 'rt'));
-        if (r && subOk && r.kind !== 'ds' && !!r.cube === !!((cube >> st) & 1)) view = r.view;
+        if (r && subOk && r.kind !== 'ds' && !!r.cube === !!((cube >> st) & 1)) {
+          view = r.view; serial = r.serial;
+          smp = this.filtered(d.smp[st]) ? d.smp[st] & 0x00FF3FFF : d.smp[st] & 0xFFF;
+        }
       }
-      entries.push({ binding: st, resource: view ?? ((cube >> st) & 1 ? this.dummyCube : this.dummy2d) });
-      entries.push({ binding: 4 + st, resource: this.sampler(view ? d.smp[st] : 0) });
+      views[st] = view;
+      key += `|${serial}:${smp}`;
     }
-    const g1 = this.dev.createBindGroup({ layout: this.L.group1(cube), entries });
-    const pass = this.pass;
-    pass.setPipeline(this.pipeline(d, kind, vs.module, ps.module, cube, !!t.ds));
+    let g1 = this.groups1.get(key);
+    if (!g1) {
+      const entries = [];
+      for (let st = 0; st < 4; st++) {
+        const view = views[st];
+        entries.push({ binding: st, resource: view ?? ((cube >> st) & 1 ? this.dummyCube : this.dummy2d) });
+        entries.push({ binding: 4 + st, resource: this.sampler(view ? d.smp[st] : 0) });
+      }
+      if (this.groups1.size > 8192) this.groups1.clear();
+      g1 = this.dev.createBindGroup({ layout: this.L.group1(cube), entries });
+      this.groups1.set(key, g1);
+    }
+    const pass = this.pass, b = this.bound;
+    const pipe = this.pipeline(d, kind, vs.module, ps.module, cube, !!t.ds);
+    if (pipe !== b.pipe) { pass.setPipeline(pipe); b.pipe = pipe; }
     pass.setBindGroup(0, this.group0, [d.slots.xf, d.slots.vsc, d.slots.ps, d.slots.smp]);
-    pass.setBindGroup(1, g1);
-    const bc = unpack(d.st.blend_color);
-    if ([d.st.blend_src, d.st.blend_dst].some((x) => x === 0x8003 || x === 0x8004)) bc.fill(bc[3], 0, 3);
-    pass.setBlendConstant(bc);
-    if (t.ds) pass.setStencilReference(d.st.stencil_ref & 0xFF);
-    pass.setVertexBuffer(0, this.bufs.vtx, d.vtx_off, d.vtx_count * d.vtx_stride);
+    if (g1 !== b.g1) { pass.setBindGroup(1, g1); b.g1 = g1; }
+    const bcAlpha = d.st.blend_src === 0x8003 || d.st.blend_src === 0x8004 || d.st.blend_dst === 0x8003 || d.st.blend_dst === 0x8004;
+    const bcKey = bcAlpha ? -1 - (d.st.blend_color >>> 24) : d.st.blend_color;
+    if (bcKey !== b.bc) {
+      const bc = unpack(d.st.blend_color);
+      if (bcAlpha) bc.fill(bc[3], 0, 3);
+      pass.setBlendConstant(bc); b.bc = bcKey;
+    }
+    if (t.ds && (d.st.stencil_ref & 0xFF) !== b.sref) { b.sref = d.st.stencil_ref & 0xFF; pass.setStencilReference(b.sref); }
+    const vbn = d.vtx_count * d.vtx_stride;
+    if (d.vtx_off !== b.vb || vbn !== b.vbn) { pass.setVertexBuffer(0, this.bufs.vtx, d.vtx_off, vbn); b.vb = d.vtx_off; b.vbn = vbn; }
     if (d.idx_count) {
-      pass.setIndexBuffer(this.bufs.idx, 'uint32', d.idx_off * 4, d.idx_count * 4);
-      pass.drawIndexed(d.idx_count);
+      if (!b.ib) { pass.setIndexBuffer(this.bufs.idx, 'uint32'); b.ib = true; }
+      pass.drawIndexed(d.idx_count, 1, d.idx_off);
     } else {
       pass.draw(d.vtx_count);
     }
@@ -383,16 +434,25 @@ export class GpEncoder {
 
   // ---- a frame -------------------------------------------------------------
 
-  consume(frame) {
+  consume(frame) { this.encode(this.stage(frame)); }
+
+  /** Everything that reads the frame's bytes: the queue, the records, and
+   * the vertex, index and constant uploads (writeBuffer copies at the call).
+   * The frame may be views straight into the shared wasm memory, which the
+   * recorder may reuse as soon as this returns. */
+  stage(frame) {
     this.drainQueue(frame.queue);
-    const dv = new DataView(frame.draws.buffer, frame.draws.byteOffset, frame.draws.byteLength);
-    const draws = [];
-    for (let i = 0; i < frame.drawCount; i++) draws.push(readDraw(dv, i * P.GpDraw.size));
+    const draws = readDraws(frame.draws, frame.drawCount);
     const vbuf = this.buffer('vtx', frame.vtx.byteLength + 4, GPUBufferUsage.VERTEX);
-    this.dev.queue.writeBuffer(vbuf, 0, frame.vtx);
+    if (frame.vtx.byteLength) this.dev.queue.writeBuffer(vbuf, 0, frame.vtx);
     const ibuf = this.buffer('idx', frame.idx.byteLength + 4, GPUBufferUsage.INDEX);
     if (frame.idx.byteLength) this.dev.queue.writeBuffer(ibuf, 0, frame.idx);
     this.packUniforms(frame, draws);
+    return draws;
+  }
+
+  /** The command buffer for a staged frame. */
+  encode(draws) {
     this.enc = this.dev.createCommandEncoder();
     this.pass = null; this.curTarget = this.curZeta = -1;
     for (const d of draws) {
