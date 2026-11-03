@@ -28,15 +28,16 @@ const bool = { parse: (s) => (/^(1|on|yes|true)$/i.test(s) ? true : /^(0|off|no|
 export const SETTINGS = [
   // Display: the page's own parameters (display worker: ?res=, ?msaa=, ?widescreen=; main.js reads them
   // from the address at load, so shell.js puts them there before it imports main.js).
-  { key: 'res_scale', section: 'display', label: 'Resolution scale', type: 'enum', values: ['1', '2', '3', '4', 'window'], def: '1',
-    names: { 1: '1x (640x480, original)', 2: '2x', 3: '3x', 4: '4x', window: 'Match the window' }, next: true,
+  { key: 'res_scale', section: 'display', label: 'Resolution scale', type: 'enum', values: ['1', '2', '3', '4', '5', '6', '7', '8', 'window'], def: '1',
+    names: { 1: '1x (640x480, original)', 2: '2x', 3: '3x', 4: '4x', 5: '5x', 6: '6x', 7: '7x', 8: '8x', window: 'Match the window' }, next: true,
     help: 'Renders the game at a multiple of its 640x480, or at the size it is shown at (?res=).',
     query: (v) => ({ res: v === '1' ? null : v }) },
   { key: 'widescreen', section: 'display', label: 'Widescreen (16:9)', type: 'bool', def: false, next: true,
     help: 'Tells the game the TV is 16:9 and shows it at 16:9 (?widescreen=1, RECOMP_WIDESCREEN).',
     query: (v) => ({ widescreen: v ? '1' : null }) },
-  { key: 'msaa', section: 'display', label: 'Anti-aliasing (MSAA)', type: 'enum', values: ['0', '4'], def: '0',
-    names: { 0: 'Off', 4: '4x' }, next: true, help: 'Multisampled rendering (?msaa=4).',
+  { key: 'msaa', section: 'display', label: 'Anti-aliasing (MSAA)', type: 'enum', values: ['0', '2', '4', '8'], def: '0',
+    names: { 0: 'Off', 2: '2x (drawn as 4x in the browser)', 4: '4x', 8: '8x (drawn as 4x in the browser)' }, next: true,
+    help: 'Multisampled rendering (?msaa=; WebGPU offers 4x, so any value above 0 is 4x here).',
     query: (v) => ({ msaa: v === '0' ? null : v }) },
   { key: 'frame_pacing', section: 'display', label: 'Frame rate', type: 'enum', values: ['vsync', 'uncapped'], def: 'vsync',
     names: { vsync: '60 fps, vsync (the console\'s pacing)', uncapped: 'Uncapped (benchmark; menus may run fast)' }, next: true,

@@ -6,6 +6,7 @@
 import { SETTINGS, SECTIONS, BY_KEY, RESERVED_CODES, CHANGED_EVENT, loadSettings, saveSettings, setSetting, resetSettings,
   parseValue, toText, fromText, describeLaunch, defaults } from './settings.js';
 import { ACTIONS, PAD_CONTROLS, PAD_BUTTON_NAMES } from './keymap.js';
+import { importConfigFile } from './config-import.js';
 
 const h = (tag, attrs = {}, ...kids) => {
   const e = document.createElement(tag);
@@ -71,6 +72,8 @@ export function renderSettings(root, opts = {}) {
         root.querySelector('.set-msg').replaceWith(msg);
       } }, 'Apply text'),
       h('button', { class: 'btn ghost', onclick: () => { ta.value = toText(loadSettings()); notes.textContent = ''; } }, 'Undo edits'),
+      h('button', { class: 'btn ghost', onclick: () => importConfigFile({ say, done: () => { renderSettings(root, opts); root.querySelector('.set-msg').replaceWith(msg); } }) },
+        'Import config file'),
       h('button', { class: 'btn ghost', onclick: async () => {
         try { await navigator.clipboard.writeText(ta.value); say('Copied the settings text.', 'ok'); }
         catch { ta.select(); say('Select-all done: press Ctrl+C to copy.'); }

@@ -141,6 +141,19 @@ const srv = createServer((req, res) => {
     req.on('end', () => { appendFileSync(LOG, body); res.writeHead(204, ISOLATION); res.end(); });
     return;
   }
+  // [pubsite] "Is the local game running?" for the project site's Play button. The page's
+  // own headers (CORP same-origin) hide every other URL from another origin, so this one
+  // answer is readable cross-origin (CORS *, CORP cross-origin; the preflight allows a
+  // public page to reach this private address). It says nothing but that the server is up.
+  if (path === '/atv2-alive') {
+    const head = { ...ISOLATION, 'Cross-Origin-Resource-Policy': 'cross-origin', 'Access-Control-Allow-Origin': '*' };
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { ...head, 'Access-Control-Allow-Methods': 'GET', 'Access-Control-Allow-Private-Network': 'true', 'Access-Control-Max-Age': '600' });
+      res.end(); return;
+    }
+    res.writeHead(200, { ...head, 'Content-Type': 'application/json' });
+    res.end(req.method === 'HEAD' ? undefined : JSON.stringify({ game: 'atv2', page: '/host/index.html' })); return;
+  }
   if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, ISOLATION); res.end(); return; }
   if (path === '/' || path === '/index.html') {
     res.writeHead(302, { ...ISOLATION, Location: '/host/index.html' + new URL(req.url, 'http://x').search }); res.end(); return;
