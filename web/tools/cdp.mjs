@@ -80,14 +80,19 @@ export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500
   let id = 0;
   const pending = new Map();
   const logs = [];
+  const listeners = new Set();
   ws.onmessage = (m) => {
     const msg = JSON.parse(m.data);
     if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
-    else if (msg.method === 'Runtime.consoleAPICalled')
+    else if (msg.method === 'Runtime.consoleAPICalled' && !msg.sessionId)
       logs.push(msg.params.args.map((a) => a.value ?? a.description).join(' '));
+    if (msg.method) for (const f of listeners) f(msg);
   };
-  const send = (method, params = {}) => new Promise((r) => {
-    const n = ++id; pending.set(n, r); ws.send(JSON.stringify({ id: n, method, params }));
+  // sessionId: a flattened child session (Target.setAutoAttach flatten:true),
+  // e.g. a Worker's, for per-thread profiling.
+  const send = (method, params = {}, sessionId) => new Promise((r) => {
+    const n = ++id; pending.set(n, r);
+    ws.send(JSON.stringify(sessionId ? { id: n, method, params, sessionId } : { id: n, method, params }));
   });
   await send('Runtime.enable');
   // Wait for the page's own `ready` promise.
@@ -97,7 +102,9 @@ export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500
     await sleep(100);
   }
   return {
-    logs,
+    logs, send,
+    /** Every protocol event ({ method, params, sessionId? }); returns an unsubscribe. */
+    on(f) { listeners.add(f); return () => listeners.delete(f); },
     async eval(expression) {
       const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
       if (r.result?.exceptionDetails)

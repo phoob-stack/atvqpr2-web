@@ -26,7 +26,8 @@ export class Presenter {
     this.i32 = new Int32Array(memory.buffer, hostPtr, Host.words);
     this.enc = new GpEncoder(device, features);
     this.onError = onError ?? ((m) => console.warn(m));
-    this.stats = { frames: 0, presented: 0, cpuFrames: 0, copyMs: 0, encodeMs: 0, errors: 0, lastDraws: 0, shown: '' };
+    this.stats = { frames: 0, presented: 0, cpuFrames: 0, copyMs: 0, encodeMs: 0, errors: 0, lastDraws: 0, shown: '',
+      vtxBytes: 0, idxBytes: 0, constBytes: 0, queueBytes: 0 };
     this.ctx = canvas.getContext('webgpu');
     this.format = navigator.gpu.getPreferredCanvasFormat();
     this.ctx.configure({ device, format: this.format, alphaMode: 'opaque' });
@@ -69,6 +70,8 @@ export class Presenter {
       if (frame) {
         try { this.enc.consume(frame); } catch (e) { this.stats.errors++; if (this.stats.errors <= 20) this.onError(`encoder: ${e.message}`); }
         this.stats.frames++; this.stats.lastDraws = frame.drawCount;
+        this.stats.vtxBytes += frame.vtx.byteLength; this.stats.idxBytes += frame.idx.byteLength;
+        this.stats.constBytes += frame.consts.byteLength; this.stats.queueBytes += frame.queue.byteLength;
       }
       this.stats.copyMs += t1 - t0; this.stats.encodeMs += performance.now() - t1;
     }

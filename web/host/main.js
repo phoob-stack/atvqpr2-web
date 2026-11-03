@@ -21,6 +21,10 @@ export const DEFAULT_ENV = {
   RECOMP_VBLANK: 'paced', RECOMP_TITLE_KEVENTS: '1', RECOMP_PB_EXEC: '1',
   RECOMP_AC97_READY: '1', RECOMP_USB: '1', RECOMP_KEYBOARD: '1', RECOMP_FB_WINDOW: '1',
   RECOMP_GPU: '1', RECOMP_FLIP_PACING: 'edge',
+  // As run.ps1 / atv-mcp: the kick ack follows the KickOff store at once (without
+  // it D3D's KickOff spin, 0x196FB0, takes 70% of the game thread in a race:
+  // 36 fps -> 60), and the contiguous heap frees (no black squares).
+  RECOMP_FAST_KICK: '1', RECOMP_HEAP_RECLAIM: '1',
   // Turns on gpu_wgsl_tap.c's WGSL-by-id store, which web_present.c puts in the
   // queue; the folder does not exist, so nothing is written.
   RECOMP_GPU_DUMP_WGSL: '/save/.no-wgsl-dump',
