@@ -12,7 +12,10 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 GAME=$(cd "$HERE/../.." && pwd)
 RT=$(cd "$GAME/../xboxrecomp" && pwd)
-SDK=${1:-$(cd "$GAME/../../../third_party/wasi-sdk/wasi-sdk-34.0-x86_64-windows" 2>/dev/null && pwd)}
+# Default SDK: atv2-web\third_party, from the main copy (atv2-web\atvrecomp) or a
+# worker worktree (atv2-web\work\<name>\atvrecomp).
+SDK=${1:-$(cd "$GAME/../third_party/wasi-sdk/wasi-sdk-34.0-x86_64-windows" 2>/dev/null && pwd \
+        || cd "$GAME/../../../third_party/wasi-sdk/wasi-sdk-34.0-x86_64-windows" 2>/dev/null && pwd)}
 CC="$SDK/bin/clang"
 OUT="$GAME/build-wasm"
 GEN="$GAME/src/recomp/gen"
