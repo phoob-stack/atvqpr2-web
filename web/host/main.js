@@ -159,28 +159,86 @@ ${m.stack ?? ''}`, 'err'); };
     log(`[page] host block at 0x${hostPtr.toString(16)}`);
   })();
 
-  // Audio starts on the first gesture (autoplay policy); until then the game
-  // drains its ring by wall clock.
-  let audioCtx = null;
-  const startAudio = async () => {
-    if (audioCtx || !hostPtr) return;
-    const ring = new Int32Array(memory.buffer, hostPtr, Host.words)[Host.at.audio_ring] >>> 0;
-    if (!ring) return;
-    audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
-    await audioCtx.audioWorklet.addModule(new URL('./audio-worklet.js', import.meta.url));
-    const node = new AudioWorkletNode(audioCtx, 'atv2-ring', { numberOfInputs: 0, outputChannelCount: [2],
-      processorOptions: { buffer: memory.buffer, ring } });
-    node.connect(audioCtx.destination);
-    // resume() only settles after a user gesture; do not wait for it.
-    audioCtx.resume().catch(() => {});
-    await new Promise((r) => setTimeout(r, 200));
-    state.audio = `${audioCtx.state} ${audioCtx.sampleRate} Hz`;
-    audioCtx.onstatechange = () => { state.audio = `${audioCtx.state} ${audioCtx.sampleRate} Hz`; };
-    log(`[page] audio: ${state.audio}`);
+  // Audio. The autoplay policy lets an AudioContext run only after a user
+  // gesture, so the first pointerdown/keydown/touch creates it and calls
+  // resume() inside the handler; later gestures resume it again if it got
+  // suspended. The worklet node is attached as soon as both the context and
+  // the game's ring (xa2_init) exist, whichever comes last. Until the worklet
+  // runs, web_audio.c drains the ring by wall clock.
+  const audio = { ctx: null, node: null, analyser: null, stats: null, captures: [], graph: { rms: 0, peak: 0 } };
+  const audioState = () => {
+    const c = audio.ctx;
+    state.audio = !c ? 'off (click or press a key)' :
+      `${c.state} ${c.sampleRate} Hz${audio.node ? '' : ', waiting for the game'}` +
+      (audio.stats ? `, ${audio.stats.underruns} short/s, ${(audio.stats.fill.avg / 48).toFixed(0)} ms queued` : '');
   };
-  window.atv.startAudio = startAudio;
-  addEventListener('pointerdown', startAudio);
-  addEventListener('keydown', startAudio);
+  const ringAddr = () => (hostPtr ? new Int32Array(memory.buffer, hostPtr, Host.words)[Host.at.audio_ring] >>> 0 : 0);
+  let attaching = null;
+  const attachAudio = async () => {
+    const ring = ringAddr();
+    if (!audio.ctx || audio.node || !ring) return;
+    await audio.ctx.audioWorklet.addModule(new URL('./audio-worklet.js', import.meta.url));
+    const node = new AudioWorkletNode(audio.ctx, 'atv2-ring', { numberOfInputs: 0, outputChannelCount: [2],
+      processorOptions: { buffer: memory.buffer, ring } });
+    node.port.onmessage = ({ data: m }) => {
+      if (m.type === 'stats') { audio.stats = m; audioState(); }
+      else if (m.type === 'capture') audio.captures.shift()?.(m.data);
+    };
+    // A tap on what reaches the destination (the page's audio check reads it).
+    const an = new AnalyserNode(audio.ctx, { fftSize: 2048 });
+    node.connect(audio.ctx.destination);
+    node.connect(an);
+    audio.node = node; audio.analyser = an;
+    const buf = new Float32Array(an.fftSize);
+    setInterval(() => {
+      an.getFloatTimeDomainData(buf);
+      let sq = 0, pk = 0;
+      for (const v of buf) { sq += v * v; if (Math.abs(v) > pk) pk = Math.abs(v); }
+      audio.graph = { rms: Math.sqrt(sq / buf.length), peak: pk };
+    }, 100);
+    log(`[page] audio: worklet on the game's ring at 0x${ring.toString(16)}; ${audio.ctx.state} ${audio.ctx.sampleRate} Hz, ` +
+      `base latency ${(audio.ctx.baseLatency * 1000).toFixed(1)} ms, output latency ${((audio.ctx.outputLatency ?? 0) * 1000).toFixed(1)} ms`);
+    audioState();
+  };
+  const tryAttach = () => {
+    if (!attaching && audio.ctx && !audio.node)
+      attaching = attachAudio().catch((e) => log(`[page] audio: ${e.message}`, 'err')).finally(() => { attaching = null; });
+    return attaching;
+  };
+  const onGesture = () => {
+    if (!audio.ctx) {
+      audio.ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+      audio.ctx.onstatechange = () => { audioState(); log(`[page] audio: ${audio.ctx.state}`); };
+    }
+    if (audio.ctx.state !== 'running') audio.ctx.resume().catch(() => {});
+    audioState();
+    tryAttach();
+  };
+  for (const ev of ['pointerdown', 'keydown', 'touchend']) addEventListener(ev, onGesture, { capture: true });
+  // The game may set up its ring after the first gesture.
+  const ringPoll = setInterval(() => { if (audio.node) clearInterval(ringPoll); else if (ringAddr()) tryAttach(); }, 250);
+  // Scripted start (boot.mjs --audio). Without a real gesture the context
+  // stays suspended; the audio check sends a real input event instead.
+  window.atv.startAudio = async () => { onGesture(); await tryAttach(); await new Promise((r) => setTimeout(r, 200)); audioState(); };
+  window.atv.audio = {
+    state: () => ({ ctx: audio.ctx?.state ?? 'none', rate: audio.ctx?.sampleRate ?? 0, attached: !!audio.node,
+      baseLatency: audio.ctx?.baseLatency ?? 0, outputLatency: audio.ctx?.outputLatency ?? 0,
+      ring: ringAddr(), stats: audio.stats, graph: audio.graph,
+      activation: navigator.userActivation ? { has: navigator.userActivation.hasBeenActive, active: navigator.userActivation.isActive } : null }),
+    // The next `secs` seconds of what the worklet outputs, as 16-bit PCM
+    // (interleaved stereo, base64): the audio check writes it to a local WAV.
+    capture: (secs) => new Promise((resolve, reject) => {
+      if (!audio.node) { reject(new Error('audio not running')); return; }
+      audio.captures.push((f32) => {
+        const pcm = new Int16Array(f32.length);
+        for (let i = 0; i < f32.length; i++) pcm[i] = Math.max(-32768, Math.min(32767, Math.round(f32[i] * 32768)));
+        const u8 = new Uint8Array(pcm.buffer);
+        let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+        resolve({ rate: audio.ctx.sampleRate, frames: f32.length / 2, pcm: btoa(s) });
+      });
+      audio.node.port.postMessage({ type: 'capture', frames: Math.round(secs * audio.ctx.sampleRate) });
+    }),
+  };
 
   let frames = 0, lastT = performance.now(), fps = 0;
   const tick = () => {
