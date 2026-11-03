@@ -266,6 +266,25 @@ async function handle(line) {
       if (!t) return { ok: false, error: 'type' };
       return { ok: true, va: '0x' + va.toString(16).toUpperCase().padStart(8, '0'), type: tok[2], values: await peek(va, t, n) };
     }
+    case 'poke': {     // poke VA TYPE V (roam tools: formation.py)
+      const va = num(tok[1]), t = TYPES[tok[2]], v = Number(tok[3]);
+      if (!t) return { ok: false, error: 'type' };
+      await b.eval(`(() => { const m = window.__mem; if (!m) return 0; const dv = new DataView(m.buffer), a = ${va} + ${MEM_OFS};
+        const t = '${t}'; if (t === 'f') dv.setFloat32(a, ${v}, true); else if (t === 'w' || t === 'W') dv.setUint32(a, ${v} >>> 0, true);
+        else if (t === 'h' || t === 'H') dv.setUint16(a, ${v} & 0xffff, true); else dv.setUint8(a, ${v} & 255); return 1; })()`);
+      return { ok: true };
+    }
+    case 'pause': case 'resume': return { ok: true, note: 'not in the bridge (no-op)' };
+    case 'pageshot': { // the page as shown (canvas + DOM overlays such as roam name tags)
+      const r = await b.send('Page.captureScreenshot', { format: 'png' });
+      const data = r.result?.data ?? r.data;
+      if (!data) return { ok: false, error: 'capture failed' };
+      const path = tok.slice(1).join(' ');
+      writeFileSync(path, Buffer.from(data, 'base64'));
+      return { ok: true, path };
+    }
+    case 'roamdrop': return { ok: true, closed: await b.eval('(atv.roam?.ws?.close(), 1)') };
+    case 'roam': return { ok: true, roam: await b.eval('JSON.stringify(atv.roam ?? null)') };
     case 'color': {
       const [x, y, w, h] = [1, 2, 3, 4].map((k) => Number(tok[k] ?? 1));
       const rgb = await b.eval(`__color(${x}, ${y}, ${w}, ${h})`);

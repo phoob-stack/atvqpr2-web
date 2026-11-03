@@ -53,6 +53,13 @@ static WebHost s_host = {
 __attribute__((export_name("web_host")))
 WebHost *web_host(void) { return &s_host; }
 
+/* Free roam (src/roam.c): the page finds the roam mailbox at reserved[0]
+ * (web/host/roam.js) and is its WebSocket transport. */
+void web_host_set_roam(void *mb)
+{
+    s_host.reserved[0] = (uint32_t)(uintptr_t)mb;
+}
+
 /* Tells the page where the host block is (web/host/imports.js). */
 __attribute__((import_module("env"), import_name("web_host_ready")))
 void web_host_ready(WebHost *h);
@@ -271,6 +278,11 @@ int main(int argc, char **argv)
     {
         extern void atv2_freeride_init(void);
         atv2_freeride_init();
+    }
+    /* RECOMP_ROAM=host:port[;name=..] (?env=...): free roam in Free Ride. */
+    {
+        extern void atv2_roam_init(void);
+        atv2_roam_init();
     }
 
     printf("\nStarting game...\n");

@@ -55,7 +55,7 @@
 
 void sub_000BB4B0(void);
 static void labels_update(void);
-static float s_dbg_xs, s_dbg_z; static int s_dbg_n;
+
 void sub_00027470(void);
 void sub_00028340(void);
 
@@ -115,7 +115,8 @@ static double now_ms(void)
 #define RAM_OK(va) ((va) >= 0x10000u && (va) < 0x04000000u)
 static uint32_t rd32(uint32_t va) { return RAM_OK(va) ? MEM32(va) : 0; }
 static float rdf(uint32_t va) { uint32_t u = rd32(va); float f; memcpy(&f, &u, 4); return f; }
-static void wrf(uint32_t va, float f) { uint32_t u; memcpy(&u, &f, 4); if (RAM_OK(va)) MEM32(va) = u; }
+static void wr32(uint32_t va, uint32_t u) { if (RAM_OK(va)) memcpy((void *)XBOX_PTR(va), &u, 4); }
+static void wrf(uint32_t va, float f) { uint32_t u; memcpy(&u, &f, 4); wr32(va, u); }
 static void rdv(uint32_t va, float *v, int n) { int i; for (i = 0; i < n; i++) v[i] = rdf(va + 4 * i); }
 static void wrv(uint32_t va, const float *v, int n) { int i; for (i = 0; i < n; i++) wrf(va + 4 * i, v[i]); }
 
@@ -292,7 +293,9 @@ typedef struct {
     uint32_t n_interp, n_extrap;      /* ticks shown interpolated / extrapolated */
     double   delay;
     int      shown;
-    float    lastpos[3];
+    float    lastpos[3], prevpos[3];
+    double   jerk_sum, jerk_max;      /* |p(t) - 2p(t-1) + p(t-2)| per tick */
+    uint32_t jerk_n;
 } Remote;
 
 static Remote s_rem[MAXP];
@@ -720,14 +723,19 @@ static void local_tick(uint32_t r0)
         fprintf(stderr, "[ROAM] ghost: %u puppet pairs skipped; %u name tags (first at %.2f %.2f, %.0f m)\n",
                 s_ghost_skips, atv2_roam_mb.nlabels, atv2_roam_mb.labels[0].x, atv2_roam_mb.labels[0].y,
                 atv2_roam_mb.labels[0].z);
-        fprintf(stderr, "[ROAM] label dbg: xs %.3f z %.2f n %d\n", s_dbg_xs, s_dbg_z, s_dbg_n);
         fprintf(stderr, "[ROAM] stats: sent %u snaps (%.1f/s, %.0f B/s payload), recv %u snaps (%.1f/s, %.0f B/s)\n",
                 s_sent_snaps, s_sent_snaps / dt, s_sent_bytes / dt, s_recv_snaps, s_recv_snaps / dt, s_recv_bytes / dt);
         for (i = 0; i < MAXP; i++)
             if (s_rem[i].used)
-                fprintf(stderr, "[ROAM]   %s id %d slot %d: interval %.1f ms, jitter %.1f ms, delay %.0f ms, got %u lost %u late %u\n",
+                fprintf(stderr, "[ROAM]   %s id %d slot %d: interval %.1f ms, jitter %.1f ms, delay %.0f ms, got %u lost %u late %u;"
+                        " ticks interpolated %u extrapolated %u; shown-position jerk mean %.4f max %.3f m/tick^2\n",
                         s_rem[i].name, s_rem[i].id, s_rem[i].slot, s_rem[i].interval, s_rem[i].jit,
-                        s_rem[i].delay, s_rem[i].got, s_rem[i].lost, s_rem[i].late, s_rem[i].n_interp, s_rem[i].n_extrap);
+                        s_rem[i].delay, s_rem[i].got, s_rem[i].lost, s_rem[i].late, s_rem[i].n_interp, s_rem[i].n_extrap,
+                        s_rem[i].jerk_n ? s_rem[i].jerk_sum / s_rem[i].jerk_n : 0.0, s_rem[i].jerk_max);
+        for (i = 0; i < MAXP; i++) {
+            s_rem[i].jerk_sum = s_rem[i].jerk_max = 0; s_rem[i].jerk_n = 0;
+            s_rem[i].n_interp = s_rem[i].n_extrap = 0;
+        }
         fflush(stderr);
         s_sent_snaps = s_recv_snaps = 0; s_sent_bytes = s_recv_bytes = 0; s_stat_t0 = now;
     }
@@ -745,8 +753,20 @@ static void puppet_tick(uint32_t p, int slot)
         return;
     for (i = 0; i < MAXP; i++)
         if (s_rem[i].used && s_rem[i].slot == slot) { r = &s_rem[i]; break; }
-    if (r && r->n && now - r->last_recv > 5000) {     /* silent for 5 s */
+    /* Silent: hidden (parked) after 1.5 s -- past the 250 ms of extrapolation
+     * and a reconnect's usual gap -- and forgotten after 30 s; the hub's
+     * "leave" (after its resume grace) drops it at once. A resumed player
+     * keeps its slot and name. */
+    if (r && r->n && now - r->last_recv > 30000) {
         rem_drop(r, "timeout");
+        r = NULL;
+    }
+    if (r && r->n && now - r->last_recv > 1500) {
+        if (r->shown) {
+            fprintf(stderr, "[ROAM] %s silent: hidden\n", r->name);
+            fflush(stderr);
+        }
+        r->shown = 0;
         r = NULL;
     }
     if (r && r->n) {
@@ -761,6 +781,14 @@ static void puppet_tick(uint32_t p, int slot)
         if (k == 1) r->n_interp++; else if (k == 2) r->n_extrap++;
         if (k) {
             apply(u, &s);
+            if (r->shown) {
+                double j = 0;
+                for (i = 0; i < 3; i++) { double a = s.pos[i] - 2.0 * r->lastpos[i] + r->prevpos[i]; j += a * a; }
+                j = sqrt(j);
+                r->jerk_sum += j; r->jerk_n++;
+                if (j > r->jerk_max) r->jerk_max = j;
+            }
+            memcpy(r->prevpos, r->lastpos, sizeof r->prevpos);
             memcpy(r->lastpos, s.pos, sizeof r->lastpos);
             if (!r->shown) {
                 fprintf(stderr, "[ROAM] %s shown in slot %d at %.1f %.1f %.1f\n", r->name, slot,
@@ -790,7 +818,7 @@ static void hook_part_ai(void)
     uint32_t p = g_ecx;
     int slot = rd32(GAMEMODE) == 4 ? puppet_slot(p) : 0;
     if (slot)
-        MEM32(p + 0x20) = 0;          /* no AI input */
+        wr32(p + 0x20, 0);            /* no AI input */
     sub_00027470();
     if (slot)
         puppet_tick(p, slot);
@@ -926,7 +954,7 @@ static void labels_update(void)
         rdv(ctl + 0x78, cam, 12);
     }
     xs = sqrtf(vp[0] * vp[0] + vp[4] * vp[4] + vp[8] * vp[8]);
-    s_dbg_xs = xs;
+
     if (!(xs > 0.2f && xs < 10.0f)) { m->nlabels = 0; return; }
     for (i = 0; i < MAXP && n < 8; i++) {
         Remote *r = &s_rem[i];
@@ -934,7 +962,7 @@ static void labels_update(void)
         if (!r->used || !r->slot || !r->shown) continue;
         d[0] = r->lastpos[0] - cam[0]; d[1] = r->lastpos[1] + 1.45f - cam[1]; d[2] = r->lastpos[2] - cam[2];
         for (k = 0; k < 3; k++) { x += d[k] * cam[3 + k]; y += d[k] * cam[6 + k]; z += d[k] * cam[9 + k]; }
-        s_dbg_z = z; s_dbg_n++;
+
         if (z < 0.5f || z > 120.0f) continue;
         m->labels[n].x = 0.5f + 0.5f * xs * x / z;
         m->labels[n].y = 0.5f - 0.5f * xs * (4.0f / 3.0f) * y / z;

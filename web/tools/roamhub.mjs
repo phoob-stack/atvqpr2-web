@@ -212,6 +212,16 @@ setInterval(() => {
 
 // ---- server -----------------------------------------------------------------------
 const srv = createServer((req, res) => {
+  // Test aid: GET /drop?id=N cuts player N's connection (as a network drop would);
+  // the client reconnects and resumes with its token.
+  const u = new URL(req.url, 'http://127.0.0.1');
+  if (u.pathname === '/drop') {
+    const pl = room.get(Number(u.searchParams.get('id')));
+    if (pl?.conn) { log(`#${pl.id} ${pl.name}: connection cut (/drop)`); pl.conn.sock.destroy(); }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: !!pl }));
+    return;
+  }
   res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
   res.end(JSON.stringify({ hub: 'atv2 roam', players: [...room.values()].map((p) => ({ id: p.id, name: p.name, connected: !!p.conn })),
     delay: DELAY, jitter: JITTER, loss: LOSS * 100 }));
