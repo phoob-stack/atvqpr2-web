@@ -158,7 +158,7 @@ class BlockCache {
         bh.read(bitmap, { at: 0 });
       }
       mh.close();
-      this.opfs = { handles, bitmap, bh };
+      this.opfs = { handles, bitmap, bh, dirty: new Set() };
       const have = bitmap.reduce((a, b) => a + b, 0);
       return `OPFS cache ${fresh ? 'new' : 'reused'}: ${have}/${this.totalBlocks} blocks present`;
     } catch (e) {
@@ -192,6 +192,7 @@ class BlockCache {
         o.handles.get(f.path).write(b, { at: bi * BLOCK });
         o.bitmap[key] = 1;
         o.bh.write(o.bitmap.subarray(key, key + 1), { at: key });
+        o.dirty.add(f.path);
       }
     }
     this.lru.set(key, b);
@@ -200,9 +201,10 @@ class BlockCache {
   }
 
   flush() {
-    if (!this.opfs) return;
+    if (!this.opfs || !this.opfs.dirty.size) return;
     this.opfs.bh.flush();
-    for (const h of this.opfs.handles.values()) h.flush();
+    for (const p of this.opfs.dirty) this.opfs.handles.get(p).flush();
+    this.opfs.dirty.clear();
   }
 }
 
