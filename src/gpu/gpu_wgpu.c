@@ -53,14 +53,15 @@ static uint64_t fnv(const void *p, size_t n)
 
 /* ---- id table (as gpu_d3d11.c) ------------------------------------------- */
 
-typedef enum { R_NONE, R_RT, R_DS, R_TEX, R_VS, R_PS } RKind;
+typedef enum { R_NONE, R_RT, R_DS, R_TEX, R_VS, R_PS, R_SUB } RKind;
 typedef struct {
     RKind kind;
     WGPUTexture tex;
     WGPUTextureView view;
     WGPUShaderModule mod;
     WGPUBuffer rb;                  /* writeback staging */
-    uint32_t va, w, h, bpp, fmt, swz, pitch, dirty, cube;   /* cube: faces==6 (tex) or PS mask */
+    uint32_t va, w, h, bpp, fmt, swz, pitch, dirty, cube;   /* cube: faces==6 (tex) or PS mask;
+                                                               R_SUB: va = source target, pitch = x0 | y0 << 16 */
 } Res;
 static Res *s_res;
 static uint32_t s_nres;
@@ -295,30 +296,64 @@ static void q_ds_create(const GpCmd *c)
 
 static uint32_t s_stat_tex, s_stat_shaders, s_stat_nobc;
 
+/* GP_TEX_CREATE: a = mip levels; payload per face its levels in order, each
+ * tightly packed (BC levels below 4x4 still take a whole block) -- the
+ * subresource order of q_tex_create() in gpu_d3d11.c. */
 static void q_tex_create(const GpCmd *c, const uint8_t *payload)
 {
     Res *r = res(c->id);
-    uint32_t faces = c->e ? c->e : 1, f, bpr = c->b * 4, rows = c->c, face_bytes;
+    uint32_t faces = c->e ? c->e : 1, levels = c->a ? c->a : 1, f, l, bb = 0, maxl = 1, m;
     WGPUTextureFormat fmt = WGPUTextureFormat_BGRA8Unorm;
     WGPUTextureViewDescriptor vd = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+    WGPUTextureDescriptor td = WGPU_TEXTURE_DESCRIPTOR_INIT;
+    const uint8_t *p = payload, *end = payload + c->bytes;
     if (!r) return;
     res_release(r);
     if (c->d != GP_FMT_BGRA8) {
         if (!s_bc) { s_stat_nobc++; return; }   /* ponytail: CPU BC decode without the feature */
         fmt = c->d == GP_FMT_BC1 ? WGPUTextureFormat_BC1RGBAUnorm
             : c->d == GP_FMT_BC2 ? WGPUTextureFormat_BC2RGBAUnorm : WGPUTextureFormat_BC3RGBAUnorm;
-        bpr = (c->b / 4) * (c->d == GP_FMT_BC1 ? 8 : 16);
-        rows = c->c / 4;
+        bb = c->d == GP_FMT_BC1 ? 8 : 16;
     }
-    r->tex = make_tex(c->b, c->c, faces, fmt, WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst);
-    face_bytes = c->bytes / faces;
+    for (m = c->b > c->c ? c->b : c->c; m > 1; m >>= 1) maxl++;
+    if (levels > maxl) levels = maxl;
+    td.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+    td.size = (WGPUExtent3D){ c->b, c->c, faces };
+    td.format = fmt; td.mipLevelCount = levels;
+    r->tex = wgpuDeviceCreateTexture(s_dev, &td);
     for (f = 0; f < faces; f++)
-        write_tex(r->tex, f, payload + (size_t)f * face_bytes, face_bytes, bpr, rows, c->b, c->c);
+        for (l = 0; l < levels; l++) {
+            uint32_t lw = c->b >> l ? c->b >> l : 1, lh = c->c >> l ? c->c >> l : 1;
+            uint32_t bpr = bb ? ((lw + 3) / 4) * bb : lw * 4, rows = bb ? (lh + 3) / 4 : lh;
+            size_t n = (size_t)bpr * rows;
+            WGPUTexelCopyTextureInfo dst = { .texture = r->tex, .mipLevel = l, .origin = { 0, 0, f },
+                                             .aspect = WGPUTextureAspect_All };
+            WGPUTexelCopyBufferLayout lay = { .bytesPerRow = bpr, .rowsPerImage = rows };
+            if (p + n > end) break;                  /* malformed: what fits */
+            /* BC copies cover the physical (block-rounded) size. */
+            wgpuQueueWriteTexture(s_queue, &dst, p, n, &lay, &(WGPUExtent3D){
+                bb ? (lw + 3) & ~3u : lw, bb ? (lh + 3) & ~3u : lh, 1 });
+            p += n;
+        }
     vd.dimension = faces == 6 ? WGPUTextureViewDimension_Cube : WGPUTextureViewDimension_2D;
     vd.arrayLayerCount = faces;
+    vd.mipLevelCount = levels;
     r->view = wgpuTextureCreateView(r->tex, &vd);
     r->kind = R_TEX; r->w = c->b; r->h = c->c; r->cube = faces == 6;
     s_stat_tex++;
+}
+
+/* GP_SUB_CREATE: a tile of a render target, copied out of it before every
+ * draw that samples it (do_draw). */
+static void q_sub_create(const GpCmd *c)
+{
+    Res *r = res(c->id);
+    if (!r) return;
+    res_release(r);
+    r->tex = make_tex(c->b, c->c, 1, WGPUTextureFormat_BGRA8Unorm,
+                      WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst);
+    r->view = wgpuTextureCreateView(r->tex, NULL);
+    r->kind = R_SUB; r->w = c->b; r->h = c->c; r->va = c->a; r->pitch = c->d;
 }
 
 static uint32_t cube_mask_of(const char *wgsl)
@@ -359,6 +394,7 @@ static void drain_queue(const GpFrame *f)
         switch (c->op) {
         case GP_RT_CREATE:  q_rt_create(c, payload); break;
         case GP_DS_CREATE:  q_ds_create(c); break;
+        case GP_SUB_CREATE: q_sub_create(c); break;
         case GP_TEX_CREATE: q_tex_create(c, payload); break;
         case GP_TEX_FREE:   { Res *r = res(c->id); if (r) res_release(r); } break;
         case GP_SHADER_VS: case GP_SHADER_PS: q_shader(c); break;
@@ -439,6 +475,7 @@ static void pack_uniforms(const GpFrame *f)
             sx->border[st][2] = (b & 0xFF) / 255.0f;         sx->border[st][3] = (b >> 24) / 255.0f;
             if (k & GP_SMP_BORDER)
                 sx->flags[st] = (((k >> 4) & 0xF) == 4 ? 1u : 0u) | (((k >> 8) & 0xF) == 4 ? 2u : 0u);
+            sx->bias[st] = smp_filtered(k) ? (float)GP_SMP_BIAS_OF(k) / 256.0f : 0.0f;
         }
     }
     if (gbuf(&s_ub, size, WGPUBufferUsage_Uniform) && s_group0) {
@@ -446,7 +483,7 @@ static void pack_uniforms(const GpFrame *f)
     }
     wgpuQueueWriteBuffer(s_queue, s_ub.b, 0, s_arena, (size + 3) & ~(size_t)3);
     if (!s_group0) {
-        static const uint64_t sz[4] = { 112, 3072, 320, 80 };
+        static const uint64_t sz[4] = { 112, 3072, 320, sizeof(GpWgslSmp) };
         WGPUBindGroupEntry e[4];
         int k;
         memset(e, 0, sizeof e);
@@ -467,15 +504,38 @@ static WGPUAddressMode addr_mode(uint32_t a)
     return a == 1 ? WGPUAddressMode_Repeat : a == 2 ? WGPUAddressMode_MirrorRepeat : WGPUAddressMode_ClampToEdge;
 }
 
+static int s_no_mips = -1;            /* RECOMP_GPU_NO_MIPS: level 0 only (as D3D11) */
+
+static int smp_filtered(uint32_t key)
+{
+    if (s_no_mips < 0) s_no_mips = getenv("RECOMP_GPU_NO_MIPS") != NULL;
+    return (key & GP_SMP_FILTER) && !s_no_mips;
+}
+
+/* sampler() in gpu_d3d11.c: without GP_SMP_FILTER, GP_SMP_LINEAR alone and
+ * level 0; with it, SET_TEXTURE_FILTER's MIN (1 BOX_LOD0, 2 TENT_LOD0,
+ * 3 BOX_NEARESTLOD, 4 TENT_NEARESTLOD, 5 BOX_TENT_LOD, 6 TENT_TENT_LOD) and
+ * MAG (2 TENT). The LOD bias is not a sampler field in WebGPU: the PS adds
+ * GpWgslSmp.bias. */
 static WGPUSampler sampler(uint32_t key)
 {
     WGPUSamplerDescriptor sd = WGPU_SAMPLER_DESCRIPTOR_INIT;
     int i;
-    key &= 0xFFF;
+    key &= smp_filtered(key) ? 0x00FF3FFFu : 0x0FFFu;   /* bias is not part of the sampler */
     for (i = 0; i < s_nsmp; i++)
         if (s_smp[i].key == key) return s_smp[i].s;
     if (s_nsmp == SMP_CACHE) return s_default_smp;
-    sd.magFilter = sd.minFilter = (key & GP_SMP_LINEAR) ? WGPUFilterMode_Linear : WGPUFilterMode_Nearest;
+    if (key & GP_SMP_FILTER) {
+        uint32_t mn = GP_SMP_MIN_OF(key), mg = GP_SMP_MAG_OF(key);
+        sd.minFilter = (mn == 2 || mn == 4 || mn == 6) ? WGPUFilterMode_Linear : WGPUFilterMode_Nearest;
+        sd.magFilter = mg == 2 ? WGPUFilterMode_Linear : WGPUFilterMode_Nearest;
+        sd.mipmapFilter = (mn == 5 || mn == 6) ? WGPUMipmapFilterMode_Linear : WGPUMipmapFilterMode_Nearest;
+        sd.lodMaxClamp = (mn >= 3 && mn <= 6) ? 32.0f : 0.0f;
+    } else {
+        sd.magFilter = sd.minFilter = (key & GP_SMP_LINEAR) ? WGPUFilterMode_Linear : WGPUFilterMode_Nearest;
+        sd.mipmapFilter = (key & GP_SMP_LINEAR) ? WGPUMipmapFilterMode_Linear : WGPUMipmapFilterMode_Nearest;
+        sd.lodMaxClamp = 0.0f;
+    }
     sd.addressModeU = addr_mode((key >> 4) & 0xF);
     sd.addressModeV = addr_mode((key >> 8) & 0xF);
     sd.addressModeW = WGPUAddressMode_ClampToEdge;
@@ -711,7 +771,7 @@ static WGPUBindGroup tex_group(uint32_t cube, WGPUTextureView v[4], WGPUSampler 
 static WGPUCommandEncoder s_enc;
 static WGPURenderPassEncoder s_pass;
 static uint32_t s_cur_target, s_cur_zeta;
-static struct { uint64_t draws, tris, skipped, clears, passes, no_vs, no_ps, no_rt, z_scratch; } s_st;
+static struct { uint64_t draws, tris, skipped, clears, passes, no_vs, no_ps, no_rt, z_scratch, sub_copies; } s_st;
 
 static void end_pass(void)
 {
@@ -831,6 +891,25 @@ static void do_draw(const GpDraw *d, const Slots *sl)
     if (!vs) { s_st.no_vs++; s_st.skipped++; return; }
     if (!ps) { s_st.no_ps++; s_st.skipped++; return; }
     if (!d->vtx_count) { s_st.skipped++; return; }
+    /* Tiles of render targets are copied out first: a copy cannot happen
+     * inside a render pass, so this ends the current one (bind_target opens
+     * the next). As D3D11: none when the tile's source is the draw's target. */
+    for (st = 0; st < 4; st++) {
+        uint32_t id = d->tex[st];
+        Res *r, *src;
+        if (!id || (id & GP_TEX_RT) || !(r = res(id)) || r->kind != R_SUB) continue;
+        src = res(r->va);
+        if (!src || src->kind != R_RT || r->va == d->target
+            || (r->pitch & 0xFFFF) + r->w > src->w || (r->pitch >> 16) + r->h > src->h)
+            continue;
+        end_pass();
+        wgpuCommandEncoderCopyTextureToTexture(s_enc,
+            &(WGPUTexelCopyTextureInfo){ .texture = src->tex, .origin = { r->pitch & 0xFFFF, r->pitch >> 16, 0 },
+                                         .aspect = WGPUTextureAspect_All },
+            &(WGPUTexelCopyTextureInfo){ .texture = r->tex, .aspect = WGPUTextureAspect_All },
+            &(WGPUExtent3D){ r->w, r->h, 1 });
+        s_st.sub_copies++;
+    }
     if (!(rt = bind_target(d, &ds))) { s_st.no_rt++; s_st.skipped++; return; }
 
     for (st = 0; st < 4; st++) {
@@ -840,7 +919,9 @@ static void do_draw(const GpDraw *d, const Slots *sl)
             if (id & GP_TEX_RT) { id &= ~GP_TEX_RT; if (id == d->target) id = 0; }   /* own target: 0 */
             if (id) {
                 Res *r = res(id);
-                if (r && (r->kind == R_TEX || r->kind == R_RT) && r->view && (r->cube != 0) == (want_cube != 0))
+                if (r && r->kind == R_SUB && (r->va == d->target || res(r->va)->kind != R_RT)) r = NULL;
+                if (r && (r->kind == R_TEX || r->kind == R_RT || r->kind == R_SUB) && r->view
+                    && (r->cube != 0) == (want_cube != 0))
                     v = r->view;
             }
         }
@@ -992,13 +1073,13 @@ void gp_wgpu_consume(const GpFrame *f)
 
     if (f->frame % 300 == 299) {
         fprintf(stderr, "  [WGPU] frames %u: %llu draws, %llu tris, %llu clears, %llu passes, %llu skipped"
-                " (vs %llu ps %llu rt %llu), %llu on scratch Z; %u textures, %u shaders, %u pipelines,"
+                " (vs %llu ps %llu rt %llu), %llu on scratch Z, %llu tile copies; %u textures, %u shaders, %u pipelines,"
                 " %u bind groups, %u errors\n", f->frame + 1,
                 (unsigned long long)s_st.draws, (unsigned long long)s_st.tris,
                 (unsigned long long)s_st.clears, (unsigned long long)s_st.passes,
                 (unsigned long long)s_st.skipped, (unsigned long long)s_st.no_vs,
                 (unsigned long long)s_st.no_ps, (unsigned long long)s_st.no_rt,
-                (unsigned long long)s_st.z_scratch, s_stat_tex, s_stat_shaders, s_npipes, s_nbgs, s_errors);
+                (unsigned long long)s_st.z_scratch, (unsigned long long)s_st.sub_copies, s_stat_tex, s_stat_shaders, s_npipes, s_nbgs, s_errors);
         memset(&s_st, 0, sizeof s_st);
         s_stat_tex = s_stat_shaders = 0;
     }

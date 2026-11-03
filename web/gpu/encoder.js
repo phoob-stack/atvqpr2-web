@@ -63,6 +63,7 @@ export class GpEncoder {
     this.pipes = new Map();
     this.samplers = new Map();
     this.bufs = {};
+    this.noMips = false;     // true: level 0 only (RECOMP_GPU_NO_MIPS)
     this.stats = { draws: 0, clears: 0, skipped: 0, passes: 0, pipelines: 0, noBC: 0, reasons: {} };
     const z = (cube) => device.createTexture({ size: [1, 1, cube ? 6 : 1], format: 'bgra8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING });     // zero-initialised: reads 0, as a NULL SRV
@@ -84,6 +85,7 @@ export class GpEncoder {
       switch (c.op) {
         case P.GP_RT_CREATE: this.rtCreate(c, payload); break;
         case P.GP_DS_CREATE: this.dsCreate(c); break;
+        case P.GP_SUB_CREATE: this.subCreate(c); break;
         case P.GP_TEX_CREATE: this.texCreate(c, payload); break;
         case P.GP_TEX_FREE: this.free(c.id); break;
         case P.GP_SHADER_VS: case P.GP_SHADER_PS: {
@@ -122,24 +124,43 @@ export class GpEncoder {
     this.res.set(c.id, { kind: 'ds', texture, view: texture.createView(), w: c.b, h: c.c });
   }
 
+  /** GP_TEX_CREATE: a = mip levels; payload per face its levels in order,
+   * each tightly packed (BC levels below 4x4 still take a whole block). */
   texCreate(c, payload) {
     this.free(c.id);
     const faces = c.e || 1, w = c.b, h = c.c;
-    let format = 'bgra8unorm', bytesPerRow = w * 4, rows = h;
+    let format = 'bgra8unorm', bb = 0;
     if (c.d !== P.GP_FMT_BGRA8) {
       if (!this.bc) { this.stats.noBC++; return; }   // ponytail: CPU BC decode for adapters without BC
       format = { [P.GP_FMT_BC1]: 'bc1-rgba-unorm', [P.GP_FMT_BC2]: 'bc2-rgba-unorm', [P.GP_FMT_BC3]: 'bc3-rgba-unorm' }[c.d];
-      bytesPerRow = (w / 4) * (c.d === P.GP_FMT_BC1 ? 8 : 16);
-      rows = h / 4;
+      bb = c.d === P.GP_FMT_BC1 ? 8 : 16;
     }
+    const levels = Math.min(c.a || 1, Math.floor(Math.log2(Math.max(w, h))) + 1);
     const texture = this.dev.createTexture({ label: `tex_${c.id}`, size: [w, h, faces], format,
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    const faceBytes = c.bytes / faces;
+      mipLevelCount: levels, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    let at = 0;
     for (let f = 0; f < faces; f++)
-      this.dev.queue.writeTexture({ texture, origin: [0, 0, f] },
-        payload.subarray(f * faceBytes, (f + 1) * faceBytes), { bytesPerRow, rowsPerImage: rows }, [w, h, 1]);
+      for (let l = 0; l < levels; l++) {
+        const lw = Math.max(1, w >> l), lh = Math.max(1, h >> l);
+        const bytesPerRow = bb ? ((lw + 3) >> 2) * bb : lw * 4, rows = bb ? (lh + 3) >> 2 : lh;
+        const n = bytesPerRow * rows;
+        if (at + n > payload.byteLength) break;
+        this.dev.queue.writeTexture({ texture, mipLevel: l, origin: [0, 0, f] }, payload.subarray(at, at + n),
+          { bytesPerRow, rowsPerImage: rows }, [bb ? (lw + 3) & ~3 : lw, bb ? (lh + 3) & ~3 : lh, 1]);
+        at += n;
+      }
     this.res.set(c.id, { kind: 'tex', texture, cube: faces === 6, w, h,
       view: texture.createView({ dimension: faces === 6 ? 'cube' : '2d' }) });
+  }
+
+  /** GP_SUB_CREATE: a tile of a render target, copied out of it before
+   * every draw that samples it. */
+  subCreate(c) {
+    this.free(c.id);
+    const texture = this.dev.createTexture({ label: `sub_${c.id}`, size: [c.b, c.c], format: 'bgra8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.res.set(c.id, { kind: 'sub', texture, view: texture.createView(), w: c.b, h: c.c,
+      src: c.a, x0: c.d & 0xFFFF, y0: c.d >>> 16 });
   }
 
   // ---- per-frame buffers ---------------------------------------------------
@@ -183,10 +204,12 @@ export class GpEncoder {
       if (s.vsc) arena.set(c.subarray(d.vsc_off, d.vsc_off + P.GpVsConsts.size), s.vsc);
       // GpWgslSmp: border colours and which axes are BORDER.
       const f = new Float32Array(arena.buffer, s.smp, 16), fl = new Uint32Array(arena.buffer, s.smp + 64, 4);
+      const bias = new Float32Array(arena.buffer, s.smp + 80, 4);
       for (let st = 0; st < 4; st++) {
         f.set(unpack(d.border[st]), st * 4);
         const k = d.smp[st];
         if (k & P.GP_SMP_BORDER) fl[st] = (((k >> 4) & 15) === 4 ? 1 : 0) | (((k >> 8) & 15) === 4 ? 2 : 0);
+        bias[st] = this.filtered(k) ? P.GP_SMP_BIAS_OF(k) / 256 : 0;
       }
     }
     const buf = this.buffer('uniforms', size, GPUBufferUsage.UNIFORM);
@@ -198,12 +221,27 @@ export class GpEncoder {
 
   // ---- state ---------------------------------------------------------------
 
+  filtered(key) { return (key & P.GP_SMP_FILTER) !== 0 && !this.noMips; }
+
+  /** sampler() in gpu_d3d11.c. Without GP_SMP_FILTER: GP_SMP_LINEAR and level
+   * 0. With it: SET_TEXTURE_FILTER's MIN (1 BOX_LOD0, 2 TENT_LOD0,
+   * 3 BOX_NEARESTLOD, 4 TENT_NEARESTLOD, 5 BOX_TENT_LOD, 6 TENT_TENT_LOD) and
+   * MAG (2 TENT). The LOD bias goes through GpWgslSmp (no sampler field). */
   sampler(key) {
+    key = this.filtered(key) ? key & 0x00FF3FFF : key & 0xFFF;
     if (!this.samplers.has(key)) {
-      const lin = key & P.GP_SMP_LINEAR ? 'linear' : 'nearest';
-      this.samplers.set(key, this.dev.createSampler({ magFilter: lin, minFilter: lin,
-        addressModeU: ADDR[(key >> 4) & 15] ?? 'clamp-to-edge', addressModeV: ADDR[(key >> 8) & 15] ?? 'clamp-to-edge',
-        addressModeW: 'clamp-to-edge', lodMaxClamp: 0 }));
+      const d = { addressModeU: ADDR[(key >> 4) & 15] ?? 'clamp-to-edge',
+        addressModeV: ADDR[(key >> 8) & 15] ?? 'clamp-to-edge', addressModeW: 'clamp-to-edge' };
+      if (key & P.GP_SMP_FILTER) {
+        const mn = P.GP_SMP_MIN_OF(key), mg = P.GP_SMP_MAG_OF(key);
+        Object.assign(d, { minFilter: [2, 4, 6].includes(mn) ? 'linear' : 'nearest',
+          magFilter: mg === 2 ? 'linear' : 'nearest', mipmapFilter: mn === 5 || mn === 6 ? 'linear' : 'nearest',
+          lodMaxClamp: mn >= 3 && mn <= 6 ? 32 : 0 });
+      } else {
+        const lin = key & P.GP_SMP_LINEAR ? 'linear' : 'nearest';
+        Object.assign(d, { minFilter: lin, magFilter: lin, mipmapFilter: lin, lodMaxClamp: 0 });
+      }
+      this.samplers.set(key, this.dev.createSampler(d));
     }
     return this.samplers.get(key);
   }
@@ -300,6 +338,15 @@ export class GpEncoder {
     if (!vs) return this.skip('no vs');
     if (!ps) return this.skip('no ps');
     if (!d.vtx_count) return this.skip('no vertices');
+    // Tiles of render targets are copied out first; a copy ends the pass.
+    for (const id of d.tex) {
+      const r = id && !(id & P.GP_TEX_RT) && this.res.get(id);
+      if (!r || r.kind !== 'sub') continue;
+      const src = this.res.get(r.src);
+      if (!src || src.kind !== 'rt' || r.src === d.target || r.x0 + r.w > src.w || r.y0 + r.h > src.h) continue;
+      this.endPass();
+      this.enc.copyTextureToTexture({ texture: src.texture, origin: [r.x0, r.y0, 0] }, { texture: r.texture }, [r.w, r.h]);
+    }
     const t = this.bindTarget(d);
     if (!t) return this.skip('no target');
 
@@ -309,10 +356,11 @@ export class GpEncoder {
       if (id) {
         if (id & P.GP_TEX_RT) { id = (id & ~P.GP_TEX_RT) >>> 0; if (id === d.target) id = 0; }
         const r = id && this.res.get(id);
-        if (r && r.kind !== 'ds' && !!r.cube === !!((cube >> st) & 1)) view = r.view;
+        const subOk = r && (r.kind !== 'sub' || (r.src !== d.target && this.res.get(r.src)?.kind === 'rt'));
+        if (r && subOk && r.kind !== 'ds' && !!r.cube === !!((cube >> st) & 1)) view = r.view;
       }
       entries.push({ binding: st, resource: view ?? ((cube >> st) & 1 ? this.dummyCube : this.dummy2d) });
-      entries.push({ binding: 4 + st, resource: this.sampler(view ? d.smp[st] & 0xFFF : 0) });
+      entries.push({ binding: 4 + st, resource: this.sampler(view ? d.smp[st] : 0) });
     }
     const g1 = this.dev.createBindGroup({ layout: this.L.group1(cube), entries });
     const pass = this.pass;

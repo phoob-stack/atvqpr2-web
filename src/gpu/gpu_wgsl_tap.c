@@ -234,7 +234,7 @@ static void shadow_update(const GpFrame *f)
                 else
                     l->c.bytes = 0;
                 break;
-            case GP_RT_CREATE: case GP_DS_CREATE:
+            case GP_RT_CREATE: case GP_DS_CREATE: case GP_SUB_CREATE:
             case GP_SHADER_VS: case GP_SHADER_PS:
                 live_drop(l);
                 l->c = *c;
@@ -334,7 +334,7 @@ static void capture_write(const GpFrame *f)
             free(px);
             break;
         }
-        case GP_DS_CREATE:  out_cmd(&q, &l->c, NULL, 0); break;
+        case GP_DS_CREATE: case GP_SUB_CREATE: out_cmd(&q, &l->c, NULL, 0); break;
         case GP_TEX_CREATE: out_cmd(&q, &l->c, l->payload, l->c.bytes); break;
         case GP_SHADER_VS: case GP_SHADER_PS: shader_cmd(&q, &l->c); break;
         default: break;

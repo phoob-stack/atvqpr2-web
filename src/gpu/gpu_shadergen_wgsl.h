@@ -10,7 +10,7 @@
  *     binding 0  GpXfConsts / GpTvConsts  VS+FS   VS b0 (and PS b0 for TVERT)
  *     binding 1  GpVsConsts               VS      VS b1
  *     binding 2  GpPsConsts               FS      PS b0
- *     binding 3  GpWgslSmp (below)        FS      sampler border colours
+ *     binding 3  GpWgslSmp (below)        FS      border colours, LOD bias
  *   group 1
  *     binding 0..3  texture_2d<f32> or texture_cube<f32>, stage 0..3   t0..t3
  *     binding 4..7  sampler, stage 0..3                                s0..s3
@@ -34,8 +34,10 @@
 typedef struct {
     float    border[4][4];      /* stage colour, r g b a in 0..1 */
     uint32_t flags[4];          /* bit 0: U is BORDER, bit 1: V is BORDER */
+    float    bias[4];           /* LOD bias in levels (GP_SMP_BIAS_OF / 256):
+                                   WebGPU samplers have no bias, the PS adds it */
 } GpWgslSmp;
-_Static_assert(sizeof(GpWgslSmp) == 80, "GpWgslSmp layout");
+_Static_assert(sizeof(GpWgslSmp) == 96, "GpWgslSmp layout");
 
 /* Vertex shader variants. Without the optional `clip-distances` feature the
  * two NV2A clip distances (w > 1e-3, z >= near) travel as a varying and the

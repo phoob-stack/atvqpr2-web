@@ -16,9 +16,11 @@
  *   - a constant expression that overflows (1.0 / 0.0, an infinity literal)
  *     is a shader-creation error, so +-inf comes from a runtime bitcast;
  *   - no isnan(): a bit test;
- *   - textureSample needs uniform control flow and derivatives; the D3D11
- *     samplers clamp to level 0 and textures have one level, so every fetch
- *     is textureSampleLevel(.., 0), which has neither restriction;
+ *   - textures have mip levels: combiner fetches are textureSampleBias with
+ *     the stage's LOD bias from GpWgslSmp (D3D11 puts it in the sampler,
+ *     WebGPU samplers have none); a sampler with lodMaxClamp 0 keeps the
+ *     level-0-only cases. WGSL's discard demotes to a helper invocation, so
+ *     the fetches after the clip discards stay in uniform control flow;
  *   - no BORDER address mode: emulated from a small per-draw uniform;
  *   - no SV_ClipDistance in core: see GP_WGSL_CLIPDIST in the header.
  */
@@ -315,7 +317,7 @@ int gpu_gen_ps_tvert_wgsl(char *out, size_t cap)
              "@group(1) @binding(4) var s0: sampler;\n"
              "@fragment fn main(i: TvO) -> @location(0) vec4f {\n"
              "  var c = i.c;\n"
-             "  if (U.textured > 0.5) { c = c * textureSampleLevel(t0, s0, i.uv, 0.0); }\n"
+             "  if (U.textured > 0.5) { c = c * textureSample(t0, s0, i.uv); }\n"
              "  if (U.alpha_func > 0.5) {\n"
              "    let a = round(saturate(c.a) * 255.0); let f = i32(U.alpha_func) - 1; var ok = true;\n"
              "    if (f == 0) { ok = false; } else if (f == 1) { ok = a < U.alpha_ref; }\n"
@@ -337,7 +339,7 @@ static const char k_ps_decl[] =
     "  alpha_ref: f32, alpha_func: f32, alpha_on: f32, clip_mode: f32,\n"
     "};\n"
     "@group(0) @binding(2) var<uniform> P: PsC;\n"
-    "struct SmpX { border: array<vec4f, 4>, flags: vec4u };\n"
+    "struct SmpX { border: array<vec4f, 4>, flags: vec4u, bias: vec4f };\n"
     "@group(0) @binding(3) var<uniform> S: SmpX;\n"
     "struct FI {\n"
     "  @builtin(position) pos: vec4f,\n"
@@ -426,11 +428,11 @@ int gpu_gen_ps_wgsl(const GpPsKey *k, char *out, size_t cap)
             /* D3D11_TEXTURE_ADDRESS_BORDER, emulated: outside [0,1] on a
              * border axis reads the border colour. */
             emit(&b, "fn s2d%d(uv: vec2f) -> vec4f {\n"
-                     "  let c = textureSampleLevel(tx%d, sm%d, uv, 0.0); let f = S.flags[%d];\n"
+                     "  let c = textureSampleBias(tx%d, sm%d, uv, S.bias[%d]); let f = S.flags[%d];\n"
                      "  let ou = (f & 1u) != 0u && (uv.x < 0.0 || uv.x > 1.0);\n"
                      "  let ov = (f & 2u) != 0u && (uv.y < 0.0 || uv.y > 1.0);\n"
                      "  return select(c, S.border[%d], ou || ov);\n"
-                     "}\n", st, st, st, st, st);
+                     "}\n", st, st, st, st, st, st);
     }
     emit(&b, "@fragment fn main(i: FI) -> @location(0) vec4f {\n"
              /* Near-plane / w clip, when the VS could not use clip_distances. */
@@ -459,7 +461,7 @@ int gpu_gen_ps_wgsl(const GpPsKey *k, char *out, size_t cap)
         case 1: case 2:
             if (!valid) { emit(&b, "  T[%d] = vec4f(1.0);\n", st); break; }
             if (cube) {         /* cannot happen: cube bits are set for mode 3 only */
-                emit(&b, "  T[%d] = textureSampleLevel(tx%d, sm%d, tc[%d].xyz, 0.0);\n", st, st, st, st);
+                emit(&b, "  T[%d] = textureSampleBias(tx%d, sm%d, tc[%d].xyz, S.bias[%d]);\n", st, st, st, st, st);
                 break;
             }
             emit(&b, "  { let q = select(1.0, tc[%d].w, tc[%d].w != 0.0);"
@@ -468,7 +470,7 @@ int gpu_gen_ps_wgsl(const GpPsKey *k, char *out, size_t cap)
         case 3:
             if (!valid) { emit(&b, "  T[%d] = vec4f(1.0);\n", st); break; }
             if (cube)
-                emit(&b, "  T[%d] = textureSampleLevel(tx%d, sm%d, tc[%d].xyz, 0.0);\n", st, st, st, st);
+                emit(&b, "  T[%d] = textureSampleBias(tx%d, sm%d, tc[%d].xyz, S.bias[%d]);\n", st, st, st, st, st);
             else
                 emit(&b, "  T[%d] = s2d%d(tc[%d].xy);\n", st, st, st);
             break;
