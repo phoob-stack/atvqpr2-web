@@ -188,7 +188,8 @@ async function boot() {
         fix: 'The game reserves about 2.2 GB up front. Close other tabs and programs, use a 64-bit browser, and reload.' }], '', 'Could not reserve:');
     }
     const wi = wasm.info();
-    log(`[page] ${wasmUrl}: ${(wi.bytes / 1048576).toFixed(1)} MiB (${wi.cache || 'size unknown'}), ${wi.mode}, ` +
+    log(`[page] ${wasmUrl}: ${(wi.bytes / 1048576).toFixed(1)} MiB (${wi.cache || 'size unknown'}` +
+        `${wi.transfer ? `, ${(wi.transfer / 1048576).toFixed(2)} MiB over the wire` : ''}), ${wi.mode}, ` +
         `compiled in ${wi.ms.toFixed(0)} ms since boot; memory ${lim.min} pages (max ${lim.max ?? 65536}, from ${lim.from})`);
     log(`[page] env: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`);
     return { module, memory };
@@ -246,6 +247,11 @@ async function boot() {
     worker.postMessage({ type: 'start', module, memory, env, args, host });
     log('[page] threads: none (single-threaded bring-up)');
   }
+  // No picture long after the start: say so (not fatal; the game may still come up).
+  setTimeout(() => {
+    if (timings.firstFrame === undefined && !state.error && !state.trap && state.exit === null)
+      showNotice('Still no picture 45 s after the game started. The log (F2) shows where it is; a reload may help.');
+  }, 45000);
 
   // web_main.c reports its host block through the I/O channel.
   let presenter = null, input = null, hostPtr = 0;

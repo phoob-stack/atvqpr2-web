@@ -24,7 +24,7 @@
 // machine. Without --game the server sends no game data at all: the page asks
 // the player for their own game folder and copies it into OPFS (loader.js).
 import { createServer } from 'node:http';
-import { createReadStream, statSync, readdirSync, appendFileSync, writeFileSync } from 'node:fs';
+import { createReadStream, statSync, readdirSync, appendFileSync, writeFileSync, readFileSync } from 'node:fs';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import { brotliCompress, constants as zc } from 'node:zlib';
 import { resolve, join, dirname, extname, relative, sep } from 'node:path';
@@ -52,15 +52,25 @@ const CACHED = { ...ISOLATION, 'Cache-Control': 'no-cache' };
 // <file>.wasm.br, made once per .wasm version (brotli quality 11 takes ~25 s
 // for the game module, in zlib's thread pool; until it is there the module
 // goes out uncompressed).
+// <file>.br.json names the exact .wasm (size, mtime) the .br was made from,
+// and a .wasm that changed while it was being compressed (a build linking
+// it) gets no .br: a stale or torn module is never sent.
 const brPending = new Set();
+const stamp = (s) => `${s.size}:${Math.floor(s.mtimeMs)}`;
 function brotliFor(file, st) {
   const br = file + '.br';
-  try { const b = statSync(br); if (b.mtimeMs >= st.mtimeMs) return { file: br, size: b.size }; } catch { /* not yet */ }
+  try {
+    if (readFileSync(br + '.json', 'utf8') === stamp(st)) return { file: br, size: statSync(br).size };
+  } catch { /* not yet */ }
   if (!brPending.has(file)) {
     brPending.add(file);
     readFile(file).then((buf) => new Promise((res, rej) => brotliCompress(buf, { params: {
       [zc.BROTLI_PARAM_QUALITY]: 11, [zc.BROTLI_PARAM_SIZE_HINT]: buf.length } }, (e, out) => (e ? rej(e) : res(out)))))
-      .then((out) => writeFile(br + '.tmp', out).then(() => rename(br + '.tmp', br)))
+      .then((out) => {
+        const now = statSync(file);
+        if (stamp(now) !== stamp(st)) throw new Error('changed while compressing; next request tries again');
+        return writeFile(br + '.tmp', out).then(() => rename(br + '.tmp', br)).then(() => writeFile(br + '.json', stamp(st)));
+      })
       .then(() => console.log(`compressed ${relative(ROOT, file)} -> ${relative(ROOT, br)}`))
       .catch((e) => console.log(`brotli ${file}: ${e.message}`))
       .finally(() => brPending.delete(file));

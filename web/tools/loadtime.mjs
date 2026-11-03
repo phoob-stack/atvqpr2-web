@@ -56,7 +56,7 @@ if (opt('--wasm')) qs.set('wasm', opt('--wasm'));
 const url = `http://127.0.0.1:${port}/host/index.html?${qs}`;
 
 // What Chromium keeps for "cached images and files" (not OPFS: File System).
-const CACHE_DIRS = ['Default/Cache', 'Default/Code Cache', 'Default/Service Worker/CacheStorage', 'Default/GPUCache',
+const CACHE_DIRS = ['Default/Cache', 'Default/Code Cache', 'Default/Service Worker/CacheStorage', 'Default/GPUCache', 'GPUPersistentCache',
   'Default/DawnGraphiteCache', 'Default/DawnWebGPUCache', 'GrShaderCache', 'ShaderCache', 'GraphiteDawnCache'];
 
 const POLL = `(() => {
