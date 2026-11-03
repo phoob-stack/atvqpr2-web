@@ -652,6 +652,45 @@ static void cmd_info(Buf *b)
     bput(b, "],\"pad_reports\":[");
     for (p = 0; p < USB_GAMEPAD_MAX; p++)
         bput(b, "%s%u", p ? "," : "", usb_gamepad_reports(p));
+    /* whether a pad is plugged into each port (hot-plug, see "pads") */
+    bput(b, "],\"pad_present\":[");
+    for (p = 0; p < USB_GAMEPAD_MAX; p++)
+        bput(b, "%s%s", p ? "," : "", usb_gamepad_present(p) ? "true" : "false");
+    bput(b, "]}");
+}
+
+/* pads | pad N | pad N plug|unplug|auto: what is plugged into each port and
+ * why (usb_gamepad_wanted), and the per-port plug mode. */
+static void cmd_pads(Buf *b, Args *a)
+{
+    static const char *const mode_name[3] = { "auto", "plug", "unplug" };
+    int p, lo = 0, hi = USB_GAMEPAD_MAX;
+    if (a->n >= 2) {
+        if (a->t[1][0] < '1' || a->t[1][0] > '4' || a->t[1][1]) {
+            berr(b, "pad <1-4> [plug|unplug|auto | <command ...>]");
+            return;
+        }
+        lo = a->t[1][0] - '1';
+        hi = lo + 1;
+        if (a->n >= 3) {
+            const char *m = a->t[2];
+            if (!_stricmp(m, "plug")) usb_gamepad_set_plug(lo, USB_PAD_ON);
+            else if (!_stricmp(m, "unplug")) usb_gamepad_set_plug(lo, USB_PAD_OFF);
+            else if (!_stricmp(m, "auto")) usb_gamepad_set_plug(lo, USB_PAD_AUTO);
+            else { berr(b, "pad <1-4> plug|unplug|auto"); return; }
+        }
+    }
+    bput(b, "{\"ok\":true,\"pads\":[");
+    for (p = lo; p < hi; p++) {
+        const char *why = "";
+        int want = usb_gamepad_wanted(p, &why), mode = usb_gamepad_plug_mode(p);
+        bput(b, "%s{\"port\":%d,\"present\":%s,\"wanted\":%s,\"why\":\"%s\",\"mode\":\"%s\","
+                "\"configured\":%s,\"reports\":%u,\"pending\":%d}",
+             p > lo ? "," : "", p + 1, usb_gamepad_present(p) ? "true" : "false",
+             want ? "true" : "false", why, mode_name[mode >= 0 && mode < 3 ? mode : 0],
+             usb_gamepad_configured(p) ? "true" : "false", usb_gamepad_reports(p),
+             usb_gamepad_queue_pending(p));
+    }
     bput(b, "]}");
 }
 
@@ -707,6 +746,16 @@ static void cmd_wait(Buf *b, Args *a)
         if (a->timeout < n + 1000) a->timeout = n + 1000;
     } else if (!_stricmp(kind, "input")) {
         pad = a->n > 2 ? pad_token(a->t[2]) : -1;
+    } else if (!_stricmp(kind, "pad")) {
+        /* wait pad N: until port N has a pad the title has configured and
+         * is reading (plug it first: "pad N plug", or press on it) */
+        if (a->n < 3 || ((pad = pad_token(a->t[2])) < 0
+                         && (a->t[2][0] < '1' || a->t[2][0] > '4' || a->t[2][1]))) {
+            berr(b, "wait pad <1-4>");
+            return;
+        }
+        if (pad < 0) pad = a->t[2][0] - '1';
+        n = usb_gamepad_reports(pad);
     } else if (!_stricmp(kind, "mem")) {
         /* wait mem <va> <type> <op> [value] */
         if (a->n < 5 || !parse_u32(a->t[2], &va) || !(ty = parse_type(a->t[3])) ||
@@ -730,7 +779,7 @@ static void cmd_wait(Buf *b, Args *a)
     } else if (!_stricmp(kind, "held")) {
         /* until the frame hook is holding a paused title */
     } else {
-        berr(b, "wait frames|ms|input|mem|value|fps|draws|held ... [timeout=ms]");
+        berr(b, "wait frames|ms|input|pad|mem|value|fps|draws|held ... [timeout=ms]");
         return;
     }
 
@@ -746,6 +795,9 @@ static void cmd_wait(Buf *b, Args *a)
                 if ((pad < 0 || pad == p) && usb_gamepad_queue_pending(p))
                     done = 0;
         } else if (!_stricmp(kind, "held")) done = held;
+        else if (!_stricmp(kind, "pad"))
+            done = usb_gamepad_present(pad) && usb_gamepad_configured(pad)
+                && usb_gamepad_reports(pad) != n;
         else {
             int ok = 1;
             if (!_stricmp(kind, "mem")) ok = read_typed(va, ty, &cur);
@@ -833,7 +885,8 @@ static void cmd_input(Buf *b, Args *a)
 static const char *k_help =
     "commands: ping | info | help | quit | "
     "press [pN] <spec> [hold] [gap] | hold [pN] <spec> | release [pN] [spec] | clear [pN] | "
-    "wait frames N | wait ms N | wait input [pN] | wait mem VA TYPE OP [V] | "
+    "pads | pad N [plug|unplug|auto] | key VK 1|0 | pad N <press|hold|release|clear|wait input ...> (= pN) | "
+    "wait frames N | wait ms N | wait input [pN] | wait pad N | wait mem VA TYPE OP [V] | "
     "wait value NAME OP [V] | wait fps OP V | wait draws OP V | wait held  (all take timeout=MS) | "
     "screenshot PATH | color X Y [W H] | read VA LEN | write VA HEX | dump VA LEN PATH | peek VA TYPE [COUNT] | poke VA TYPE V | "
     "scan new TYPE [LO HI] | scan OP [V] | scan list [MAX] | scan count | scan free | "
@@ -843,9 +896,47 @@ static int handle(char *line, Buf *b)
 {
     Args a;
     const char *c;
+    char ptok[4];
     tokenize(line, &a);
     if (!a.n) { bput(b, "{\"ok\":true}"); return 0; }
     c = a.t[0];
+
+    /* "pad N <command ...>" is the command for port N: "pad 2 press a" =
+     * "press p2 a", "pad 3 wait input" = "wait input p3". Commands without
+     * it keep meaning port 1 (or every port, for clear and wait input). */
+    if (!_stricmp(c, "pad") && a.n >= 3 && a.t[1][0] >= '1' && a.t[1][0] <= '4'
+        && !a.t[1][1] && _stricmp(a.t[2], "plug") && _stricmp(a.t[2], "unplug")
+        && _stricmp(a.t[2], "auto")) {
+        int k, at;
+        snprintf(ptok, sizeof ptok, "p%c", a.t[1][0]);
+        for (k = 2; k < a.n; k++) a.t[k - 2] = a.t[k];
+        a.n -= 2;
+        at = (!_stricmp(a.t[0], "wait") && a.n >= 2) ? 2 : 1;   /* wait input pN */
+        if (a.n < MAXTOK) {
+            for (k = a.n; k > at; k--) a.t[k] = a.t[k - 1];
+            a.t[at] = ptok;
+            a.n++;
+        }
+        c = a.t[0];
+    }
+    if (!_stricmp(c, "pads") || !_stricmp(c, "pad")) {
+        cmd_pads(b, &a);
+        return 0;
+    }
+    if (!_stricmp(c, "key")) {
+        /* key <vk> <1|0>: the host keyboard's key table (xbox_InputKeySet),
+         * as if the window had the key down -- tests the keyboard player
+         * (needs RECOMP_KEYBOARD=1) without sending the window anything. */
+        extern void xbox_InputKeySet(int vk, int down);
+        uint32_t vk, down;
+        if (a.n < 3 || !parse_u32(a.t[1], &vk) || vk > 255 || !parse_u32(a.t[2], &down)) {
+            berr(b, "key <vk 0-255> <1|0>");
+            return 0;
+        }
+        xbox_InputKeySet((int)vk, down != 0);
+        bput(b, "{\"ok\":true}");
+        return 0;
+    }
 
     if (!_stricmp(c, "ping")) {
         uint64_t fr;

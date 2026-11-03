@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 #define WEB_HOST_MAGIC   0x57565441u     /* "ATVW" */
-#define WEB_HOST_VERSION 1u
+#define WEB_HOST_VERSION 2u
 
 /* boot_stage: how far web_main got (the page shows it, a test reads it) */
 enum {
@@ -56,8 +56,12 @@ typedef struct WebHost {
     /* ---- input (page -> game) --------------------------------------------
      * keys[vk] = 1 while held, Windows VK codes (keyboard.c's key table and
      * map: Enter=START, Z=A, X=B, arrows = d-pad). Byte stores, no lock.
-     * pad_*: a Gamepad API pad already mapped to the Xbox layout, under a
-     * seqlock: the page makes pad_seq odd, writes, makes it even. */
+     * pad_*: Xbox port 1's Gamepad API pad (navigator.getGamepads()[0])
+     * already mapped to the Xbox layout; ports 2-4 are pad_x[] after keys.
+     * All under one seqlock: the page makes pad_seq odd, writes, makes it
+     * even. kb_port / kb_live: which port the keyboard drives (the first
+     * with no gamepad; ~0 = none) and whether it has a pad there yet (port
+     * 1 from the start, another port from its first key press). */
     volatile uint32_t pad_seq, pad_connected;
     uint32_t pad_buttons;              /* XBOX_GAMEPAD.wButtons */
     uint32_t pad_analog[2];            /* bAnalogButtons[8], bytes */
@@ -71,8 +75,17 @@ typedef struct WebHost {
      * the page plays it on the Gamepad's vibrationActuator. */
     volatile uint32_t pad_rumble;
 
-    uint32_t reserved[7];
+    volatile uint32_t kb_port, kb_live;
+
+    uint32_t reserved[5];
     volatile uint8_t keys[256];
+
+    /* Xbox ports 2-4 (getGamepads()[1..3]), as pad_* above, plus rumble. */
+    struct {
+        uint32_t connected, buttons, analog[2];
+        int32_t  thumb[4];
+        volatile uint32_t rumble;
+    } pad_x[3];
 } WebHost;
 
 /* Float32 stereo SPSC ring the AudioWorklet drains (nfsu2-web's shape).
@@ -96,7 +109,7 @@ typedef struct WebAudioRing {
 
 /* web/host/abi.js computes the same offsets from the same field order. */
 _Static_assert(__builtin_offsetof(WebHost, keys) == 38 * 4, "WebHost layout");
-_Static_assert(sizeof(WebHost) == 38 * 4 + 256, "WebHost layout");
+_Static_assert(sizeof(WebHost) == 38 * 4 + 256 + 3 * 9 * 4, "WebHost layout");
 _Static_assert(sizeof(WebAudioRing) == 32, "WebAudioRing layout");
 
 WebHost *web_host(void);

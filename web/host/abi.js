@@ -2,7 +2,7 @@
 // (src/gpu/gpu_proto.h) as wasm32 lays it out. Offsets are computed from the
 // field lists, as web/gpu/proto.js does; web_host.h asserts the same sizes.
 
-export const WEB_HOST_MAGIC = 0x57565441, WEB_HOST_VERSION = 1;
+export const WEB_HOST_MAGIC = 0x57565441, WEB_HOST_VERSION = 2;
 export const WEB_AUDIO_MAGIC = 0x41565441;
 
 function words(fields) {
@@ -19,10 +19,13 @@ export const Host = words([
   ['disp_seq'], ['disp_va'], ['disp_pitch'], ['disp_aa'], ['disp_w'], ['disp_h'], ['disp_cpu'],
   ['cpu_fb'], ['flips'], ['last_draws'], ['mem_offset'],
   ['pad_seq'], ['pad_connected'], ['pad_buttons'], ['pad_analog', 2], ['pad_thumb', 4],
-  ['audio_ring'], ['pad_rumble'], ['reserved', 7],
+  ['audio_ring'], ['pad_rumble'], ['kb_port'], ['kb_live'], ['reserved', 5],
 ]);
 export const HOST_KEYS_OFFSET = Host.size;          // uint8_t keys[256]
-export const HOST_SIZE = Host.size + 256;
+// pad_x[3]: Xbox ports 2-4, after keys (u32 index of each field in a pad).
+export const PadX = words([['connected'], ['buttons'], ['analog', 2], ['thumb', 4], ['rumble']]);
+export const HOST_PADX_OFFSET = HOST_KEYS_OFFSET + 256;
+export const HOST_SIZE = HOST_PADX_OFFSET + 3 * PadX.size;
 
 export const AudioRing = words([
   ['magic'], ['rate'], ['channels'], ['cap'], ['write'], ['read'], ['heartbeat'], ['underruns'],
