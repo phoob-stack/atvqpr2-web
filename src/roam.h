@@ -32,11 +32,9 @@ typedef struct RoamMailbox {
 
 extern RoamMailbox atv2_roam_mb;
 
-typedef struct { float pos[3]; char name[24]; } RoamLabel;
-
 void atv2_roam_init(void);
 void atv2_roam_flip(void);
-int  atv2_roam_labels(RoamLabel *out, int max);
+void atv2_roam_draw_guest(uint32_t va, uint32_t w, uint32_t h, uint32_t pitch);
 
 /* transport side */
 void atv2_roam_net_start(const char *addr);

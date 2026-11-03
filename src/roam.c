@@ -47,12 +47,15 @@
 
 #include "recomp/gen/recomp_types.h"
 #include "roam.h"
+#include "roam_font.h"
 
 #if defined(_MSC_VER)
 #define strtok_r strtok_s
 #endif
 
 void sub_000BB4B0(void);
+static void labels_update(void);
+static float s_dbg_xs, s_dbg_z; static int s_dbg_n;
 void sub_00027470(void);
 void sub_00028340(void);
 
@@ -286,6 +289,8 @@ typedef struct {
     double   last_recv;
     double   interval;                /* EMA of snapshot spacing (ms) */
     uint32_t got, lost, late;
+    uint32_t n_interp, n_extrap;      /* ticks shown interpolated / extrapolated */
+    double   delay;
     int      shown;
     float    lastpos[3];
 } Remote;
@@ -358,6 +363,7 @@ static void rem_push(Remote *r, const Snap *s, uint32_t seq, double recv)
         r->lost += seq - r->last_seq - 1;
     if (r->got > 1 && (int32_t)(seq - r->last_seq) <= 0) {   /* out of order: insert anyway */
         r->late++;
+        if (r->lost) r->lost--;           /* counted as lost when the gap opened */
     } else {
         if (r->got > 1) {
             double gap = s->t - r->buf[(r->head + JB - 1) % JB].t;
@@ -674,6 +680,7 @@ static void local_tick(uint32_t r0)
 
     pump_in(now);
     ghost_refresh();
+    labels_update();
     if (!u)
         return;
     if (!s_qchecked)
@@ -710,14 +717,17 @@ static void local_tick(uint32_t r0)
     if (now - s_stat_t0 >= 10000) {
         double dt = (now - s_stat_t0) / 1000.0;
         int i;
-        fprintf(stderr, "[ROAM] ghost: %u puppet pairs skipped\n", s_ghost_skips);
+        fprintf(stderr, "[ROAM] ghost: %u puppet pairs skipped; %u name tags (first at %.2f %.2f, %.0f m)\n",
+                s_ghost_skips, atv2_roam_mb.nlabels, atv2_roam_mb.labels[0].x, atv2_roam_mb.labels[0].y,
+                atv2_roam_mb.labels[0].z);
+        fprintf(stderr, "[ROAM] label dbg: xs %.3f z %.2f n %d\n", s_dbg_xs, s_dbg_z, s_dbg_n);
         fprintf(stderr, "[ROAM] stats: sent %u snaps (%.1f/s, %.0f B/s payload), recv %u snaps (%.1f/s, %.0f B/s)\n",
                 s_sent_snaps, s_sent_snaps / dt, s_sent_bytes / dt, s_recv_snaps, s_recv_snaps / dt, s_recv_bytes / dt);
         for (i = 0; i < MAXP; i++)
             if (s_rem[i].used)
                 fprintf(stderr, "[ROAM]   %s id %d slot %d: interval %.1f ms, jitter %.1f ms, delay %.0f ms, got %u lost %u late %u\n",
                         s_rem[i].name, s_rem[i].id, s_rem[i].slot, s_rem[i].interval, s_rem[i].jit,
-                        s_delay_ms, s_rem[i].got, s_rem[i].lost, s_rem[i].late);
+                        s_rem[i].delay, s_rem[i].got, s_rem[i].lost, s_rem[i].late, s_rem[i].n_interp, s_rem[i].n_extrap);
         fflush(stderr);
         s_sent_snaps = s_recv_snaps = 0; s_sent_bytes = s_recv_bytes = 0; s_stat_t0 = now;
     }
@@ -730,7 +740,7 @@ static void puppet_tick(uint32_t p, int slot)
     uint32_t u = part_unit(p);
     double now = now_ms();
     Remote *r = NULL;
-    int i;
+    int i, k;
     if (!u)
         return;
     for (i = 0; i < MAXP; i++)
@@ -746,7 +756,10 @@ static void puppet_tick(uint32_t p, int slot)
         if (delay > 300) delay = 300;
         s_delay_ms = delay;
         /* remote clock now = now - off_min; show it `delay` ms behind */
-        if (rem_sample(r, now - r->off_min - delay, &s)) {
+        r->delay = delay;
+        k = rem_sample(r, now - r->off_min - delay, &s);
+        if (k == 1) r->n_interp++; else if (k == 2) r->n_extrap++;
+        if (k) {
             apply(u, &s);
             memcpy(r->lastpos, s.pos, sizeof r->lastpos);
             if (!r->shown) {
@@ -888,16 +901,87 @@ void atv2_roam_flip(void)
 }
 
 /* Names over the riders: world positions for the overlay (any thread). */
-int atv2_roam_labels(RoamLabel *out, int max)
+/* ---- name tags --------------------------------------------------------------------
+ * Each tick the shown riders are projected with the game's view-projection
+ * matrix (0x1DE768: 4x4, row vectors, D3D clip space; the render camera's pose
+ * is at 0x1DE70C) into the mailbox's labels: x, y in 0..1 of the screen, z the
+ * distance. Natively gpu_d3d11.c draws them; in the browser web/host/roam.js. */
+#define CAM_VP   0x001DE768u
+#define CAM_POS  0x001DE70Cu
+
+static void labels_update(void)
 {
-    int i, n = 0;
-    for (i = 0; i < MAXP && n < max; i++)
-        if (s_rem[i].used && s_rem[i].slot && s_rem[i].shown) {
-            memcpy(out[n].pos, s_rem[i].lastpos, sizeof out[n].pos);
-            snprintf(out[n].name, sizeof out[n].name, "%s", s_rem[i].name);
-            n++;
+    RoamMailbox *m = &atv2_roam_mb;
+    float vp[16], cam[12], xs;
+    uint32_t n = 0;
+    int i, k;
+    /* The render camera: position and rows (right, up, forward) at 0x1DE70C;
+     * the horizontal scale (1 / tan(fov/2), it changes with speed) from the
+     * view-projection's first column. Square pixels on a 4:3 picture. */
+    rdv(CAM_VP, vp, 16);
+    {   /* the human camera controller (settings+0x58 [0] +0xB4): pose at +0x78, rows at +0x84;
+         * the render camera global (CAM_POS) holds whatever drew last at update time */
+        uint32_t pl0 = rd32(rd32(SETTINGS + 0x58)), ctl = pl0 ? rd32(pl0 + 0xB4) : 0;
+        if (!ctl) { m->nlabels = 0; return; }
+        rdv(ctl + 0x78, cam, 12);
+    }
+    xs = sqrtf(vp[0] * vp[0] + vp[4] * vp[4] + vp[8] * vp[8]);
+    s_dbg_xs = xs;
+    if (!(xs > 0.2f && xs < 10.0f)) { m->nlabels = 0; return; }
+    for (i = 0; i < MAXP && n < 8; i++) {
+        Remote *r = &s_rem[i];
+        float d[3], x = 0, y = 0, z = 0;
+        if (!r->used || !r->slot || !r->shown) continue;
+        d[0] = r->lastpos[0] - cam[0]; d[1] = r->lastpos[1] + 1.45f - cam[1]; d[2] = r->lastpos[2] - cam[2];
+        for (k = 0; k < 3; k++) { x += d[k] * cam[3 + k]; y += d[k] * cam[6 + k]; z += d[k] * cam[9 + k]; }
+        s_dbg_z = z; s_dbg_n++;
+        if (z < 0.5f || z > 120.0f) continue;
+        m->labels[n].x = 0.5f + 0.5f * xs * x / z;
+        m->labels[n].y = 0.5f - 0.5f * xs * (4.0f / 3.0f) * y / z;
+        m->labels[n].z = z;
+        if (m->labels[n].x < -0.1f || m->labels[n].x > 1.1f || m->labels[n].y < -0.1f || m->labels[n].y > 1.1f) continue;
+        memset((void *)m->labels[n].name, 0, sizeof m->labels[n].name);
+        memcpy((void *)m->labels[n].name, r->name, strlen(r->name) < 19 ? strlen(r->name) : 19);
+        n++;
+    }
+    m->nlabels = n;
+}
+
+static uint32_t s_g_va, s_g_w, s_g_pitch;
+static void guest_px(int l, int t, int r, int b, void *ctx)
+{
+    uint32_t color = *(uint32_t *)ctx;
+    int x, y;
+    if (l < 0) l = 0;
+    if (t < 0) t = 0;
+    if (r > (int)s_g_w) r = (int)s_g_w;
+    for (y = t; y < b; y++)
+        for (x = l; x < r; x++) {
+            uint32_t va = s_g_va + (uint32_t)y * s_g_pitch + (uint32_t)x * 4u;
+            *(volatile uint32_t *)XBOX_PTR(va) = color;
         }
-    return n;
+}
+
+/* The name tags into the guest's presented frame (32-bit, w x h). */
+void atv2_roam_draw_guest(uint32_t va, uint32_t w, uint32_t h, uint32_t pitch)
+{
+    RoamMailbox *m = &atv2_roam_mb;
+    uint32_t i, n = m->nlabels, black = 0xFF000000u, white = 0xFFFFFFFFu;
+    if (!n || !va || pitch < w * 4 || w > 4096 || h > 4096)
+        return;
+    s_g_va = va; s_g_w = w; s_g_pitch = pitch;
+    for (i = 0; i < n && i < 8; i++) {
+        char name[21];
+        int len, x, y;
+        memcpy(name, (const void *)m->labels[i].name, 20); name[20] = 0;
+        len = (int)strlen(name);
+        int px = m->labels[i].z < 30.0f ? 2 : 1;      /* 5x7 font: 10x14 near, 5x7 far */
+        x = (int)(m->labels[i].x * w) - len * 3 * px;
+        y = (int)(m->labels[i].y * h) - 7 * px;
+        if (y < 1 || y + 8 * px > (int)h) continue;
+        roam_text_rects(name, x, y, px, 1, guest_px, &black);
+        roam_text_rects(name, x, y, px, 0, guest_px, &white);
+    }
 }
 
 void atv2_roam_init(void)

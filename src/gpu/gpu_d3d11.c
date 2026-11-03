@@ -26,6 +26,7 @@
 #endif
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include <stdint.h>
@@ -1654,6 +1655,47 @@ static void sc_show(ID3D11ShaderResourceView *src, uint32_t sw, uint32_t sh, uin
     IDXGISwapChain1_Present(s_sc, 0, 0);
 }
 
+/* Free roam (src/roam.c): the other players' names over their riders, drawn
+ * into the full-size presented frame as rectangles (ClearView, no shader).
+ * The guest-size frame gets them at the flip (gpu_rec.c, atv2_roam_draw_guest),
+ * which is what the default window and the control channel's screenshots show. */
+#include "../roam.h"
+#include "../roam_font.h"
+extern volatile int atv2_roam_on;
+typedef struct { D3D11_RECT r[2048]; UINT n; } RoamRects;
+static void roam_emit(int l, int t, int r, int b, void *ctx)
+{
+    RoamRects *rr = (RoamRects *)ctx;
+    if (rr->n < 2048) { rr->r[rr->n].left = l; rr->r[rr->n].top = t; rr->r[rr->n].right = r; rr->r[rr->n].bottom = b; rr->n++; }
+}
+static void roam_overlay(Res *best)
+{
+    static ID3D11DeviceContext1 *ctx1;
+    static int tried;
+    static RoamRects fg, bg;
+    static const float white[4] = { 1, 1, 1, 1 }, black[4] = { 0, 0, 0, 1 };
+    RoamMailbox *m = &atv2_roam_mb;
+    uint32_t i, n = m->nlabels;
+    int px;
+    if (!n || !best->rtv) return;
+    if (!tried) { tried = 1; ID3D11DeviceContext_QueryInterface(s_ctx, &IID_ID3D11DeviceContext1, (void **)&ctx1); }
+    if (!ctx1) return;
+    px = (int)(best->sh / 240u); if (px < 1) px = 1;
+    fg.n = bg.n = 0;
+    for (i = 0; i < n && i < 8; i++) {
+        char name[21];
+        int len, x, y;
+        memcpy(name, (const void *)m->labels[i].name, 20); name[20] = 0;
+        len = (int)strlen(name);
+        x = (int)(m->labels[i].x * best->sw) - len * 3 * px;
+        y = (int)(m->labels[i].y * best->sh) - 7 * px;
+        roam_text_rects(name, x, y, px, px > 1 ? px / 2 : 1, roam_emit, &bg);
+        roam_text_rects(name, x, y, px, 0, roam_emit, &fg);
+    }
+    ID3D11DeviceContext1_ClearView(ctx1, (ID3D11View *)best->rtv, black, bg.r, bg.n);
+    ID3D11DeviceContext1_ClearView(ctx1, (ID3D11View *)best->rtv, white, fg.r, fg.n);
+}
+
 int gp_d3d11_present_frame(void *hwnd, uint32_t fb_va, uint32_t aw, uint32_t ah)
 {
     Res *best = NULL;
@@ -1666,6 +1708,8 @@ int gp_d3d11_present_frame(void *hwnd, uint32_t fb_va, uint32_t aw, uint32_t ah)
     }
     if (best) {
         resolve(best);
+        if (atv2_roam_on)
+            roam_overlay(best);       /* the guest copy has them already (gpu_rec.c) */
         if (gp_display_dump_due()) {
             /* RECOMP_HIRES_DUMP: the full-size image, as presented. */
             D3D11_TEXTURE2D_DESC td;
