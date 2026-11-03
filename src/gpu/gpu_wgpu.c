@@ -15,6 +15,10 @@
  *   with dynamic offsets; pipelines and texture bind groups cached by key;
  *   write the linear render targets drawn this frame back into guest memory,
  *   so the framebuffer window, dumps and screenshots work unchanged.
+ *
+ * Display options (gpu_display.h) as gpu_d3d11.c: scaled and/or
+ * multisampled targets, box-filtered writeback, and a window surface that
+ * shows the full-size image (gp_wgpu_present_*). Off: none of it runs.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -29,6 +33,7 @@
 #include <webgpu/wgpu.h>            /* wgpuDevicePoll */
 
 #include "gpu_proto.h"
+#include "gpu_display.h"
 #include "gpu_shadergen_wgsl.h"
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
@@ -62,6 +67,14 @@ typedef struct {
     WGPUBuffer rb;                  /* writeback staging */
     uint32_t va, w, h, bpp, fmt, swz, pitch, dirty, cube;   /* cube: faces==6 (tex) or PS mask;
                                                                R_SUB: va = source target, pitch = x0 | y0 << 16 */
+    /* Display options only (s_active): */
+    uint32_t sw, sh;                /* scaled size (R_RT, R_DS, R_SUB) */
+    uint32_t bx, by;                /* R_SUB: scaled top-left in the source */
+    WGPUTexture ms;                 /* MSAA colour (R_RT), drawn into */
+    WGPUTextureView msview;
+    uint32_t msdirty;               /* drawn since the last resolve into tex */
+    WGPUTexture down;               /* scaled: guest-size copy for writeback */
+    WGPUTextureView downview;
 } Res;
 static Res *s_res;
 static uint32_t s_nres;
@@ -100,10 +113,28 @@ static void res_release(Res *r)
 {
     if (r->view) { wgpuTextureViewRelease(r->view); s_bg_flush = 1; }
     if (r->tex) { wgpuTextureDestroy(r->tex); wgpuTextureRelease(r->tex); }
+    if (r->msview) wgpuTextureViewRelease(r->msview);
+    if (r->ms) { wgpuTextureDestroy(r->ms); wgpuTextureRelease(r->ms); }
+    if (r->downview) wgpuTextureViewRelease(r->downview);
+    if (r->down) { wgpuTextureDestroy(r->down); wgpuTextureRelease(r->down); }
     if (r->mod) wgpuShaderModuleRelease(r->mod);
     if (r->rb) { wgpuBufferDestroy(r->rb); wgpuBufferRelease(r->rb); }
     memset(r, 0, sizeof *r);
 }
+
+/* Display options (gpu_display.h): current scale per axis, MSAA samples,
+ * whether any of it is on. */
+static float s_sx = 1.0f, s_sy = 1.0f;
+static int s_msaa = 1, s_active;
+static int display_init(void);
+static void rt_make(Res *r);
+static void resolve(Res *r);
+static WGPUTextureView draw_view(Res *r);
+static WGPUTexture make_tex_n(uint32_t w, uint32_t h, WGPUTextureFormat f, WGPUTextureUsage u, uint32_t samples);
+static void blit(WGPUTextureView src, uint32_t srcw, uint32_t srch, WGPUTextureView dst,
+                 WGPUTextureFormat fmt, uint32_t samples, int clear,
+                 float x, float y, float w, float h);
+static WGPUCommandEncoder s_enc;
 
 /* Built-in shaders live outside the id table (VS 1/2 and PS 1 share ids). */
 static WGPUShaderModule s_vs_pass, s_vs_tv, s_ps_tv;
@@ -245,6 +276,7 @@ static int ensure_device(void)
     if ((src = gp_wgsl_source(GP_VS_TVERT, 0, &n)))    s_vs_tv = wgsl_module(src, n, "vs_tvert");
     if ((src = gp_wgsl_source(GP_PS_TVERT, 1, &n)))    s_ps_tv = wgsl_module(src, n, "ps_tvert");
     if (!s_vs_pass || !s_vs_tv || !s_ps_tv) return 0;
+    if (!display_init()) return 0;
     s_failed = 0;
     fprintf(stderr, "  [WGPU] packet consumer ready (BC %d, D32S8 %d)\n", s_bc, s_d32s8);
     return 1;
@@ -274,6 +306,28 @@ static void q_rt_create(const GpCmd *c, const void *payload)
     Res *r = res(c->id);
     if (!r) return;
     res_release(r);
+    if (s_active) {
+        /* Scaled and/or multisampled: the guest pixels (if any) go in
+         * through a guest-size texture, scaled up into the draw target. */
+        r->w = c->b; r->h = c->c;
+        rt_make(r);
+        if (c->bytes) {
+            WGPUTexture t = make_tex(c->b, c->c, 1, WGPUTextureFormat_BGRA8Unorm,
+                                     WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst);
+            WGPUTextureView v;
+            write_tex(t, 0, payload, c->bytes, c->b * 4, c->c, c->b, c->c);
+            v = wgpuTextureCreateView(t, NULL);
+            blit(v, c->b, c->c, draw_view(r), WGPUTextureFormat_BGRA8Unorm, r->ms ? (uint32_t)s_msaa : 1, 0,
+                 0, 0, (float)r->sw, (float)r->sh);
+            wgpuTextureViewRelease(v);
+            wgpuTextureRelease(t);                  /* the encoder keeps it until it runs */
+            if (r->ms) r->msdirty = 1;
+        }
+        r->kind = R_RT; r->va = c->a;
+        r->bpp = c->d & 0xFF; r->fmt = (c->d >> 8) & 0xFF; r->swz = (c->d >> 16) & 1; r->pitch = c->e;
+        rt_list_add(c->id);
+        return;
+    }
     r->tex = make_tex(c->b, c->c, 1, WGPUTextureFormat_BGRA8Unorm,
                       WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding
                       | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst);
@@ -289,6 +343,10 @@ static void q_ds_create(const GpCmd *c)
     Res *r = res(c->id);
     if (!r) return;
     res_release(r);
+    if (s_active) {
+        r->sw = gp_scaled(c->b, s_sx); r->sh = gp_scaled(c->c, s_sy);
+        r->tex = make_tex_n(r->sw, r->sh, s_ds_fmt, WGPUTextureUsage_RenderAttachment, (uint32_t)s_msaa);
+    } else
     r->tex = make_tex(c->b, c->c, 1, s_ds_fmt, WGPUTextureUsage_RenderAttachment);
     r->view = wgpuTextureCreateView(r->tex, NULL);
     r->kind = R_DS; r->w = c->b; r->h = c->c;
@@ -350,6 +408,14 @@ static void q_sub_create(const GpCmd *c)
     Res *r = res(c->id);
     if (!r) return;
     res_release(r);
+    if (s_active) {
+        /* The tile's box in the scaled source (gpu_d3d11.c q_sub_create). */
+        uint32_t x0 = c->d & 0xFFFF, y0 = c->d >> 16;
+        r->bx = gp_scaled(x0, s_sx); r->by = gp_scaled(y0, s_sy);
+        r->sw = gp_scaled(x0 + c->b, s_sx) - r->bx; r->sh = gp_scaled(y0 + c->c, s_sy) - r->by;
+        r->tex = make_tex(r->sw, r->sh, 1, WGPUTextureFormat_BGRA8Unorm,
+                          WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst);
+    } else
     r->tex = make_tex(c->b, c->c, 1, WGPUTextureFormat_BGRA8Unorm,
                       WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst);
     r->view = wgpuTextureCreateView(r->tex, NULL);
@@ -645,6 +711,7 @@ static WGPURenderPipeline make_pipeline(const PipeKey *k, WGPUShaderModule vs, W
     pd.vertex.bufferCount = 1; pd.vertex.buffers = &vbl;
     pd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
     pd.primitive.cullMode = WGPUCullMode_None;
+    if (s_active) pd.multisample.count = (uint32_t)s_msaa;
 
     ct.format = WGPUTextureFormat_BGRA8Unorm;
     ct.writeMask = k->wmask;
@@ -768,7 +835,6 @@ static WGPUBindGroup tex_group(uint32_t cube, WGPUTextureView v[4], WGPUSampler 
 
 /* ---- passes and records -------------------------------------------------- */
 
-static WGPUCommandEncoder s_enc;
 static WGPURenderPassEncoder s_pass;
 static uint32_t s_cur_target, s_cur_zeta;
 static struct { uint64_t draws, tris, skipped, clears, passes, no_vs, no_ps, no_rt, z_scratch, sub_copies; } s_st;
@@ -783,7 +849,7 @@ static void begin_pass(Res *rt, Res *ds, const float *clear_rgba, const float *c
     WGPURenderPassColorAttachment ca = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
     WGPURenderPassDepthStencilAttachment da = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
     WGPURenderPassDescriptor pd = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
-    ca.view = rt->view;
+    ca.view = s_active ? draw_view(rt) : rt->view;
     ca.loadOp = clear_rgba ? WGPULoadOp_Clear : WGPULoadOp_Load;
     ca.storeOp = WGPUStoreOp_Store;
     if (clear_rgba) ca.clearValue = (WGPUColor){ clear_rgba[0], clear_rgba[1], clear_rgba[2], clear_rgba[3] };
@@ -800,6 +866,10 @@ static void begin_pass(Res *rt, Res *ds, const float *clear_rgba, const float *c
     }
     end_pass();
     s_pass = wgpuCommandEncoderBeginRenderPass(s_enc, &pd);
+    if (s_active) {
+        wgpuRenderPassEncoderSetViewport(s_pass, 0, 0, (float)rt->sw, (float)rt->sh, 0, 1);
+        if (rt->ms) rt->msdirty = 1;
+    } else
     wgpuRenderPassEncoderSetViewport(s_pass, 0, 0, (float)rt->w, (float)rt->h, 0, 1);
     s_st.passes++;
 }
@@ -820,7 +890,7 @@ static Res *depth_for(const GpDraw *d, const Res *rt, uint32_t *key)
     *key = 0;
     if (!ds || ds->kind != R_DS) return NULL;
     *key = d->zeta;
-    if (ds->w == rt->w && ds->h == rt->h) return ds;
+    if (s_active ? ds->sw == rt->sw && ds->sh == rt->sh : ds->w == rt->w && ds->h == rt->h) return ds;
     s_st.z_scratch++;
     for (i = 0; i < s_nscratch; i++)
         if (s_scratch[i].zeta == d->zeta && s_scratch[i].w == rt->w && s_scratch[i].h == rt->h) break;
@@ -828,6 +898,9 @@ static Res *depth_for(const GpDraw *d, const Res *rt, uint32_t *key)
         if (s_nscratch == MAX_SCRATCH) { *key = 0; return NULL; }
         s_scratch[i].zeta = d->zeta; s_scratch[i].w = rt->w; s_scratch[i].h = rt->h;
         memset(&s_scratch[i].r, 0, sizeof s_scratch[i].r);
+        if (s_active)
+            s_scratch[i].r.tex = make_tex_n(rt->sw, rt->sh, s_ds_fmt, WGPUTextureUsage_RenderAttachment, (uint32_t)s_msaa);
+        else
         s_scratch[i].r.tex = make_tex(rt->w, rt->h, 1, s_ds_fmt, WGPUTextureUsage_RenderAttachment);
         s_scratch[i].r.view = wgpuTextureCreateView(s_scratch[i].r.tex, NULL);
         s_scratch[i].r.kind = R_DS; s_scratch[i].r.w = rt->w; s_scratch[i].r.h = rt->h;
@@ -897,8 +970,24 @@ static void do_draw(const GpDraw *d, const Slots *sl)
     for (st = 0; st < 4; st++) {
         uint32_t id = d->tex[st];
         Res *r, *src;
+        if (s_active && id && (id & GP_TEX_RT) && (id & ~GP_TEX_RT) != d->target
+            && (r = res(id & ~GP_TEX_RT)) && r->kind == R_RT)
+            resolve(r);                       /* MSAA: sampled from tex */
         if (!id || (id & GP_TEX_RT) || !(r = res(id)) || r->kind != R_SUB) continue;
         src = res(r->va);
+        if (s_active && src && src->kind == R_RT && r->va != d->target
+            && r->bx + r->sw <= src->sw && r->by + r->sh <= src->sh) {
+            resolve(src);
+            end_pass();
+            wgpuCommandEncoderCopyTextureToTexture(s_enc,
+                &(WGPUTexelCopyTextureInfo){ .texture = src->tex, .origin = { r->bx, r->by, 0 },
+                                             .aspect = WGPUTextureAspect_All },
+                &(WGPUTexelCopyTextureInfo){ .texture = r->tex, .aspect = WGPUTextureAspect_All },
+                &(WGPUExtent3D){ r->sw, r->sh, 1 });
+            s_st.sub_copies++;
+            continue;
+        }
+        if (s_active) continue;
         if (!src || src->kind != R_RT || r->va == d->target
             || (r->pitch & 0xFFFF) + r->w > src->w || (r->pitch >> 16) + r->h > src->h)
             continue;
@@ -970,13 +1059,28 @@ static uint32_t rb_pitch(const Res *r) { return (r->w * 4 + 255) & ~255u; }
 static void writeback_copy(Res *r)
 {
     uint32_t bpr = rb_pitch(r);
+    WGPUTexture src = r->tex;
+    if (s_active) {
+        /* MSAA resolved; a scaled target box-filtered to the guest size. */
+        resolve(r);
+        if (r->sw != r->w || r->sh != r->h) {
+            if (!r->down) {
+                r->down = make_tex(r->w, r->h, 1, WGPUTextureFormat_BGRA8Unorm,
+                                   WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc);
+                r->downview = wgpuTextureCreateView(r->down, NULL);
+            }
+            blit(r->view, r->sw, r->sh, r->downview, WGPUTextureFormat_BGRA8Unorm, 1, 0,
+                 0, 0, (float)r->w, (float)r->h);
+            src = r->down;
+        }
+    }
     if (!r->rb) {
         WGPUBufferDescriptor bd = WGPU_BUFFER_DESCRIPTOR_INIT;
         bd.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead; bd.size = (uint64_t)bpr * r->h;
         r->rb = wgpuDeviceCreateBuffer(s_dev, &bd);
     }
     wgpuCommandEncoderCopyTextureToBuffer(s_enc,
-        &(WGPUTexelCopyTextureInfo){ .texture = r->tex, .aspect = WGPUTextureAspect_All },
+        &(WGPUTexelCopyTextureInfo){ .texture = src, .aspect = WGPUTextureAspect_All },
         &(WGPUTexelCopyBufferInfo){ .buffer = r->rb, .layout = { .bytesPerRow = bpr, .rowsPerImage = r->h } },
         &(WGPUExtent3D){ r->w, r->h, 1 });
 }
@@ -1029,6 +1133,411 @@ static void writeback_all(void)
     for (j = 0; j < n; j++) writeback_store(res(ids[j]), &s_map_done[j]);
 }
 
+/* ---- display options: scaling, MSAA, presenting (gpu_display.h) ---------- */
+
+static SRWLOCK s_lock = SRWLOCK_INIT;   /* consume (flip thread) vs pixels() (window thread) */
+static float s_want_sx = 1.0f, s_want_sy = 1.0f;   /* "window": the scale the next frame uses */
+static WGPUBindGroupLayout s_blit_bgl;
+static WGPUPipelineLayout s_blit_pl;
+static WGPUShaderModule s_blit_mod;
+static WGPUSampler s_blit_smp;
+static GBuf s_blit_ub;
+static uint32_t s_blit_slot;              /* 256-byte uniform slots used in this submit */
+#define BLIT_SLOTS 1024
+static struct { WGPUTextureFormat f; uint32_t n; WGPURenderPipeline p; } s_blit_pipes[8];
+
+/* blit() in gpu_d3d11.c: bilinear when enlarging, a box filter when
+ * reducing (taps at texel centres at whole ratios). */
+static const char s_blit_wgsl[] =
+"struct B { ratio: vec2f, srcsize: vec2f, origin: vec2f, pad: vec2f };\n"
+"@group(0) @binding(0) var t: texture_2d<f32>;\n"
+"@group(0) @binding(1) var s: sampler;\n"
+"@group(0) @binding(2) var<uniform> u: B;\n"
+"@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {\n"
+"  let q = vec2f(f32((i << 1u) & 2u), f32(i & 2u));\n"
+"  return vec4f(q * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), 0.0, 1.0);\n"
+"}\n"
+"@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {\n"
+"  let d = p.xy - u.origin;\n"
+"  if (u.ratio.x <= 1.0 && u.ratio.y <= 1.0) { return textureSampleLevel(t, s, d * u.ratio / u.srcsize, 0.0); }\n"
+"  let nx = max(i32(ceil(u.ratio.x - 0.001)), 1);\n"
+"  let ny = max(i32(ceil(u.ratio.y - 0.001)), 1);\n"
+"  let p0 = floor(d) * u.ratio;\n"
+"  let st = u.ratio / vec2f(f32(nx), f32(ny));\n"
+"  var c = vec4f(0.0);\n"
+"  for (var y = 0; y < ny; y++) { for (var x = 0; x < nx; x++) {\n"
+"    c += textureSampleLevel(t, s, (p0 + (vec2f(f32(x), f32(y)) + 0.5) * st) / u.srcsize, 0.0); } }\n"
+"  return c / f32(nx * ny);\n"
+"}\n";
+
+static int display_init(void)
+{
+    const GpDisplay *g = gp_display();
+    WGPUBindGroupLayoutEntry e[3];
+    WGPUSamplerDescriptor sd = WGPU_SAMPLER_DESCRIPTOR_INIT;
+    if (!g->active) return 1;
+    s_active = 1;
+    gp_display_scale_for(0, 0, &s_sx, &s_sy);
+    s_want_sx = s_sx; s_want_sy = s_sy;
+    s_msaa = g->msaa > 4 ? 4 : g->msaa;   /* WebGPU guarantees 1 and 4; 2 is allowed for BGRA8 by wgpu */
+    memset(e, 0, sizeof e);
+    e[0].binding = 0; e[0].visibility = WGPUShaderStage_Fragment;
+    e[0].texture.sampleType = WGPUTextureSampleType_Float; e[0].texture.viewDimension = WGPUTextureViewDimension_2D;
+    e[1].binding = 1; e[1].visibility = WGPUShaderStage_Fragment; e[1].sampler.type = WGPUSamplerBindingType_Filtering;
+    e[2].binding = 2; e[2].visibility = WGPUShaderStage_Fragment;
+    e[2].buffer.type = WGPUBufferBindingType_Uniform; e[2].buffer.hasDynamicOffset = 1; e[2].buffer.minBindingSize = 32;
+    s_blit_bgl = wgpuDeviceCreateBindGroupLayout(s_dev, &(WGPUBindGroupLayoutDescriptor){ .entryCount = 3, .entries = e });
+    s_blit_pl = wgpuDeviceCreatePipelineLayout(s_dev, &(WGPUPipelineLayoutDescriptor){ .bindGroupLayoutCount = 1, .bindGroupLayouts = &s_blit_bgl });
+    s_blit_mod = wgsl_module(s_blit_wgsl, (uint32_t)(sizeof s_blit_wgsl - 1), "blit");
+    sd.magFilter = sd.minFilter = WGPUFilterMode_Linear;
+    s_blit_smp = wgpuDeviceCreateSampler(s_dev, &sd);
+    gbuf(&s_blit_ub, (uint64_t)BLIT_SLOTS * 256, WGPUBufferUsage_Uniform);
+    fprintf(stderr, "  [WGPU] display: scale %.3f x %.3f%s, MSAA %dx\n", s_sx, s_sy,
+            g->window ? " (follows the window)" : "", s_msaa);
+    return s_blit_bgl && s_blit_pl && s_blit_mod && s_blit_smp;
+}
+
+static WGPURenderPipeline blit_pipe(WGPUTextureFormat f, uint32_t samples)
+{
+    WGPURenderPipelineDescriptor pd = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
+    WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
+    WGPUColorTargetState ct = WGPU_COLOR_TARGET_STATE_INIT;
+    int i;
+    for (i = 0; i < 8 && s_blit_pipes[i].p; i++)
+        if (s_blit_pipes[i].f == f && s_blit_pipes[i].n == samples) return s_blit_pipes[i].p;
+    if (i == 8) return NULL;
+    ct.format = f; ct.writeMask = WGPUColorWriteMask_All;
+    fs.module = s_blit_mod; fs.entryPoint = SV("fs"); fs.targetCount = 1; fs.targets = &ct;
+    pd.layout = s_blit_pl;
+    pd.vertex.module = s_blit_mod; pd.vertex.entryPoint = SV("vs");
+    pd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+    pd.primitive.cullMode = WGPUCullMode_None;
+    pd.multisample.count = samples;
+    pd.fragment = &fs;
+    s_blit_pipes[i].f = f; s_blit_pipes[i].n = samples;
+    s_blit_pipes[i].p = wgpuDeviceCreateRenderPipeline(s_dev, &pd);
+    return s_blit_pipes[i].p;
+}
+
+/* Scale `src` (srcw x srch) into x,y,w,h of `dst`, in s_enc, in its own
+ * pass (ends the current one). clear: the rest of dst goes black. */
+static void blit(WGPUTextureView src, uint32_t srcw, uint32_t srch, WGPUTextureView dst,
+                 WGPUTextureFormat fmt, uint32_t samples, int clear,
+                 float x, float y, float w, float h)
+{
+    WGPURenderPassColorAttachment ca = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
+    WGPURenderPassDescriptor pd = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+    WGPURenderPassEncoder p;
+    WGPUBindGroup bg;
+    WGPUBindGroupEntry be[3];
+    WGPURenderPipeline pipe = blit_pipe(fmt, samples);
+    float u[8];
+    uint32_t off;
+    if (!pipe || s_blit_slot >= BLIT_SLOTS) return;
+    off = s_blit_slot++ * 256;
+    u[0] = (float)srcw / w; u[1] = (float)srch / h; u[2] = (float)srcw; u[3] = (float)srch;
+    u[4] = x; u[5] = y; u[6] = u[7] = 0;
+    wgpuQueueWriteBuffer(s_queue, s_blit_ub.b, off, u, sizeof u);
+    memset(be, 0, sizeof be);
+    be[0].binding = 0; be[0].textureView = src;
+    be[1].binding = 1; be[1].sampler = s_blit_smp;
+    be[2].binding = 2; be[2].buffer = s_blit_ub.b; be[2].size = 32;
+    bg = wgpuDeviceCreateBindGroup(s_dev, &(WGPUBindGroupDescriptor){ .layout = s_blit_bgl, .entryCount = 3, .entries = be });
+    end_pass();
+    ca.view = dst;
+    ca.loadOp = clear ? WGPULoadOp_Clear : WGPULoadOp_Load;
+    ca.storeOp = WGPUStoreOp_Store;
+    ca.clearValue = (WGPUColor){ 0, 0, 0, 1 };
+    pd.colorAttachmentCount = 1; pd.colorAttachments = &ca;
+    p = wgpuCommandEncoderBeginRenderPass(s_enc, &pd);
+    wgpuRenderPassEncoderSetViewport(p, x, y, w, h, 0, 1);
+    wgpuRenderPassEncoderSetPipeline(p, pipe);
+    wgpuRenderPassEncoderSetBindGroup(p, 0, bg, 1, &off);
+    wgpuRenderPassEncoderDraw(p, 3, 1, 0, 0);
+    wgpuRenderPassEncoderEnd(p);
+    wgpuRenderPassEncoderRelease(p);
+    wgpuBindGroupRelease(bg);
+}
+
+/* MSAA: the multisampled picture into tex (an empty pass that resolves). */
+static void resolve(Res *r)
+{
+    WGPURenderPassColorAttachment ca = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
+    WGPURenderPassDescriptor pd = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+    WGPURenderPassEncoder p;
+    if (!r->ms || !r->msdirty) return;
+    end_pass();
+    ca.view = r->msview; ca.resolveTarget = r->view;
+    ca.loadOp = WGPULoadOp_Load; ca.storeOp = WGPUStoreOp_Store;
+    pd.colorAttachmentCount = 1; pd.colorAttachments = &ca;
+    p = wgpuCommandEncoderBeginRenderPass(s_enc, &pd);
+    wgpuRenderPassEncoderEnd(p);
+    wgpuRenderPassEncoderRelease(p);
+    r->msdirty = 0;
+}
+
+static WGPUTextureView draw_view(Res *r) { return r->msview ? r->msview : r->view; }
+
+static WGPUTexture make_tex_n(uint32_t w, uint32_t h, WGPUTextureFormat f, WGPUTextureUsage u, uint32_t samples)
+{
+    WGPUTextureDescriptor td = WGPU_TEXTURE_DESCRIPTOR_INIT;
+    td.usage = u; td.size = (WGPUExtent3D){ w, h, 1 }; td.format = f; td.sampleCount = samples;
+    return wgpuDeviceCreateTexture(s_dev, &td);
+}
+
+/* A render target at the current scale (r->w, r->h guest): tex/view are
+ * what is sampled, copied, written back and presented; with MSAA draws go
+ * into ms and are resolved into tex. */
+static void rt_make(Res *r)
+{
+    r->sw = gp_scaled(r->w, s_sx); r->sh = gp_scaled(r->h, s_sy);
+    r->tex = make_tex(r->sw, r->sh, 1, WGPUTextureFormat_BGRA8Unorm,
+                      WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding
+                      | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst);
+    r->view = wgpuTextureCreateView(r->tex, NULL);
+    if (s_msaa > 1) {
+        r->ms = make_tex_n(r->sw, r->sh, WGPUTextureFormat_BGRA8Unorm, WGPUTextureUsage_RenderAttachment, (uint32_t)s_msaa);
+        r->msview = wgpuTextureCreateView(r->ms, NULL);
+    }
+}
+
+/* "window": every target remade at the new scale with its picture scaled
+ * across; depth, tiles and scratch depth remade. Old textures are released,
+ * not destroyed: this encoder still reads them. */
+static void rescale(float sx, float sy)
+{
+    uint32_t i;
+    int k;
+    float ox = s_sx, oy = s_sy;
+    s_sx = sx; s_sy = sy;
+    for (i = 0; i < s_nres; i++) {
+        Res *r = &s_res[i];
+        if (r->kind == R_RT) {
+            Res old;
+            resolve(r);
+            old = *r;
+            r->tex = NULL; r->view = NULL; r->ms = NULL; r->msview = NULL; r->msdirty = 0;
+            rt_make(r);
+            blit(old.view, old.sw, old.sh, draw_view(r), WGPUTextureFormat_BGRA8Unorm,
+                 r->ms ? (uint32_t)s_msaa : 1, 0, 0, 0, (float)r->sw, (float)r->sh);
+            if (r->ms) r->msdirty = 1;
+            if (old.view) wgpuTextureViewRelease(old.view);
+            if (old.tex) wgpuTextureRelease(old.tex);
+            if (old.msview) wgpuTextureViewRelease(old.msview);
+            if (old.ms) wgpuTextureRelease(old.ms);
+            s_bg_flush = 1;
+        } else if (r->kind == R_DS) {
+            GpCmd c;
+            memset(&c, 0, sizeof c);
+            c.id = i; c.b = r->w; c.c = r->h;
+            q_ds_create(&c);
+        } else if (r->kind == R_SUB) {
+            GpCmd c;
+            memset(&c, 0, sizeof c);
+            c.id = i; c.a = r->va; c.b = r->w; c.c = r->h; c.d = r->pitch;
+            q_sub_create(&c);
+        }
+    }
+    for (k = 0; k < s_nscratch; k++) {
+        if (s_scratch[k].r.view) wgpuTextureViewRelease(s_scratch[k].r.view);
+        if (s_scratch[k].r.tex) wgpuTextureRelease(s_scratch[k].r.tex);
+    }
+    s_nscratch = 0;
+    fprintf(stderr, "  [WGPU] display: scale %.3f x %.3f -> %.3f x %.3f\n", ox, oy, sx, sy);
+}
+
+/* ---- the window's presenter (fb_presenter.h, via gpu_display.c) ---------- */
+
+static WGPUSurface s_surf;
+static int s_surf_failed;
+static uint32_t s_surf_w, s_surf_h;
+static WGPUTextureFormat s_surf_fmt;
+static WGPUPresentMode s_surf_mode;
+static WGPUTexture s_px_tex;
+static WGPUTextureView s_px_view;
+static uint32_t s_px_w, s_px_h;
+
+static int surf_ready(HWND h)
+{
+    RECT rc;
+    uint32_t cw, ch;
+    if (s_surf_failed || !GetClientRect(h, &rc)) return 0;
+    cw = (uint32_t)(rc.right - rc.left); ch = (uint32_t)(rc.bottom - rc.top);
+    if (!cw || !ch) return 0;
+    if (!s_surf) {
+        WGPUSurfaceSourceWindowsHWND src;
+        WGPUSurfaceDescriptor sd = { 0 };
+        WGPUSurfaceCapabilities caps = WGPU_SURFACE_CAPABILITIES_INIT;
+        size_t k;
+        memset(&src, 0, sizeof src);
+        src.chain.sType = WGPUSType_SurfaceSourceWindowsHWND;
+        src.hinstance = GetModuleHandleA(NULL);
+        src.hwnd = h;
+        sd.nextInChain = &src.chain;
+        s_surf = wgpuInstanceCreateSurface(s_inst, &sd);
+        if (!s_surf || wgpuSurfaceGetCapabilities(s_surf, s_adapter, &caps) != WGPUStatus_Success
+            || !caps.formatCount) {
+            fprintf(stderr, "  [WGPU] no window surface: the window shows the guest-size frame\n");
+            s_surf_failed = 1;
+            return 0;
+        }
+        s_surf_fmt = caps.formats[0];
+        for (k = 0; k < caps.formatCount; k++)
+            if (caps.formats[k] == WGPUTextureFormat_BGRA8Unorm) s_surf_fmt = caps.formats[k];
+        s_surf_mode = WGPUPresentMode_Fifo;
+        for (k = 0; k < caps.presentModeCount; k++)       /* not waiting for vsync: the flip pacing is the clock */
+            if (caps.presentModes[k] == WGPUPresentMode_Immediate && s_surf_mode != WGPUPresentMode_Mailbox)
+                s_surf_mode = WGPUPresentMode_Immediate;
+            else if (caps.presentModes[k] == WGPUPresentMode_Mailbox)
+                s_surf_mode = WGPUPresentMode_Mailbox;
+        wgpuSurfaceCapabilitiesFreeMembers(caps);
+        fprintf(stderr, "  [WGPU] presenting the full-size image to the window (format %d, present mode %d)\n",
+                (int)s_surf_fmt, (int)s_surf_mode);
+    }
+    if (cw != s_surf_w || ch != s_surf_h) {
+        WGPUSurfaceConfiguration cfg = WGPU_SURFACE_CONFIGURATION_INIT;
+        cfg.device = s_dev; cfg.format = s_surf_fmt; cfg.usage = WGPUTextureUsage_RenderAttachment;
+        cfg.width = cw; cfg.height = ch; cfg.presentMode = s_surf_mode;
+        cfg.alphaMode = WGPUCompositeAlphaMode_Auto;
+        wgpuSurfaceConfigure(s_surf, &cfg);
+        s_surf_w = cw; s_surf_h = ch;
+    }
+    return 1;
+}
+
+/* src letterboxed to aw:ah on black, submitted with s_enc, and presented. */
+static void surf_show(WGPUTextureView src, uint32_t sw, uint32_t sh, uint32_t aw, uint32_t ah)
+{
+    WGPUSurfaceTexture st;
+    WGPUTextureView v = NULL;
+    WGPUCommandBuffer cb;
+    float w = (float)s_surf_w, h = w * (float)ah / (float)aw;
+    memset(&st, 0, sizeof st);
+    wgpuSurfaceGetCurrentTexture(s_surf, &st);
+    if (st.texture && (st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+                       || st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal)) {
+        if (h > (float)s_surf_h) { h = (float)s_surf_h; w = h * (float)aw / (float)ah; }
+        w = (float)(int)(w + 0.5f); h = (float)(int)(h + 0.5f);
+        v = wgpuTextureCreateView(st.texture, NULL);
+        blit(src, sw, sh, v, s_surf_fmt, 1, 1, (float)(int)((s_surf_w - w) / 2),
+             (float)(int)((s_surf_h - h) / 2), w, h);
+    } else if (st.status == WGPUSurfaceGetCurrentTextureStatus_Outdated
+               || st.status == WGPUSurfaceGetCurrentTextureStatus_Lost) {
+        s_surf_w = s_surf_h = 0;                     /* reconfigure next time */
+    }
+    cb = wgpuCommandEncoderFinish(s_enc, NULL);
+    wgpuQueueSubmit(s_queue, 1, &cb);
+    wgpuCommandBufferRelease(cb);
+    wgpuCommandEncoderRelease(s_enc);
+    s_enc = NULL;
+    s_blit_slot = 0;
+    if (v) {
+        wgpuSurfacePresent(s_surf);
+        wgpuTextureViewRelease(v);
+    }
+    if (st.texture) wgpuTextureRelease(st.texture);
+}
+
+/* RECOMP_HIRES_DUMP: tex (w x h) read back and written as a BMP. */
+static void dump_tex(WGPUTexture tex, uint32_t w, uint32_t h)
+{
+    uint32_t bpr = (w * 4 + 255) & ~255u;
+    WGPUBufferDescriptor bd = WGPU_BUFFER_DESCRIPTOR_INIT;
+    WGPUBuffer b;
+    WGPUCommandEncoder e;
+    WGPUCommandBuffer cb;
+    volatile int done = 0;
+    int k;
+    bd.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead; bd.size = (uint64_t)bpr * h;
+    b = wgpuDeviceCreateBuffer(s_dev, &bd);
+    e = wgpuDeviceCreateCommandEncoder(s_dev, NULL);
+    wgpuCommandEncoderCopyTextureToBuffer(e,
+        &(WGPUTexelCopyTextureInfo){ .texture = tex, .aspect = WGPUTextureAspect_All },
+        &(WGPUTexelCopyBufferInfo){ .buffer = b, .layout = { .bytesPerRow = bpr, .rowsPerImage = h } },
+        &(WGPUExtent3D){ w, h, 1 });
+    cb = wgpuCommandEncoderFinish(e, NULL);
+    wgpuQueueSubmit(s_queue, 1, &cb);
+    wgpuCommandBufferRelease(cb);
+    wgpuCommandEncoderRelease(e);
+    wgpuBufferMapAsync(b, WGPUMapMode_Read, 0, (size_t)bpr * h, (WGPUBufferMapCallbackInfo){
+        .mode = WGPUCallbackMode_AllowSpontaneous, .callback = on_map, .userdata1 = (void *)&done });
+    for (k = 0; k < 100000 && !done; k++) { wgpuDevicePoll(s_dev, 1, NULL); wgpuInstanceProcessEvents(s_inst); }
+    if (done == 1) {
+        const uint8_t *p = (const uint8_t *)wgpuBufferGetConstMappedRange(b, 0, (size_t)bpr * h);
+        if (p) gp_display_dump_bgra(p, bpr, w, h);
+        wgpuBufferUnmap(b);
+    }
+    wgpuBufferDestroy(b);
+    wgpuBufferRelease(b);
+}
+
+int gp_wgpu_present_frame(void *hwnd, uint32_t fb_va, uint32_t aw, uint32_t ah)
+{
+    Res *best = NULL;
+    int j, shown = 0;
+    if (!s_active || !s_dev || s_failed) return 0;
+    AcquireSRWLockExclusive(&s_lock);
+    for (j = 0; j < s_nrt_ids; j++) {
+        Res *r = res(s_rt_ids[j]);
+        if (r && r->kind == R_RT && ((r->va ^ fb_va) & 0x03FFFFFFu) == 0 && (!best || !r->swz)) best = r;
+    }
+    if (best) {
+        s_enc = wgpuDeviceCreateCommandEncoder(s_dev, NULL);
+        s_pass = NULL;
+        resolve(best);
+        if (surf_ready((HWND)hwnd)) {
+            surf_show(best->view, best->sw, best->sh, aw, ah);
+            if (gp_display()->window) {          /* as gp_d3d11_present_frame */
+                static float px = -1, py = -1;
+                static int same;
+                float sx, sy;
+                gp_display_scale_for(s_surf_w, s_surf_h, &sx, &sy);
+                if (sx != px || sy != py) { px = sx; py = sy; same = 0; }
+                else if (++same == 20 && (sx != s_sx || sy != s_sy)) { s_want_sx = sx; s_want_sy = sy; }
+            }
+        } else {
+            WGPUCommandBuffer cb = wgpuCommandEncoderFinish(s_enc, NULL);
+            wgpuQueueSubmit(s_queue, 1, &cb);
+            wgpuCommandBufferRelease(cb);
+            wgpuCommandEncoderRelease(s_enc);
+            s_enc = NULL;
+            s_blit_slot = 0;
+        }
+        if (gp_display_dump_due()) dump_tex(best->tex, best->sw, best->sh);
+        shown = 1;
+    }
+    ReleaseSRWLockExclusive(&s_lock);
+    return shown;
+}
+
+int gp_wgpu_present_pixels(void *hwnd, const uint32_t *px, uint32_t w, uint32_t h,
+                           uint32_t aw, uint32_t ah)
+{
+    int ok = 0;
+    if (!s_active || !px || !s_dev || s_failed) return 0;
+    /* Never wait for the lock here: the flip thread can hold it while DXGI
+     * (swap chain creation, resize) sends this thread's window a message,
+     * and waiting would deadlock the two. A skipped tick is redrawn 16 ms on. */
+    if (!TryAcquireSRWLockExclusive(&s_lock)) return 0;
+    if (surf_ready((HWND)hwnd)) {
+        if (!s_px_tex || s_px_w != w || s_px_h != h) {
+            if (s_px_view) wgpuTextureViewRelease(s_px_view);
+            if (s_px_tex) wgpuTextureRelease(s_px_tex);
+            s_px_tex = make_tex(w, h, 1, WGPUTextureFormat_BGRA8Unorm,
+                                WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst);
+            s_px_view = wgpuTextureCreateView(s_px_tex, NULL);
+            s_px_w = w; s_px_h = h;
+        }
+        write_tex(s_px_tex, 0, px, (size_t)w * h * 4, w * 4, h, w, h);
+        s_enc = wgpuDeviceCreateCommandEncoder(s_dev, NULL);
+        s_pass = NULL;
+        surf_show(s_px_view, w, h, aw, ah);
+        ok = 1;
+    }
+    ReleaseSRWLockExclusive(&s_lock);
+    return ok;
+}
+
 /* ---- a frame ------------------------------------------------------------- */
 
 void gp_wgpu_consume(const GpFrame *f)
@@ -1037,6 +1546,14 @@ void gp_wgpu_consume(const GpFrame *f)
     int j, k;
     WGPUCommandBuffer cb;
     if (!ensure_device()) { gp_d3d11_consume(f); return; }
+    AcquireSRWLockExclusive(&s_lock);
+    /* The encoder first: scaled render-target uploads and a rescale blit
+     * go into it (with the display options off it stays empty until the
+     * draws). */
+    s_enc = wgpuDeviceCreateCommandEncoder(s_dev, NULL);
+    s_pass = NULL;
+    if (s_active && (s_want_sx != s_sx || s_want_sy != s_sy))
+        rescale(s_want_sx, s_want_sy);
     drain_queue(f);
     if (s_bg_flush) bg_flush();
     gbuf(&s_vb, f->vtx_bytes + 16, WGPUBufferUsage_Vertex);
@@ -1045,8 +1562,6 @@ void gp_wgpu_consume(const GpFrame *f)
     if (f->idx_count) wgpuQueueWriteBuffer(s_queue, s_ib.b, 0, f->idx, (size_t)f->idx_count * 4);
     pack_uniforms(f);
 
-    s_enc = wgpuDeviceCreateCommandEncoder(s_dev, NULL);
-    s_pass = NULL;
     s_cur_target = s_cur_zeta = ~0u;
     for (i = 0; i < f->draw_count; i++) {
         const GpDraw *d = &f->draws[i];
@@ -1069,7 +1584,9 @@ void gp_wgpu_consume(const GpFrame *f)
     wgpuCommandBufferRelease(cb);
     wgpuCommandEncoderRelease(s_enc);
     s_enc = NULL;
+    s_blit_slot = 0;
     writeback_all();
+    ReleaseSRWLockExclusive(&s_lock);
 
     if (f->frame % 300 == 299) {
         fprintf(stderr, "  [WGPU] frames %u: %llu draws, %llu tris, %llu clears, %llu passes, %llu skipped"

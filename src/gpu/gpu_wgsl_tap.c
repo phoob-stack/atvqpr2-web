@@ -446,6 +446,13 @@ static void ab_compare(const GpFrame *f, const uint32_t *ref, const Live *l)
     }
 }
 
+/* gpu_display.c: which back end presents (wgpu only; "ab" presents D3D11). */
+int gp_backend_is_wgpu(void)
+{
+    init();
+    return s_wgpu == 1;
+}
+
 void gp_backend_flip(const GpFrame *f)
 {
     int cap;

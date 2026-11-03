@@ -9,6 +9,16 @@
  *
  * Resources live in id-indexed tables. Ids are never reused by the recorder,
  * so the tables grow; a freed id's slot is just emptied.
+ *
+ * Display options (gpu_display.h): with a resolution scale every render
+ * target, depth buffer and render-target tile is that much larger (the
+ * vertex shaders map guest surface pixels to clip space by the guest size,
+ * so only the viewport changes), guest pixels going in are scaled up and
+ * targets going back to guest memory are box-filtered down to the guest
+ * size; the window shows the full-size image through a swap chain of this
+ * device (gp_d3d11_present_*). With MSAA every target and depth buffer is
+ * multisampled and resolved before anything reads it. With neither, none of
+ * that code runs (s_active == 0).
  */
 #define COBJMACROS
 #ifndef WIN32_LEAN_AND_MEAN
@@ -24,6 +34,7 @@
 #include <string.h>
 
 #include "gpu_proto.h"
+#include "gpu_display.h"
 #include "d3d8_swizzle.h"
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
@@ -48,6 +59,14 @@ typedef struct {
     ID3DBlob *code;                 /* vertex shaders, while checking: for stream output */
     ID3D11GeometryShader *so_gs;
     uint32_t va, w, h, bpp, fmt, swz, pitch, dirty;
+    /* Display options only (s_active): */
+    uint32_t sw, sh;                /* scaled size (R_RT, R_DS, R_SUB) */
+    uint32_t bx, by;                /* R_SUB: scaled top-left in the source */
+    ID3D11Texture2D *ms;            /* MSAA colour (R_RT), drawn into */
+    ID3D11RenderTargetView *msrtv;
+    uint32_t msdirty;               /* drawn since the last resolve into res */
+    ID3D11Texture2D *down;          /* scaled: guest-size copy for writeback */
+    ID3D11RenderTargetView *downrtv;
 } Res;
 static Res *s_res;
 static uint32_t s_nres;
@@ -94,10 +113,23 @@ static void res_release(Res *r)
     REL(layout, ID3D11InputLayout); REL(ps, ID3D11PixelShader);
     REL(staging, ID3D11Texture2D); REL(res, ID3D11Resource);
     REL(so_gs, ID3D11GeometryShader);
+    REL(msrtv, ID3D11RenderTargetView); REL(ms, ID3D11Texture2D);
+    REL(downrtv, ID3D11RenderTargetView); REL(down, ID3D11Texture2D);
     if (r->code) ID3D10Blob_Release(r->code);
 #undef REL
     memset(r, 0, sizeof *r);
 }
+
+/* Display options (gpu_display.h): the current scale per axis, the MSAA
+ * sample count, and whether any of it is on. */
+static float s_sx = 1.0f, s_sy = 1.0f;
+static int s_msaa = 1, s_active;
+static int rt_make(Res *r);
+static void blit(ID3D11ShaderResourceView *src, uint32_t srcw, uint32_t srch,
+                 ID3D11RenderTargetView *dst, float x, float y, float w, float h);
+static void resolve(Res *r);
+static ID3D11RenderTargetView *draw_rtv(Res *r) { return r->msrtv ? r->msrtv : r->rtv; }
+static int display_init(void);
 
 /* ---- device -------------------------------------------------------------- */
 
@@ -287,6 +319,7 @@ static int ensure_device(void)
         ID3D10Blob_Release(b);
     }
 
+    if (!display_init()) return 0;
     s_failed = 0;
     fprintf(stderr, "  [GPU11] packet consumer ready\n");
     return 1;
@@ -488,6 +521,31 @@ static void q_rt_create(const GpCmd *c, const void *payload)
     D3D11_SUBRESOURCE_DATA sd;
     if (!r) return;
     res_release(r);
+    if (s_active) {
+        /* Scaled and/or multisampled: the guest's pixels (if any) go in
+         * through a guest-size texture, scaled up into the draw target. */
+        r->w = c->b; r->h = c->c;
+        if (!rt_make(r)) { res_release(r); return; }
+        if (c->bytes) {
+            ID3D11Texture2D *t = NULL;
+            ID3D11ShaderResourceView *v = NULL;
+            memset(&td, 0, sizeof td);
+            td.Width = c->b; td.Height = c->c; td.MipLevels = 1; td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            sd.pSysMem = payload; sd.SysMemPitch = c->b * 4; sd.SysMemSlicePitch = 0;
+            if (SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, &sd, &t))
+                && SUCCEEDED(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)t, NULL, &v)))
+                blit(v, c->b, c->c, draw_rtv(r), 0, 0, (float)r->sw, (float)r->sh);
+            if (v) ID3D11ShaderResourceView_Release(v);
+            if (t) ID3D11Texture2D_Release(t);
+            if (r->ms) r->msdirty = 1;
+        }
+        r->kind = R_RT; r->va = c->a;
+        rt_list_add(c->id);
+        r->bpp = c->d & 0xFF; r->fmt = (c->d >> 8) & 0xFF; r->swz = (c->d >> 16) & 1; r->pitch = c->e;
+        return;
+    }
     memset(&td, 0, sizeof td);
     td.Width = c->b; td.Height = c->c; td.MipLevels = 1; td.ArraySize = 1;
     td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -517,6 +575,14 @@ static void q_sub_create(const GpCmd *c)
     td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     td.SampleDesc.Count = 1;
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (s_active) {
+        /* The tile's box in the scaled source: both edges scaled, so tiles
+         * that share an edge share it at any scale. */
+        uint32_t x0 = c->d & 0xFFFF, y0 = c->d >> 16;
+        r->bx = gp_scaled(x0, s_sx); r->by = gp_scaled(y0, s_sy);
+        r->sw = gp_scaled(x0 + c->b, s_sx) - r->bx; r->sh = gp_scaled(y0 + c->c, s_sy) - r->by;
+        td.Width = r->sw; td.Height = r->sh;
+    }
     if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, (ID3D11Texture2D **)&r->res)))
         return;
     ID3D11Device_CreateShaderResourceView(s_dev, r->res, NULL, &r->srv);
@@ -534,6 +600,11 @@ static void q_ds_create(const GpCmd *c)
     td.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
     td.SampleDesc.Count = 1;
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (s_active) {
+        r->sw = td.Width = gp_scaled(c->b, s_sx);
+        r->sh = td.Height = gp_scaled(c->c, s_sy);
+        td.SampleDesc.Count = (UINT)s_msaa;
+    }
     if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, (ID3D11Texture2D **)&r->res)))
         return;
     ID3D11Device_CreateDepthStencilView(s_dev, r->res, NULL, &r->dsv);
@@ -695,14 +766,21 @@ static Res *bind_target(const GpDraw *d, int *have_ds)
         D3D11_VIEWPORT vp;
         ID3D11ShaderResourceView *none[4] = { NULL, NULL, NULL, NULL };
         ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 4, none);
-        ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &rt->rtv, ds ? ds->dsv : NULL);
         memset(&vp, 0, sizeof vp);
+        if (s_active) {
+            ID3D11RenderTargetView *v = draw_rtv(rt);
+            ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &v, ds ? ds->dsv : NULL);
+            vp.Width = (float)rt->sw; vp.Height = (float)rt->sh; vp.MaxDepth = 1.0f;
+        } else {
+        ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &rt->rtv, ds ? ds->dsv : NULL);
         vp.Width = (float)rt->w; vp.Height = (float)rt->h; vp.MaxDepth = 1.0f;
+        }
         ID3D11DeviceContext_RSSetViewports(s_ctx, 1, &vp);
         s_cur_target = d->target;
         s_cur_zeta = ds ? d->zeta : 0;
     }
     rt->dirty = 1;
+    if (rt->ms) rt->msdirty = 1;
     return rt;
 }
 
@@ -765,7 +843,7 @@ static void do_clear(const GpDraw *d)
         uint32_t a = d->clr_argb;
         float c[4] = { ((a >> 16) & 0xFF) / 255.0f, ((a >> 8) & 0xFF) / 255.0f,
                        (a & 0xFF) / 255.0f, (a >> 24) / 255.0f };
-        ID3D11DeviceContext_ClearRenderTargetView(s_ctx, rt->rtv, c);
+        ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_active ? draw_rtv(rt) : rt->rtv, c);
     }
     if ((d->clr_flags & 3) && have_ds) {
         Res *ds = res(d->zeta);
@@ -814,11 +892,19 @@ static void do_draw(const GpFrame *f, const GpDraw *d)
             D3D11_BOX box;
             box.left = r->pitch & 0xFFFF; box.top = r->pitch >> 16; box.front = 0;
             box.right = box.left + r->w; box.bottom = box.top + r->h; box.back = 1;
+            if (s_active && src && src->kind == R_RT) {
+                box.left = r->bx; box.top = r->by;
+                box.right = box.left + r->sw; box.bottom = box.top + r->sh;
+                if (box.right > src->sw || box.bottom > src->sh || r->va == d->target)
+                    continue;
+                resolve(src);
+            } else
             if (!src || src->kind != R_RT || box.right > src->w || box.bottom > src->h
                 || r->va == d->target)
                 continue;
             ID3D11DeviceContext_CopySubresourceRegion(s_ctx, r->res, 0, 0, 0, 0, src->res, 0, &box);
         }
+        if (r->kind == R_RT) resolve(r);       /* MSAA: sampled from res */
         srv[st] = r->srv;
         smp[st] = sampler(d->smp[st], d->border[st]);
     }
@@ -890,18 +976,31 @@ static uint16_t argb_to_16(uint32_t c, uint32_t cf)
     return (uint16_t)(((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3));
 }
 
+static int down_ensure(Res *r);
+
 static void writeback(Res *r)
 {
     uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
     D3D11_MAPPED_SUBRESOURCE m;
     uint32_t y, x;
+    ID3D11Resource *src = r->res;
+    if (s_active) {
+        /* MSAA resolved; a scaled target box-filtered down to the size the
+         * guest reads it at. */
+        resolve(r);
+        if (r->sw != r->w || r->sh != r->h) {
+            if (!down_ensure(r)) return;
+            blit(r->srv, r->sw, r->sh, r->downrtv, 0, 0, (float)r->w, (float)r->h);
+            src = (ID3D11Resource *)r->down;
+        }
+    }
     if (!r->staging) {
         D3D11_TEXTURE2D_DESC td;
-        ID3D11Texture2D_GetDesc((ID3D11Texture2D *)r->res, &td);
+        ID3D11Texture2D_GetDesc((ID3D11Texture2D *)src, &td);
         td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &r->staging))) return;
     }
-    ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)r->staging, r->res);
+    ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)r->staging, src);
     if (FAILED(ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)r->staging, 0, D3D11_MAP_READ, 0, &m)))
         return;
     for (y = 0; y < r->h; y++) {
@@ -921,6 +1020,7 @@ static void writeback_swz(Res *r)
     uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset() + r->va;
     D3D11_MAPPED_SUBRESOURCE m;
     uint32_t y, x, mx, my;
+    if (s_active) return;            /* check mode only, where the options are off */
     if ((r->w & (r->w - 1)) || (r->h & (r->h - 1))) return;
     if (!r->staging) {
         D3D11_TEXTURE2D_DESC td;
@@ -944,11 +1044,349 @@ static void writeback_swz(Res *r)
     ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)r->staging, 0);
 }
 
+/* ---- display options: scaling, MSAA, presenting -------------------------- */
+
+static ID3D11VertexShader *s_blit_vs;
+static ID3D11PixelShader *s_blit_ps;
+static ID3D11Buffer *s_cb_blit;
+static ID3D11SamplerState *s_smp_lin;
+static SRWLOCK s_lock = SRWLOCK_INIT;   /* consume (flip thread) vs pixels() (window thread) */
+static float s_want_sx = 1.0f, s_want_sy = 1.0f;   /* "window": the scale the next frame uses */
+
+/* Scale `srcw x srch` into the rectangle x,y,w,h of dst: bilinear when
+ * enlarging, the average of every source texel a destination pixel covers
+ * when reducing (an exact box filter at whole ratios: taps at texel centres). */
+static const char s_blit_hlsl[] =
+"cbuffer B : register(b0) { float2 ratio; float2 srcsize; float2 origin; float2 pad; };\n"
+"Texture2D t : register(t0); SamplerState s : register(s0);\n"
+"float4 vs(uint i : SV_VertexID) : SV_Position { float2 q = float2((i << 1) & 2, i & 2);\n"
+"  return float4(q * float2(2, -2) + float2(-1, 1), 0, 1); }\n"
+"float4 ps(float4 p : SV_Position) : SV_Target {\n"
+"  float2 d = p.xy - origin;\n"
+"  if (ratio.x <= 1.0 && ratio.y <= 1.0) return t.SampleLevel(s, d * ratio / srcsize, 0);\n"
+"  int nx = max((int)ceil(ratio.x - 0.001), 1), ny = max((int)ceil(ratio.y - 0.001), 1);\n"
+"  float2 p0 = floor(d) * ratio, st = ratio / float2(nx, ny);\n"
+"  float4 c = 0;\n"
+"  for (int y = 0; y < ny; y++) for (int x = 0; x < nx; x++)\n"
+"    c += t.SampleLevel(s, (p0 + (float2(x, y) + 0.5) * st) / srcsize, 0);\n"
+"  return c / (float)(nx * ny); }\n";
+
+static int display_init(void)
+{
+    const GpDisplay *g = gp_display();
+    ID3DBlob *b;
+    D3D11_SAMPLER_DESC sd;
+    if (!g->active) return 1;
+    s_active = 1;
+    gp_display_scale_for(0, 0, &s_sx, &s_sy);         /* fixed; "window" starts at 1 */
+    s_want_sx = s_sx; s_want_sy = s_sy;
+    for (s_msaa = g->msaa; s_msaa > 1; s_msaa /= 2) {
+        UINT qc = 0, qd = 0;
+        ID3D11Device_CheckMultisampleQualityLevels(s_dev, DXGI_FORMAT_B8G8R8A8_UNORM, (UINT)s_msaa, &qc);
+        ID3D11Device_CheckMultisampleQualityLevels(s_dev, DXGI_FORMAT_D32_FLOAT_S8X24_UINT, (UINT)s_msaa, &qd);
+        if (qc && qd) break;
+    }
+    if (!(b = compile(s_blit_hlsl, sizeof s_blit_hlsl - 1, "vs", "vs_5_0", 3))) return 0;
+    ID3D11Device_CreateVertexShader(s_dev, ID3D10Blob_GetBufferPointer(b), ID3D10Blob_GetBufferSize(b), NULL, &s_blit_vs);
+    ID3D10Blob_Release(b);
+    if (!(b = compile(s_blit_hlsl, sizeof s_blit_hlsl - 1, "ps", "ps_5_0", 3))) return 0;
+    ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(b), ID3D10Blob_GetBufferSize(b), NULL, &s_blit_ps);
+    ID3D10Blob_Release(b);
+    if (!make_buffer(32, D3D11_BIND_CONSTANT_BUFFER, &s_cb_blit)) return 0;
+    memset(&sd, 0, sizeof sd);
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    ID3D11Device_CreateSamplerState(s_dev, &sd, &s_smp_lin);
+    fprintf(stderr, "  [GPU11] display: scale %.3f x %.3f%s, MSAA %dx\n", s_sx, s_sy,
+            g->window ? " (follows the window)" : "", s_msaa);
+    return s_blit_vs && s_blit_ps && s_smp_lin;
+}
+
+static void blit(ID3D11ShaderResourceView *src, uint32_t srcw, uint32_t srch,
+                 ID3D11RenderTargetView *dst, float x, float y, float w, float h)
+{
+    float cb[8];
+    D3D11_VIEWPORT vp;
+    ID3D11ShaderResourceView *none = NULL;
+    cb[0] = (float)srcw / w; cb[1] = (float)srch / h; cb[2] = (float)srcw; cb[3] = (float)srch;
+    cb[4] = x; cb[5] = y; cb[6] = cb[7] = 0;
+    upload_cb(s_cb_blit, cb, sizeof cb);
+    vp.TopLeftX = x; vp.TopLeftY = y; vp.Width = w; vp.Height = h; vp.MinDepth = 0; vp.MaxDepth = 1;
+    ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &none);
+    ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &dst, NULL);
+    ID3D11DeviceContext_RSSetViewports(s_ctx, 1, &vp);
+    ID3D11DeviceContext_RSSetState(s_ctx, s_rs);
+    ID3D11DeviceContext_OMSetBlendState(s_ctx, NULL, NULL, 0xFFFFFFFF);
+    ID3D11DeviceContext_OMSetDepthStencilState(s_ctx, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(s_ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(s_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(s_ctx, s_blit_vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(s_ctx, s_blit_ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 0, 1, &s_cb_blit);
+    ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &src);
+    ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 1, &s_smp_lin);
+    ID3D11DeviceContext_Draw(s_ctx, 3, 0);
+    ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &none);
+    s_cur_target = s_cur_zeta = 0;            /* the next draw binds its target again */
+}
+
+static void resolve(Res *r)
+{
+    if (r->ms && r->msdirty) {
+        ID3D11DeviceContext_ResolveSubresource(s_ctx, r->res, 0, (ID3D11Resource *)r->ms, 0,
+                                               DXGI_FORMAT_B8G8R8A8_UNORM);
+        r->msdirty = 0;
+    }
+}
+
+/* A render target at the current scale: res (sampled, copied, written back,
+ * presented) and, with MSAA, the multisampled texture draws go into. */
+static int rt_make(Res *r)
+{
+    D3D11_TEXTURE2D_DESC td;
+    memset(&td, 0, sizeof td);
+    r->sw = gp_scaled(r->w, s_sx); r->sh = gp_scaled(r->h, s_sy);
+    td.Width = r->sw; td.Height = r->sh; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, (ID3D11Texture2D **)&r->res)))
+        return 0;
+    ID3D11Device_CreateRenderTargetView(s_dev, r->res, NULL, &r->rtv);
+    ID3D11Device_CreateShaderResourceView(s_dev, r->res, NULL, &r->srv);
+    if (s_msaa > 1) {
+        td.SampleDesc.Count = (UINT)s_msaa;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET;
+        if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &r->ms)))
+            return 0;
+        ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)r->ms, NULL, &r->msrtv);
+    }
+    return r->rtv && r->srv && (s_msaa == 1 || r->msrtv);
+}
+
+static int down_ensure(Res *r)
+{
+    D3D11_TEXTURE2D_DESC td;
+    if (r->down) return 1;
+    memset(&td, 0, sizeof td);
+    td.Width = r->w; td.Height = r->h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &r->down))) return 0;
+    if (FAILED(ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)r->down, NULL, &r->downrtv))) return 0;
+    return 1;
+}
+
+/* "window": the window's picture changed size. Every target is remade at
+ * the new scale with its picture scaled across (the title samples some of
+ * them frames later: impostors, the TV); depth buffers and tiles are remade
+ * (depth is cleared by the next frame; tiles are copied before each use). */
+static void rescale(float sx, float sy)
+{
+    uint32_t i;
+    float ox = s_sx, oy = s_sy;
+    s_sx = sx; s_sy = sy;
+    for (i = 0; i < s_nres; i++) {
+        Res *r = &s_res[i];
+        if (r->kind == R_RT) {
+            Res old;
+            resolve(r);
+            old = *r;
+            r->res = NULL; r->rtv = NULL; r->srv = NULL; r->ms = NULL; r->msrtv = NULL; r->msdirty = 0;
+            if (!rt_make(r)) {
+                if (r->srv) ID3D11ShaderResourceView_Release(r->srv);
+                if (r->rtv) ID3D11RenderTargetView_Release(r->rtv);
+                if (r->res) ID3D11Resource_Release(r->res);
+                r->srv = NULL; r->rtv = NULL; r->res = NULL;
+                r->kind = R_NONE;
+            } else {
+                blit(old.srv, old.sw, old.sh, draw_rtv(r), 0, 0, (float)r->sw, (float)r->sh);
+                if (r->ms) r->msdirty = 1;
+            }
+            if (old.srv) ID3D11ShaderResourceView_Release(old.srv);
+            if (old.rtv) ID3D11RenderTargetView_Release(old.rtv);
+            if (old.msrtv) ID3D11RenderTargetView_Release(old.msrtv);
+            if (old.ms) ID3D11Texture2D_Release(old.ms);
+            if (old.res) ID3D11Resource_Release(old.res);
+        } else if (r->kind == R_DS) {
+            GpCmd c;
+            memset(&c, 0, sizeof c);
+            c.id = i; c.b = r->w; c.c = r->h;
+            q_ds_create(&c);
+        } else if (r->kind == R_SUB) {
+            GpCmd c;
+            memset(&c, 0, sizeof c);
+            c.id = i; c.a = r->va; c.b = r->w; c.c = r->h; c.d = r->pitch;
+            q_sub_create(&c);
+        }
+    }
+    fprintf(stderr, "  [GPU11] display: scale %.3f x %.3f -> %.3f x %.3f\n", ox, oy, sx, sy);
+}
+
+/* ---- the window's presenter (fb_presenter.h, via gpu_display.c) ---------- */
+
+static IDXGISwapChain1 *s_sc;
+static ID3D11RenderTargetView *s_sc_rtv;
+static UINT s_sc_w, s_sc_h;
+static int s_sc_failed;
+static ID3D11Texture2D *s_px_tex;
+static ID3D11ShaderResourceView *s_px_srv;
+static uint32_t s_px_w, s_px_h;
+
+/* The swap chain on the window, at its client size; 0 when there is none
+ * or the window is minimised. */
+static int sc_ready(HWND h)
+{
+    RECT rc;
+    UINT cw, ch;
+    if (s_sc_failed || !GetClientRect(h, &rc)) return 0;
+    cw = (UINT)(rc.right - rc.left); ch = (UINT)(rc.bottom - rc.top);
+    if (!cw || !ch) return 0;
+    if (!s_sc) {
+        IDXGIDevice *dd = NULL;
+        IDXGIAdapter *ad = NULL;
+        IDXGIFactory2 *f2 = NULL;
+        DXGI_SWAP_CHAIN_DESC1 d;
+        HRESULT hr = E_FAIL;
+        memset(&d, 0, sizeof d);
+        d.Width = cw; d.Height = ch; d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        d.SampleDesc.Count = 1; d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        d.BufferCount = 2; d.Scaling = DXGI_SCALING_STRETCH;
+        d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; d.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        if (SUCCEEDED(ID3D11Device_QueryInterface(s_dev, &IID_IDXGIDevice, (void **)&dd))
+            && SUCCEEDED(IDXGIDevice_GetAdapter(dd, &ad))
+            && SUCCEEDED(IDXGIAdapter_GetParent(ad, &IID_IDXGIFactory2, (void **)&f2)))
+            hr = IDXGIFactory2_CreateSwapChainForHwnd(f2, (IUnknown *)s_dev, h, &d, NULL, NULL, &s_sc);
+        if (SUCCEEDED(hr)) IDXGIFactory2_MakeWindowAssociation(f2, h, DXGI_MWA_NO_ALT_ENTER);
+        if (f2) IDXGIFactory2_Release(f2);
+        if (ad) IDXGIAdapter_Release(ad);
+        if (dd) IDXGIDevice_Release(dd);
+        if (FAILED(hr)) {
+            fprintf(stderr, "  [GPU11] window swap chain failed 0x%08lX: the window shows the"
+                            " guest-size frame\n", (unsigned long)hr);
+            s_sc_failed = 1;
+            return 0;
+        }
+        s_sc_w = cw; s_sc_h = ch;
+        fprintf(stderr, "  [GPU11] presenting the full-size image to the window (%ux%u)\n", cw, ch);
+    }
+    if (cw != s_sc_w || ch != s_sc_h) {
+        if (s_sc_rtv) { ID3D11RenderTargetView_Release(s_sc_rtv); s_sc_rtv = NULL; }
+        ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
+        s_cur_target = s_cur_zeta = 0;
+        if (FAILED(IDXGISwapChain1_ResizeBuffers(s_sc, 0, cw, ch, DXGI_FORMAT_UNKNOWN, 0))) return 0;
+        s_sc_w = cw; s_sc_h = ch;
+    }
+    if (!s_sc_rtv) {
+        ID3D11Texture2D *back = NULL;
+        if (FAILED(IDXGISwapChain1_GetBuffer(s_sc, 0, &IID_ID3D11Texture2D, (void **)&back))) return 0;
+        ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)back, NULL, &s_sc_rtv);
+        ID3D11Texture2D_Release(back);
+    }
+    return s_sc_rtv != NULL;
+}
+
+/* src letterboxed to aw:ah on black, then shown (no vsync wait: the game's
+ * flip pacing is the clock, and DWM shows the newest frame). */
+static void sc_show(ID3D11ShaderResourceView *src, uint32_t sw, uint32_t sh, uint32_t aw, uint32_t ah)
+{
+    static const float black[4] = { 0, 0, 0, 1 };
+    float w = (float)s_sc_w, h = w * (float)ah / (float)aw;
+    if (h > (float)s_sc_h) { h = (float)s_sc_h; w = h * (float)aw / (float)ah; }
+    w = (float)(int)(w + 0.5f); h = (float)(int)(h + 0.5f);
+    ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_sc_rtv, black);
+    blit(src, sw, sh, s_sc_rtv, (float)(int)((s_sc_w - w) / 2), (float)(int)((s_sc_h - h) / 2), w, h);
+    IDXGISwapChain1_Present(s_sc, 0, 0);
+}
+
+int gp_d3d11_present_frame(void *hwnd, uint32_t fb_va, uint32_t aw, uint32_t ah)
+{
+    Res *best = NULL;
+    int j, shown = 0;
+    if (!s_active || !s_dev) return 0;
+    AcquireSRWLockExclusive(&s_lock);
+    for (j = 0; j < s_nrt_ids; j++) {
+        Res *r = res(s_rt_ids[j]);
+        if (r && r->kind == R_RT && ((r->va ^ fb_va) & 0x03FFFFFFu) == 0 && (!best || !r->swz)) best = r;
+    }
+    if (best) {
+        resolve(best);
+        if (gp_display_dump_due()) {
+            /* RECOMP_HIRES_DUMP: the full-size image, as presented. */
+            D3D11_TEXTURE2D_DESC td;
+            ID3D11Texture2D *st = NULL;
+            D3D11_MAPPED_SUBRESOURCE m;
+            ID3D11Texture2D_GetDesc((ID3D11Texture2D *)best->res, &td);
+            td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            if (SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &st))) {
+                ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)st, best->res);
+                if (SUCCEEDED(ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)st, 0, D3D11_MAP_READ, 0, &m))) {
+                    gp_display_dump_bgra((const uint8_t *)m.pData, m.RowPitch, td.Width, td.Height);
+                    ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)st, 0);
+                }
+                ID3D11Texture2D_Release(st);
+            }
+        }
+        if (sc_ready((HWND)hwnd)) {
+            sc_show(best->srv, best->sw, best->sh, aw, ah);
+            if (gp_display()->window) {
+                /* The scale the window's picture asks for, taken once it has
+                 * held for 20 frames (a drag-resize does not rebuild every
+                 * target on each step). */
+                static float px = -1, py = -1;
+                static int same;
+                float sx, sy;
+                gp_display_scale_for(s_sc_w, s_sc_h, &sx, &sy);
+                if (sx != px || sy != py) { px = sx; py = sy; same = 0; }
+                else if (++same == 20 && (sx != s_sx || sy != s_sy)) { s_want_sx = sx; s_want_sy = sy; }
+            }
+        }
+        shown = 1;     /* minimised: nothing to show, but nothing else should either */
+    }
+    ReleaseSRWLockExclusive(&s_lock);
+    return shown;
+}
+
+int gp_d3d11_present_pixels(void *hwnd, const uint32_t *px, uint32_t w, uint32_t h,
+                            uint32_t aw, uint32_t ah)
+{
+    int ok = 0;
+    if (!s_active || !px || !s_dev) return 0;
+    /* Never wait for the lock here: the flip thread can hold it while DXGI
+     * (swap chain creation, resize) sends this thread's window a message,
+     * and waiting would deadlock the two. A skipped tick is redrawn 16 ms on. */
+    if (!TryAcquireSRWLockExclusive(&s_lock)) return 0;
+    if (sc_ready((HWND)hwnd)) {
+        if (!s_px_tex || s_px_w != w || s_px_h != h) {
+            D3D11_TEXTURE2D_DESC td;
+            if (s_px_srv) { ID3D11ShaderResourceView_Release(s_px_srv); s_px_srv = NULL; }
+            if (s_px_tex) { ID3D11Texture2D_Release(s_px_tex); s_px_tex = NULL; }
+            memset(&td, 0, sizeof td);
+            td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            if (SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_px_tex)))
+                ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_px_tex, NULL, &s_px_srv);
+            s_px_w = w; s_px_h = h;
+        }
+        if (s_px_srv) {
+            ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s_px_tex, 0, NULL, px, w * 4, 0);
+            sc_show(s_px_srv, w, h, aw, ah);
+            ok = 1;
+        }
+    }
+    ReleaseSRWLockExclusive(&s_lock);
+    return ok;
+}
+
 static void consume_draws(const GpFrame *f, int sync)
 {
     uint32_t i;
     s_cur_target = s_cur_zeta = 0;
     s_seq++;
+    if (s_active && (s_want_sx != s_sx || s_want_sy != s_sy))
+        rescale(s_want_sx, s_want_sy);
     drain_queue(f);
     for (i = 0; i < f->draw_count; i++) {
         const GpDraw *d = &f->draws[i];
@@ -975,9 +1413,11 @@ static void consume_draws(const GpFrame *f, int sync)
 void gp_d3d11_sync(const GpFrame *f)
 {
     if (!ensure_device()) return;
+    AcquireSRWLockExclusive(&s_lock);
     s_checking = 1;
     consume_draws(f, 1);
     s_checking = 0;
+    ReleaseSRWLockExclusive(&s_lock);
 }
 
 /* Every swizzled target into guest memory, once at the start of a checked
@@ -1070,7 +1510,9 @@ uint32_t gp_d3d11_vs_probe(uint32_t vs, const GpXfConsts *xc, const GpVsConsts *
 void gp_d3d11_consume(const GpFrame *f)
 {
     if (!ensure_device()) return;
+    AcquireSRWLockExclusive(&s_lock);
     consume_draws(f, 0);
+    ReleaseSRWLockExclusive(&s_lock);
     if (f->frame % 300 == 299) {
         fprintf(stderr, "  [GPU11] frames %u: %llu draws, %llu tris, %llu clears, %llu skipped;"
                 " %u textures and %u shaders created\n", f->frame + 1,

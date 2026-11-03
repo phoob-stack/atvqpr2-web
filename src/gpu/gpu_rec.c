@@ -1058,4 +1058,10 @@ void atv2_gpu_backend_install(void)
     fprintf(stderr, "[BOOT] GPU recorder registered (RECOMP_GPU=%s): %s\n", e,
             s_simple ? "CPU transform, stage 0 only"
                      : "vertex programs and combiners on the GPU");
+#ifndef __wasm__
+    {   /* RECOMP_RES_SCALE / RECOMP_MSAA / RECOMP_WIDESCREEN (gpu_display.h) */
+        extern void gp_display_install(void);
+        gp_display_install();
+    }
+#endif
 }

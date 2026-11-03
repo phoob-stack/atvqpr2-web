@@ -62,6 +62,7 @@ set(GAME_SOURCES
     # frame captures for web/replay.html, back-end selector at the flip)
     src/gpu/gpu_shadergen_wgsl.c
     src/gpu/gpu_wgsl_tap.c
+    src/gpu/gpu_display.c
     # Test control channel (RECOMP_CONTROL=<port>; src/control, CONTROL.md)
     src/control/control.c
     src/control/control_png.c
@@ -110,6 +111,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${XBOXRECOMP_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gpu
     ${XBOXRECOMP_DIR}/src/kernel   # nv2a_backend.h
+    ${XBOXRECOMP_DIR}/src/video    # fb_presenter.h (gpu_display.c)
     ${XBOXRECOMP_DIR}/src/d3d      # d3d8_swizzle.h
     ${XBOXRECOMP_DIR}/src/usb      # usb_gamepad.h (control channel input)
 )
