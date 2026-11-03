@@ -13,6 +13,10 @@
  *                              at least RECOMP_GPU_CAPTURE_EVERY (60) apart
  *   RECOMP_GPU_BACKEND=wgpu    draw with gpu_wgpu.c (only when built with
  *                              -DATV2_WGPU=ON; otherwise D3D11 and a warning)
+ *   RECOMP_GPU_BACKEND=ab      draw every frame with both, D3D11 first, and
+ *                              diff the last target WebGPU wrote back against
+ *                              D3D11's (logged every 300 frames; the window
+ *                              shows WebGPU's picture)
  *
  * The recorder's queue carries HLSL for the D3D11 back end. The WGSL lives
  * here, by shader id, so the D3D11 path is untouched; the browser build's
@@ -119,7 +123,7 @@ static void init(void)
     if ((e = getenv("RECOMP_GPU_CAPTURE_MIN_DRAWS"))) s_cap_min_draws = (uint32_t)strtoul(e, NULL, 10);
     if ((e = getenv("RECOMP_GPU_CAPTURE_EVERY"))) s_cap_every = (uint32_t)strtoul(e, NULL, 10);
     e = getenv("RECOMP_GPU_BACKEND");
-    s_wgpu = e && !strcmp(e, "wgpu");
+    s_wgpu = e && !strcmp(e, "wgpu") ? 1 : e && !strcmp(e, "ab") ? 2 : 0;
 #ifndef ATV2_WGPU
     if (s_wgpu) {
         fprintf(stderr, "  [GPUWEB] RECOMP_GPU_BACKEND=wgpu but this build has no WebGPU back end"
@@ -225,7 +229,7 @@ static void shadow_update(const GpFrame *f)
             case GP_TEX_CREATE:
                 live_drop(l);
                 l->c = *c;
-                if (c->bytes && (l->payload = (uint8_t *)malloc(c->bytes)))
+                if (s_cap_dir && c->bytes && (l->payload = (uint8_t *)malloc(c->bytes)))
                     memcpy(l->payload, c + 1, c->bytes);
                 else
                     l->c.bytes = 0;
@@ -410,15 +414,52 @@ static int capture_this(const GpFrame *f)
     return 0;
 }
 
+/* RECOMP_GPU_BACKEND=ab: per-frame diff of the last target. */
+static struct { uint64_t frames, px, sum, over16, maxd; } s_ab;
+
+static void ab_compare(const GpFrame *f, const uint32_t *ref, const Live *l)
+{
+    uint32_t *got = rt_pixels(&l->c), i, n = l->c.b * l->c.c;
+    if (!got) return;
+    for (i = 0; i < n; i++) {
+        uint32_t a = ref[i], b = got[i], m = 0, c;
+        for (c = 0; c < 24; c += 8) {
+            int d = (int)((a >> c) & 0xFF) - (int)((b >> c) & 0xFF);
+            if (d < 0) d = -d;
+            s_ab.sum += (uint32_t)d;
+            if ((uint32_t)d > m) m = (uint32_t)d;
+        }
+        if (m > 16) s_ab.over16++;
+        if (m > s_ab.maxd) s_ab.maxd = m;
+    }
+    s_ab.px += n; s_ab.frames++;
+    free(got);
+    if (f->frame % 300 == 299 && s_ab.px) {
+        fprintf(stderr, "  [GPUWEB] A/B frames %u: %llu compared, mean |diff| %.4f per channel, %.4f%% px > 16,"
+                " max %llu\n", f->frame + 1, (unsigned long long)s_ab.frames,
+                (double)s_ab.sum / (3.0 * (double)s_ab.px), 100.0 * (double)s_ab.over16 / (double)s_ab.px,
+                (unsigned long long)s_ab.maxd);
+        memset(&s_ab, 0, sizeof s_ab);
+    }
+}
+
 void gp_backend_flip(const GpFrame *f)
 {
     int cap;
     init();
     cap = s_cap_dir && capture_this(f);
     if (cap) capture_write(f);
-    if (s_cap_dir) shadow_update(f);
+    if (s_cap_dir || s_wgpu == 2) shadow_update(f);
 #ifdef ATV2_WGPU
-    if (s_wgpu) gp_wgpu_consume(f);
+    if (s_wgpu == 2) {
+        uint32_t t = f->draw_count ? f->draws[f->draw_count - 1].target : 0;
+        Live *l = t < s_nlive && s_live[t].c.op == GP_RT_CREATE ? &s_live[t] : NULL;
+        uint32_t *ref;
+        gp_d3d11_consume(f);
+        ref = l ? rt_pixels(&l->c) : NULL;
+        gp_wgpu_consume(f);
+        if (ref) { ab_compare(f, ref, l); free(ref); }
+    } else if (s_wgpu) gp_wgpu_consume(f);
     else
 #endif
     gp_d3d11_consume(f);
