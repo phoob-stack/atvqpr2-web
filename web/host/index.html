@@ -4,6 +4,24 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ATV 2 (browser)</title>
+<script>
+  // Wake the browser's GPU process while the page's modules load: the first
+  // requestAdapter takes ~0.3 s; main.js asks again and then gets it at once.
+  try { navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' }).catch(() => {}); } catch (e) { /* compat.js reports it */ }
+</script>
+<!-- The module graph, fetched in parallel instead of import by import. -->
+<link rel="modulepreload" href="./main.js">
+<link rel="modulepreload" href="./compat.js">
+<link rel="modulepreload" href="./wasm-load.js">
+<link rel="modulepreload" href="./loader.js">
+<link rel="modulepreload" href="./abi.js">
+<link rel="modulepreload" href="./present.js">
+<link rel="modulepreload" href="./input.js">
+<link rel="modulepreload" href="./io.js">
+<link rel="modulepreload" href="../gpu/layout.js">
+<link rel="modulepreload" href="../gpu/encoder.js">
+<link rel="modulepreload" href="../gpu/proto.js">
+<link rel="modulepreload" href="./threads.js">
 <!--
   The browser build's host page. Serve it with web/host/serve.mjs, which
   binds 127.0.0.1 only. The page contains no game data: the player chooses the

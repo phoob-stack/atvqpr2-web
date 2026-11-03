@@ -10,9 +10,9 @@
 // BROWSER=<path to msedge.exe/chrome.exe> overrides. WebGPU comes from the
 // browser's own Dawn; nothing is downloaded.
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { mkdtempSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 
@@ -54,11 +54,20 @@ export function findBrowser() {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // profile: a user-data-dir to keep (e.g. OPFS with an imported game folder
-// across runs); default a fresh temporary one.
-export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500), headless = true, profile } = {}) {
+// across runs); default a fresh temporary one in build-wasm/profiles/ (not
+// %TEMP%: a profile's OPFS gets game data, which stays in this project),
+// deleted again on close.
+// extraArgs: more browser switches (e.g. --disable-features=WebGPU to check
+// the page's feature messages).
+// waitReady: false returns as soon as the page target is there (to set up
+// injected scripts and then Page.navigate).
+export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500), headless = true, profile, extraArgs = [], waitReady = true } = {}) {
   const exe = findBrowser();
-  profile = profile ? resolve(profile) : mkdtempSync(join(tmpdir(), 'atv2-webgpu-'));
+  const temp = !profile;
+  if (temp) mkdirSync(TEMP_PROFILES, { recursive: true });
+  profile = profile ? resolve(profile) : mkdtempSync(join(TEMP_PROFILES, 'tmp-'));
   const args = [
+    ...extraArgs,
     headless ? '--headless=new' : '',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
@@ -98,7 +107,7 @@ export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500
   });
   await send('Runtime.enable');
   // Wait for the page's own `ready` promise.
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; waitReady && i < 100; i++) {
     const r = await send('Runtime.evaluate', { expression: 'typeof window.ready', returnByValue: true });
     if (r.result?.result?.value === 'object') break;
     await sleep(100);
@@ -113,8 +122,38 @@ export async function launch(url, { port = 9300 + Math.floor(Math.random() * 500
         throw new Error(r.result.exceptionDetails.exception?.description ?? JSON.stringify(r.result.exceptionDetails));
       return r.result?.result?.value;
     },
-    async close() { try { ws.close(); } catch {} kill(proc); },
+    async close() { try { ws.close(); } catch {} kill(proc); if (temp) await removeProfile(profile); },
+    /** Browser.close (the profile is flushed: HTTP cache, wasm code cache),
+     *  then the forced kill as a fallback. */
+    async closeGracefully(timeoutMs = 15000) {
+      try {
+        const v = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+        const bws = new WebSocket(v.webSocketDebuggerUrl);
+        await new Promise((r, j) => { bws.onopen = r; bws.onerror = j; });
+        bws.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
+      } catch { /* already gone */ }
+      const exited = new Promise((r) => { if (proc.exitCode !== null) r(); else proc.once('exit', r); });
+      await Promise.race([exited, sleep(timeoutMs)]);
+      // The launcher process exits early on Windows; wait for the profile lock to go.
+      const lock = join(profile, 'lockfile');
+      for (let i = 0; i < timeoutMs / 100 && existsSync(lock); i++) {
+        try { rmSync(lock); } catch { /* still held */ }
+        await sleep(100);
+      }
+      try { ws.close(); } catch {}
+      kill(proc);
+      if (temp) await removeProfile(profile);
+    },
+    profile,
   };
+}
+
+const TEMP_PROFILES = resolve(dirname(fileURLToPath(import.meta.url)), '../../build-wasm/profiles');
+async function removeProfile(dir) {
+  // The browser's processes let go of the files a moment after they exit.
+  for (let i = 0; i < 40; i++) {
+    try { rmSync(dir, { recursive: true, force: true }); return; } catch { await sleep(250); }
+  }
 }
 
 function kill(proc) {

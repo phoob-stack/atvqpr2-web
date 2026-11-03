@@ -49,7 +49,9 @@ if (opt('--wasm')) qs.set('wasm', opt('--wasm'));
 const url = `http://127.0.0.1:${port}/host/index.html${qs.size ? `?${qs}` : ''}`;
 
 const dbg = 9300 + Math.floor(Math.random() * 500);
-const profile = mkdtempSync(join(tmpdir(), 'atv2-audio-'));
+// In build-wasm/profiles, not %TEMP%: the profile's OPFS gets game data (the dev block cache).
+mkdirSync(join(ROOT, 'build-wasm/profiles'), { recursive: true });
+const profile = mkdtempSync(join(ROOT, 'build-wasm/profiles', 'audio-'));
 const proc = spawn(findBrowser(), [
   flag('--headed') ? '' : '--headless=new',
   `--remote-debugging-port=${dbg}`, `--user-data-dir=${profile}`,

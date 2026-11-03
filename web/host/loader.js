@@ -279,6 +279,23 @@ function wireForget() {
 }
 
 /**
+ * What prepareGame() will return when it needs no UI and deletes nothing
+ * (the dev server's /data/, or a finished import), else null. No side
+ * effects: main.js uses it to start the game threads while the GPU comes up.
+ */
+export async function peekGame(q) {
+  if (q.has('forget')) return null;
+  const dev = q.get('dev');
+  if (dev !== '0') {
+    const r = await fetch('/data/manifest.json', { method: 'HEAD', cache: 'no-store' }).catch(() => null);
+    if (r?.ok) return { source: 'server', base: '/data' };
+    if (dev === '1') return null;
+  }
+  const m = await importedGame();
+  return m ? { source: 'opfs', dir: GAME_DIR, manifest: m } : null;
+}
+
+/**
  * Decide where /game comes from (see the top of this file). Returns
  * { source: 'server', base } or { source: 'opfs', dir, manifest }.
  */

@@ -20,7 +20,12 @@ import { Presenter } from './present.js';
 import { Input } from './input.js';
 import { requestDevice } from '../gpu/layout.js';
 import { IO_BYTES, IO_HOST_PTR } from './io.js';
-import { prepareGame, loaderState } from './loader.js';
+import { prepareGame, peekGame, loaderState } from './loader.js';
+import { checkBasics, checkWorkerSide, checkWebGPU, checkSharedUploads, showProblem, showNotice, installWaitAsync } from './compat.js';
+import { loadWasm } from './wasm-load.js';
+
+// Firefox has no Atomics.waitAsync (yet): a Worker-backed stand-in.
+installWaitAsync();
 
 // What run.ps1 sets for a native run, minus the Win32-only parts.
 export const DEFAULT_ENV = {
@@ -64,34 +69,28 @@ setInterval(() => {
   fetch('/log', { method: 'POST', body }).catch(() => {});
 }, 500);
 
-/** The shared memory's limits from the module's import section. */
-function memoryImportLimits(bytes) {
-  const u = new Uint8Array(bytes);
-  let p = 8;
-  const leb = () => { let r = 0, s = 0, b; do { b = u[p++]; r |= (b & 0x7f) << s; s += 7; } while (b & 0x80); return r >>> 0; };
-  const name = () => { const n = leb(); p += n; };
-  while (p < u.length) {
-    const id = u[p++], size = leb(), end = p + size;
-    if (id === 2) {
-      for (let n = leb(); n--;) {
-        name(); name();
-        const kind = u[p++];
-        if (kind === 0) leb();
-        else if (kind === 1) { p++; const f = u[p++]; leb(); if (f & 1) leb(); }
-        else if (kind === 2) { const f = u[p++]; const min = leb(); const max = f & 1 ? leb() : undefined; return { min, max, shared: !!(f & 2) }; }
-        else if (kind === 3) { p += 2; }
-        else if (kind === 4) { p++; leb(); }
-      }
-    }
-    p = end;
-  }
-  return null;
+// Load-time marks (ms since navigation start), for web/tools/loadtime.mjs.
+const timings = {};
+const mark = (k) => { if (timings[k] === undefined) timings[k] = Math.round(performance.now()); };
+
+/** A boot failure the player should see: the message box, the log, and boot.mjs's state.error. */
+class Shown extends Error {}
+function fail(title, items, details = '', lead = 'Missing:') {
+  showProblem({ title, items, details, lead });
+  return new Shown(`${title}: ${items.map((i) => i.what).join('; ')}${details ? ` (${details.split('\n')[0]})` : ''}`);
 }
 
 async function boot() {
-  if (!crossOriginIsolated) throw new Error('not cross-origin isolated: serve with web/host/serve.mjs (COOP/COEP)');
+  mark('boot');
+  // What the browser must have, before anything is fetched (compat.js).
+  const basics = checkBasics();
+  for (const n of basics.notes) log(`[page] ${n}`);
+  if (basics.problems.length) throw fail("This browser can't run the game", basics.problems);
   // A bare name is a module in build-wasm/ (served at /wasm/).
   const wasmUrl = ((w) => (w.includes('/') ? w : `/wasm/${w}`))(q.get('wasm') ?? 'atv2.wasm');
+  // The module downloads and compiles while the GPU and the game files are
+  // set up (and while the player picks the game folder, the first time).
+  const wasm = loadWasm(wasmUrl);
   const args = ['atv2', ...(q.get('args') ?? '').split(',').filter(Boolean)];
   const env = { ...DEFAULT_ENV };
   for (const kv of (q.get('env') ?? '').split(',').filter(Boolean)) {
@@ -100,39 +99,34 @@ async function boot() {
     env[i < 0 ? kv : kv.slice(0, i)] = i < 0 ? '1' : kv.slice(i + 1);
   }
 
-  const gpu = await requestDevice();
-  log(`[page] WebGPU: ${gpu.adapterName}; features: ${gpu.features.join(', ')}`);
-
-  // The game files: the player's import in OPFS (the import UI first if there
-  // is none yet), or the dev server's /data/.
-  const game = await prepareGame({ q, log });
-  if (game.manifest?.skipMovies && !('RECOMP_SKIP_MOVIES' in env)) env.RECOMP_SKIP_MOVIES = '1';
-  $('status').textContent = 'loading…';
-
-  const t0 = performance.now();
-  const bytes = await (await fetch(wasmUrl)).arrayBuffer();
-  const module = await WebAssembly.compile(bytes);
-  const lim = memoryImportLimits(bytes);
-  if (!lim?.shared) throw new Error('the module does not import a shared memory');
-  const memory = new WebAssembly.Memory({ initial: lim.min, maximum: lim.max ?? 65536, shared: true });
-  log(`[page] ${wasmUrl}: ${(bytes.byteLength / 1048576).toFixed(1)} MiB, compiled in ${(performance.now() - t0).toFixed(0)} ms; ` +
-      `memory ${lim.min} pages (max ${lim.max ?? 65536})`);
-  log(`[page] env: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`);
-
-  // The I/O worker first: it owns the files and the fd table every thread uses.
-  const io = new SharedArrayBuffer(IO_BYTES);
-  const ioWorker = new Worker(new URL('./io-worker.js', import.meta.url), { type: 'module', name: 'io' });
-  await new Promise((resolve, reject) => {
-    ioWorker.onmessage = ({ data: m }) => {
-      if (m.type === 'ready') { log(`[page] ${m.note}`); resolve(); }
-      else if (m.type === 'error') { log(`[page] I/O worker: ${m.message}`, 'err'); reject(new Error(m.message)); }
-      else if (m.type === 'log') log(m.text, m.fd === 2 ? 'err' : '');
-      else if (m.type === 'stats') state.vfs = m.vfs;
-    };
-    ioWorker.postMessage({ type: 'init', memory, io, traceWasi: q.get('trace') === '1',
-      game: game.source === 'opfs' ? { source: 'opfs', dir: game.dir } : { source: 'server', base: game.base } });
-  });
-  const host = { io };
+  // The GPU (and the Worker-side checks) come up while the module compiles
+  // and, when the game files are already there, while the threads start.
+  const gpuP = (async () => {
+    const [ws, wg] = await Promise.all([checkWorkerSide().finally(() => mark('workerCheck')),
+      checkWebGPU().finally(() => mark('gpuCheck'))]);
+    for (const n of wg.notes) { log(`[page] ${n}`, 'err'); showNotice(n); }
+    if (ws.problems.length || wg.problems.length) throw fail("This browser can't run the game", [...ws.problems, ...wg.problems]);
+    let g;
+    try { g = await requestDevice(); } catch (e) {
+      throw fail('WebGPU did not start', [{ what: `a WebGPU device (${e.message})`,
+        fix: 'Update the graphics driver and the browser, and check edge://gpu or chrome://gpu.' }]);
+    }
+    g.device.lost?.then((i) => {
+      if (i.reason === 'destroyed') return;
+      log(`[page] WebGPU device lost: ${i.message}`, 'err');
+      showProblem({ title: 'The GPU device was lost', lead: 'What happened:', items: [{ what: i.message || 'WebGPU device lost',
+        fix: 'The graphics driver reset or the GPU was removed. Reload the page.' }] });
+    });
+    // Uploads straight from the shared wasm memory, or through a copy where
+    // the browser's WebGPU refuses shared views.
+    const su = await checkSharedUploads(g.device);
+    if (su.patched) log(`[page] WebGPU refuses shared-memory uploads (writeBuffer ${su.writeBuffer ? 'ok' : 'no'}, ` +
+      `writeTexture ${su.writeTexture ? 'ok' : 'no'}): copying through a staging buffer`, 'err');
+    mark('gpu');
+    log(`[page] WebGPU: ${g.adapterName}; features: ${g.features.join(', ')}`);
+    return g;
+  })();
+  gpuP.catch(() => {});
 
   // Guest threads: wasm-threads' worker pool when it is there, else the
   // single-threaded bring-up runner (guest main thread only).
@@ -141,14 +135,104 @@ async function boot() {
     log(`[page] guest main thread ended: ${code}` +
       (missing && Object.keys(missing).length ? `; missing imports called: ${JSON.stringify(missing)}` : ''), 'err');
   };
-  const onTrap = (m) => { state.trap = m; log(`[page] TRAP${m.tid !== undefined ? ` (thread ${m.tid})` : ''}: ${m.message}
-${m.stack ?? ''}`, 'err'); };
-  let threads = null;
-  try { threads = await import('./threads.js'); } catch { /* not merged yet */ }
-  if (threads?.WasmThreads && q.get('threads') !== '0') {
+  const onTrap = (m) => {
+    state.trap = m;
+    log(`[page] TRAP${m.tid !== undefined ? ` (thread ${m.tid})` : ''}: ${m.message}\n${m.stack ?? ''}`, 'err');
+    showProblem({ title: 'The game stopped', lead: 'What happened:', items: [{ what: `a crash in thread ${m.tid ?? '?'}: ${m.message}`,
+      fix: 'Reload the page to start again. The log (F2) has the details.' }], details: m.stack ?? '' });
+  };
+
+  // The module, the shared memory, the I/O channel and the thread Workers
+  // (instantiated and idle: no guest code runs before runMain). The
+  // environment goes to every Worker at start and depends on the game import
+  // (movies skipped or not), so this starts once the game files are known.
+  const io = new SharedArrayBuffer(IO_BYTES);
+  const host = { io };
+  // Returns { mem: Promise<{ module, memory }>, pool: Promise<WasmThreads|null>,
+  // io: Promise<Worker> (the I/O worker, ready) }.
+  const startThreads = (game) => {
+    const mem = makeMemory(game);
+    const pool = mem.then(startPool);
+    const io = mem.then(({ memory }) => startIo(memory, game));
+    for (const p of [mem, pool, io]) p.catch(() => {});
+    return { mem, pool, io, stop: () => { pool.then((wt) => wt?.terminate(), () => {}); io.then((w) => w.terminate(), () => {}); } };
+  };
+  // The I/O worker: it owns the files and the fd table every thread uses.
+  // It starts while the thread Workers instantiate and must be up before _start.
+  const startIo = (memory, game) => new Promise((resolve, reject) => {
+    const ioWorker = new Worker(new URL('./io-worker.js', import.meta.url), { type: 'module', name: 'io' });
+    ioWorker.onmessage = ({ data: m }) => {
+      if (m.type === 'ready') { log(`[page] ${m.note}`); mark('ioReady'); resolve(ioWorker); }
+      else if (m.type === 'error') { log(`[page] I/O worker: ${m.message}`, 'err'); reject(new Error(m.message)); }
+      else if (m.type === 'log') log(m.text, m.fd === 2 ? 'err' : '');
+      else if (m.type === 'stats') state.vfs = m.vfs;
+    };
+    ioWorker.postMessage({ type: 'init', memory, io, traceWasi: q.get('trace') === '1',
+      game: game.source === 'opfs' ? { source: 'opfs', dir: game.dir } : { source: 'server', base: game.base } });
+  });
+  const makeMemory = async (game) => {
+    if (game.manifest?.skipMovies && !('RECOMP_SKIP_MOVIES' in env)) env.RECOMP_SKIP_MOVIES = '1';
+    let module;
+    try { module = await wasm.module; } catch (e) {
+      if (e instanceof WebAssembly.CompileError)
+        throw fail("This browser can't compile the game module", [{ what: 'a WebAssembly feature the module uses',
+          fix: 'Use a current Edge, Chrome or Firefox.' }], e.message);
+      throw fail('The game module did not load', [{ what: wasmUrl, fix: 'Is the local server still running?' }], e.message, 'Could not load:');
+    }
+    mark('wasmCompiled');
+    const lim = await wasm.limits;
+    if (!lim?.shared) throw new Error('the module does not import a shared memory');
+    let memory;
+    try { memory = new WebAssembly.Memory({ initial: lim.min, maximum: lim.max ?? 65536, shared: true }); } catch (e) {
+      throw fail('Not enough memory for the game', [{ what: `${(lim.min / 16384).toFixed(1)} GB of WebAssembly memory (${e.message})`,
+        fix: 'The game reserves about 2.2 GB up front. Close other tabs and programs, use a 64-bit browser, and reload.' }], '', 'Could not reserve:');
+    }
+    const wi = wasm.info();
+    log(`[page] ${wasmUrl}: ${(wi.bytes / 1048576).toFixed(1)} MiB (${wi.cache || 'size unknown'}), ${wi.mode}, ` +
+        `compiled in ${wi.ms.toFixed(0)} ms since boot; memory ${lim.min} pages (max ${lim.max ?? 65536}, from ${lim.from})`);
+    log(`[page] env: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+    return { module, memory };
+  };
+  const startPool = async ({ module, memory }) => {
+    let threads = null;
+    try { threads = await import('./threads.js'); } catch { /* not merged yet */ }
+    if (!threads?.WasmThreads || q.get('threads') === '0') return null;
     const wt = new threads.WasmThreads({ module, memory, importsUrl: new URL('./imports.js', import.meta.url).href,
       env, args, host, pool: 14, spare: 2, max: 64, onExit: (c) => onExit(c), onTrap });
-    await wt.start();
+    // A browser that cannot start the module Workers would wait here forever.
+    let started = false;
+    await Promise.race([wt.start().then(() => { started = true; }),
+      new Promise((r) => setTimeout(r, 30000))]);
+    if (!started) {
+      wt.terminate();
+      throw fail('The game threads did not start', [{ what: 'module Web Workers with shared WebAssembly memory',
+        fix: 'No Worker answered within 30 s. Use a current Edge, Chrome or Firefox; see the log (F2).' }], '', 'Not working:');
+    }
+    mark('workersUp');
+    return wt;
+  };
+  // Already imported (or the dev server's /data/): the threads start now.
+  const early = await peekGame(q).catch(() => null);
+  let threadsP = early ? startThreads(early) : null;
+  let gpu;
+  try { gpu = await gpuP; } catch (e) { threadsP?.stop(); throw e; }
+
+  // The game files: the player's import in OPFS (the import UI first if there
+  // is none yet), or the dev server's /data/.
+  const game = await prepareGame({ q, log });
+  mark('game');
+  if (early && (early.source !== game.source || early.dir !== game.dir || early.base !== game.base)) {
+    // Changed in between (should not happen): start over with what prepareGame found.
+    threadsP.stop();
+    threadsP = null;
+  }
+  threadsP ??= startThreads(game);
+  $('status').textContent = 'loading…';
+
+  const { module, memory } = await threadsP.mem;
+  await threadsP.io;
+  const wt = await threadsP.pool;
+  if (wt) {
     log('[page] threads: worker pool up; running _start');
     wt.runMain().catch((e) => log(`[page] runMain: ${e.message}`, 'err'));
   } else {
@@ -259,7 +343,7 @@ ${m.stack ?? ''}`, 'err'); };
 
   let frames = 0, lastT = performance.now(), fps = 0;
   const tick = () => {
-    if (presenter) { input.pollGamepad(); presenter.draw(); }
+    if (presenter) { input.pollGamepad(); presenter.draw(); if (presenter.stats.frames > 0) mark('firstFrame'); }
     if (hostPtr) {
       const i = new Int32Array(memory.buffer, hostPtr, Host.words);
       state.stage = i[Host.at.boot_stage];
@@ -278,7 +362,7 @@ ${m.stack ?? ''}`, 'err'); };
 }
 
 window.atv = {
-  state, log: logLines, loader: loaderState,
+  state, log: logLines, loader: loaderState, timings,
   stage: () => stageName(state.stage),
   snapshot: async () => {
     const png = await window.atv.presenter?.snapshot();
@@ -288,4 +372,8 @@ window.atv = {
   },
   key: (vk, down) => window.atv.input?.key(vk, down),
 };
-window.ready = boot().catch((e) => { log(`[page] boot failed: ${e.stack ?? e}`, 'err'); state.error = String(e); });
+window.ready = boot().catch((e) => {
+  log(`[page] boot failed: ${e.stack ?? e}`, 'err');
+  state.error = String(e.message ?? e);
+  if (!(e instanceof Shown)) showProblem({ title: 'The game failed to start', details: String(e.stack ?? e) });
+});
