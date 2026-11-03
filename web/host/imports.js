@@ -22,7 +22,7 @@ export function makeImports(ctx) {
   const host = ctx.host ?? {};
   if (!host.io) throw new Error('makeImports: no I/O channel (ctx.host.io)');
   const log = ctx.log ?? ((s) => console.warn(s));
-  const local = new Wasi({ vfs: null, args: ctx.args ?? ['atv2'], env: ctx.env ?? {} });
+  const local = new Wasi({ vfs: null, args: ctx.args ?? ['atv2'], env: ctx.env ?? {}, ctl: ctx.ctl ?? null });
   local.memory = ctx.memory;
   const li = local.imports();
   const wasi = ioClient(host.io);

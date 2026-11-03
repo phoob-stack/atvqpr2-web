@@ -11,6 +11,15 @@
 // worker answering an RPC slot; wasm-threads). makeWasi() is written so that
 // split is mechanical: all state is in `this`, all calls are synchronous.
 import { FsError, E } from './vfs.js';
+import { sharedMonotonicNs } from './threads.js';
+
+// One clock for every Worker. performance.now() alone counts from each
+// Worker's own time origin, so a monotonic time read on one thread could be
+// seconds off one read on another; timeOrigin + now() is one epoch for all.
+// With the thread pool's control block (ctx.ctl) it also never goes below
+// the last value any thread got (threads.js, sharedMonotonicNs): the runtime
+// subtracts cross-thread times as unsigned numbers.
+const epochNs = () => BigInt(Math.round((performance.timeOrigin + performance.now()) * 1e6));
 
 const FT = { UNKNOWN: 0, CHAR: 2, DIR: 3, FILE: 4 };
 const RIGHTS_ALL = 0x1fffffffn;
@@ -22,7 +31,8 @@ export class ExitStatus extends Error {
 }
 
 export class Wasi {
-  constructor({ vfs, args = ['atv2'], env = {}, preopens = { '/game': 'game', '/save': 'save' }, onLog }) {
+  constructor({ vfs, args = ['atv2'], env = {}, preopens = { '/game': 'game', '/save': 'save' }, onLog, ctl = null }) {
+    this.ctl = ctl;
     this.vfs = vfs; this.args = args; this.env = Object.entries(env).map(([k, v]) => `${k}=${v}`);
     this.onLog = onLog ?? ((fd, s) => console.log(s));
     this.memory = null;
@@ -38,6 +48,8 @@ export class Wasi {
     this.t0 = performance.now();
     this.trace = false;
   }
+
+  nowNs(id) { return id === 0 || !this.ctl ? epochNs() : sharedMonotonicNs(this.ctl); }
 
   // ---- memory helpers ------------------------------------------------------
   get dv() { return new DataView(this.memory.buffer); }
@@ -115,10 +127,8 @@ const SYSCALLS = {
 
   clock_res_get(id, out) { this.dv.setBigUint64(out, 1000n, true); },
   clock_time_get(id, precision, out) {
-    let ns;
-    if (id === 0) ns = BigInt(Math.round((performance.timeOrigin + performance.now()) * 1e6));
-    else ns = BigInt(Math.round(performance.now() * 1e6));
-    this.dv.setBigUint64(out, ns, true);
+    // REALTIME (0) as is; MONOTONIC and the CPU-time clocks shared.
+    this.dv.setBigUint64(out, this.nowNs(id), true);
   },
 
   fd_write(fd, iovs, n, nwritten) {
@@ -280,7 +290,7 @@ const SYSCALLS = {
       if (dv.getUint8(s + 8) !== 0) continue;
       const id = dv.getUint32(s + 16, true), t = dv.getBigUint64(s + 24, true), abs = dv.getUint16(s + 40, true) & 1;
       let ms = Number(t) / 1e6;
-      if (abs) ms -= id === 0 ? Date.now() : performance.now();
+      if (abs) ms = Number(t - this.nowNs(id)) / 1e6;
       wait = Math.max(wait, ms);
       const e = outPtr + n * 32;
       dv.setBigUint64(e, dv.getBigUint64(s, true), true);
