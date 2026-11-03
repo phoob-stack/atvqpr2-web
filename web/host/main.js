@@ -30,6 +30,7 @@ import { IO_BYTES, IO_HOST_PTR } from './io.js';
 import { prepareGame, peekGame, loaderState } from './loader.js';
 import { checkBasics, checkWorkerSide, checkWebGPU, checkSharedUploads, showProblem, showNotice, installWaitAsync } from './compat.js';
 import { loadWasm } from './wasm-load.js';
+import { startRoam } from './roam.js';
 
 // Firefox has no Atomics.waitAsync (yet): a Worker-backed stand-in.
 installWaitAsync();
@@ -308,6 +309,8 @@ async function boot() {
           `${r.skipped ? ' (list skipped: other display options)' : ''}`))
         .catch(() => {});
     log(`[page] host block at 0x${hostPtr.toString(16)}`);
+    // RECOMP_ROAM: the page is free roam's WebSocket transport (roam.js).
+    startRoam({ memory, hostPtr, env, canvas: $('screen'), log, display });
   })();
 
   // Audio. The autoplay policy lets an AudioContext run only after a user

@@ -632,6 +632,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         extern void atv2_freeride_init(void);
         atv2_freeride_init();
     }
+    {
+        extern void atv2_roam_init(void);
+        atv2_roam_init();
+    }
 
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");

@@ -1525,6 +1525,20 @@ static void rec_flip(void)
         gp_backend_flip(&f);      /* D3D11, or wgpu; captures (gpu_wgsl_tap.c) */
         if (s_timing) timing_frame(s_frame, t0, gp_now_ms(), f.draw_count);
     }
+    /* Free roam: the other players' name tags into this frame's screen-sized
+     * colour target, now written back, before its hash is taken (no resync). */
+    {
+        extern volatile int atv2_roam_on;
+        if (atv2_roam_on) {
+            extern void atv2_roam_draw_guest(uint32_t va, uint32_t w, uint32_t h, uint32_t pitch);
+            for (i = 0; i < s_nrt; i++)
+                if (s_rt[i].used_frame == s_frame && !s_rt[i].swz && s_rt[i].bpp == 4 &&
+                    s_rt[i].w >= 640 && s_rt[i].h >= 480 && rt_syncable(&s_rt[i])) {
+                    atv2_roam_draw_guest(s_rt[i].va, s_rt[i].w, s_rt[i].h, s_rt[i].pitch);
+                    break;
+                }
+        }
+    }
     /* The consumer wrote this frame's targets back: remember what the guest
      * now holds, so a later CPU write to them can be told apart. */
     for (i = 0; i < s_nrt; i++)
@@ -1550,6 +1564,7 @@ static void rec_flip(void)
     s_epoch++;
     s_frame++;
     { extern void atv2_freeride_frame(void); atv2_freeride_frame(); }
+    { extern volatile int atv2_roam_on; extern void atv2_roam_flip(void); if (atv2_roam_on) atv2_roam_flip(); }
     { extern void atv2_control_frame(unsigned); atv2_control_frame((unsigned)f.draw_count); }
 }
 

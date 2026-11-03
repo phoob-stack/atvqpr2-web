@@ -54,6 +54,9 @@ set(GAME_SOURCES
     src/recomp_manual.c
     # Free Ride (RECOMP_FREERIDE=1): straight into Freestyle, Unlimited Time
     src/freeride.c
+    # Free roam (RECOMP_ROAM=host:port): remote riders in Free Ride; src/roam.c
+    src/roam.c
+    src/roam_net.c
     # GPU renderer (RECOMP_GPU=1): recorder -> frame packets -> D3D11 consumer
     src/gpu/gpu_rec.c
     src/gpu/gpu_shadergen.c
