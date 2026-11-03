@@ -67,6 +67,7 @@ typedef struct {
     WGPUBuffer rb;                  /* writeback staging */
     uint32_t va, w, h, bpp, fmt, swz, pitch, dirty, cube;   /* cube: faces==6 (tex) or PS mask;
                                                                R_SUB: va = source target, pitch = x0 | y0 << 16 */
+    uint32_t mask;                  /* R_VS: the inputs it reads (GP_SHADER_VS b): the vertex layout */
     /* Display options only (s_active): */
     uint32_t sw, sh;                /* scaled size (R_RT, R_DS, R_SUB) */
     uint32_t bx, by;                /* R_SUB: scaled top-left in the source */
@@ -448,6 +449,7 @@ static void q_shader(const GpCmd *c)
     r->mod = wgsl_module(src, n, label);
     r->kind = is_ps ? R_PS : R_VS;
     r->cube = is_ps ? cube_mask_of(src) : 0;
+    r->mask = is_ps ? 0 : (c->b ? c->b : 0xFFFF);
     s_stat_shaders++;
 }
 
@@ -506,6 +508,7 @@ static void pack_uniforms(const GpFrame *f)
         const GpDraw *d = &f->draws[i];
         Slots *s = &s_slots[i];
         memset(s, 0, sizeof *s);
+        if (d->kind == GP_CLEAR && d->rect[1]) { s->xf = (uint32_t)size; size += 256; }   /* a partial clear's colour and z */
         if (d->kind != GP_DRAW) continue;
         if (d->xfc_off != ~0u) { s->xf = (uint32_t)size; size += 256; }
         if (d->vsc_off != ~0u) {        /* the recorder dedupes consecutive blocks */
@@ -526,6 +529,14 @@ static void pack_uniforms(const GpFrame *f)
         const Slots *s = &s_slots[i];
         GpWgslSmp *sx;
         int st;
+        if (d->kind == GP_CLEAR && s->xf) {
+            float *c = (float *)(s_arena + s->xf);
+            uint32_t a = d->clr_argb;
+            c[0] = ((a >> 16) & 0xFF) / 255.0f; c[1] = ((a >> 8) & 0xFF) / 255.0f;
+            c[2] = (a & 0xFF) / 255.0f;         c[3] = (a >> 24) / 255.0f;
+            c[4] = d->zeta_format == 1 ? (float)(d->clr_zs & 0xFFFF) / 65535.0f
+                                       : (float)(d->clr_zs >> 8) / 16777215.0f;
+        }
         if (d->kind != GP_DRAW) continue;
         if (s->xf) memcpy(s_arena + s->xf, f->consts + d->xfc_off,
                           d->vs == GP_VS_TVERT ? sizeof(GpTvConsts) : sizeof(GpXfConsts));
@@ -696,8 +707,20 @@ static WGPURenderPipeline make_pipeline(const PipeKey *k, WGPUShaderModule vs, W
         at[1].format = WGPUVertexFormat_Unorm8x4;  at[1].offset = 16; at[1].shaderLocation = 1;
         at[2].format = WGPUVertexFormat_Float32x2; at[2].offset = 20; at[2].shaderLocation = 2;
         n = 3; vbl.arrayStride = sizeof(GpTVertex);
+    } else if (k->kind == K_PROGRAM) {
+        /* The inputs the program reads, packed in register order (gpu_rec.c;
+         * the WGSL declares just those, gpu_vs_input_mask). */
+        Res *r = res(k->vs);
+        uint32_t mask = r && r->mask ? r->mask : 0xFFFF;
+        for (i = n = 0; i < 16; i++)
+            if (mask & (1u << i)) {
+                at[n].format = WGPUVertexFormat_Float32x4; at[n].offset = (uint64_t)n * 16;
+                at[n].shaderLocation = (uint32_t)i;
+                n++;
+            }
+        vbl.arrayStride = (uint64_t)n * 16;
     } else {
-        n = k->kind == K_PASSTHRU ? 8 : 16;
+        n = 8;
         for (i = 0; i < n; i++) {
             at[i].format = WGPUVertexFormat_Float32x4; at[i].offset = (uint64_t)i * 16; at[i].shaderLocation = (uint32_t)i;
         }
@@ -837,6 +860,7 @@ static WGPUBindGroup tex_group(uint32_t cube, WGPUTextureView v[4], WGPUSampler 
 
 static WGPURenderPassEncoder s_pass;
 static uint32_t s_cur_target, s_cur_zeta;
+static uint64_t s_cur_sc;           /* the pass's scissor (0: the whole target) */
 static struct { uint64_t draws, tris, skipped, clears, passes, no_vs, no_ps, no_rt, z_scratch, sub_copies; } s_st;
 
 static void end_pass(void)
@@ -866,6 +890,7 @@ static void begin_pass(Res *rt, Res *ds, const float *clear_rgba, const float *c
     }
     end_pass();
     s_pass = wgpuCommandEncoderBeginRenderPass(s_enc, &pd);
+    s_cur_sc = 0;                       /* a pass starts with the whole target */
     if (s_active) {
         wgpuRenderPassEncoderSetViewport(s_pass, 0, 0, (float)rt->sw, (float)rt->sh, 0, 1);
         if (rt->ms) rt->msdirty = 1;
@@ -927,12 +952,131 @@ static Res *bind_target(const GpDraw *d, Res **ds_out)
     return rt;
 }
 
-static void do_clear(const GpDraw *d)
+/* GpDraw.rect in drawn pixels (gpu_d3d11.c draw_rect, encoder.js rectOf):
+ * the window clip of a draw, the area of a clear -- split screen draws each
+ * player's view into its own part of one target. 0: the whole target. */
+static int draw_rect(const GpDraw *d, const Res *rt, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h)
+{
+    uint32_t x0 = d->rect[0] & 0xFFFF, y0 = d->rect[0] >> 16;
+    uint32_t x1 = d->rect[1] & 0xFFFF, y1 = d->rect[1] >> 16;
+    uint32_t tw = s_active ? rt->sw : rt->w, th = s_active ? rt->sh : rt->h;
+    if (x1 > rt->w) x1 = rt->w;
+    if (y1 > rt->h) y1 = rt->h;
+    if (!d->rect[1] || (x0 == 0 && y0 == 0 && x1 >= rt->w && y1 >= rt->h)) {
+        *x = *y = 0; *w = tw; *h = th;
+        return 0;
+    }
+    if (x0 > x1) x0 = x1;
+    if (y0 > y1) y0 = y1;
+    if (s_active) {      /* target pixels at the display scale (both edges scaled) */
+        x0 = gp_scaled(x0, s_sx); x1 = gp_scaled(x1, s_sx);
+        y0 = gp_scaled(y0, s_sy); y1 = gp_scaled(y1, s_sy);
+        if (x1 > tw) x1 = tw;
+        if (y1 > th) y1 = th;
+    }
+    *x = x0; *y = y0; *w = x1 - x0; *h = y1 - y0;
+    return 1;
+}
+
+static void set_scissor(const GpDraw *d, const Res *rt)
+{
+    uint32_t x, y, w, h;
+    uint64_t k = draw_rect(d, rt, &x, &y, &w, &h)
+               ? 1 | (uint64_t)x << 1 | (uint64_t)y << 16 | (uint64_t)w << 32 | (uint64_t)h << 48 : 0;
+    if (k == s_cur_sc) return;
+    wgpuRenderPassEncoderSetScissorRect(s_pass, x, y, w, h);
+    s_cur_sc = k;
+}
+
+/* A clear of part of a target: a triangle over the target, cut to the rect
+ * by the scissor, writing the clear colour and depth (encoder.js clearRect).
+ * Colour and z come from the clear's slot in the uniform arena (binding 0). */
+static const char s_clr_wgsl[] =
+"struct C { col: vec4f, z: f32 };\n"
+"@group(0) @binding(0) var<uniform> c: C;\n"
+"@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {\n"
+"  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));\n"
+"  return vec4f(p * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), c.z, 1.0);\n"
+"}\n"
+"@fragment fn fs() -> @location(0) vec4f { return c.col; }\n";
+static WGPUShaderModule s_clr_mod;
+static WGPUPipelineLayout s_clr_pl;
+static struct { uint32_t key; WGPURenderPipeline p; } s_clr_pipes[64];
+static int s_nclr_pipes;
+
+static WGPURenderPipeline clear_pipeline(int has_ds, uint32_t wmask, int dw, int sten)
+{
+    WGPURenderPipelineDescriptor pd = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
+    WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
+    WGPUColorTargetState ct = WGPU_COLOR_TARGET_STATE_INIT;
+    WGPUDepthStencilState ds = WGPU_DEPTH_STENCIL_STATE_INIT;
+    WGPUStencilFaceState face = WGPU_STENCIL_FACE_STATE_INIT;
+    uint32_t key = (uint32_t)has_ds | wmask << 1 | (uint32_t)dw << 5 | (uint32_t)sten << 6
+                 | (uint32_t)(s_active ? s_msaa : 1) << 8;
+    int i;
+    for (i = 0; i < s_nclr_pipes; i++)
+        if (s_clr_pipes[i].key == key) return s_clr_pipes[i].p;
+    if (s_nclr_pipes == 64) return NULL;
+    if (!s_clr_mod) {
+        s_clr_mod = wgsl_module(s_clr_wgsl, (uint32_t)(sizeof s_clr_wgsl - 1), "clear_rect");
+        s_clr_pl = wgpuDeviceCreatePipelineLayout(s_dev, &(WGPUPipelineLayoutDescriptor){
+            .bindGroupLayoutCount = 1, .bindGroupLayouts = &s_bgl0 });
+    }
+    pd.layout = s_clr_pl;
+    pd.vertex.module = s_clr_mod; pd.vertex.entryPoint = SV("vs");
+    pd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+    pd.primitive.cullMode = WGPUCullMode_None;
+    if (s_active) pd.multisample.count = (uint32_t)s_msaa;
+    ct.format = WGPUTextureFormat_BGRA8Unorm;
+    ct.writeMask = wmask;
+    fs.module = s_clr_mod; fs.entryPoint = SV("fs");
+    fs.targetCount = 1; fs.targets = &ct;
+    pd.fragment = &fs;
+    if (has_ds) {
+        ds.format = s_ds_fmt;
+        ds.depthWriteEnabled = dw ? WGPUOptionalBool_True : WGPUOptionalBool_False;
+        ds.depthCompare = WGPUCompareFunction_Always;
+        face.compare = WGPUCompareFunction_Always;
+        face.failOp = face.depthFailOp = WGPUStencilOperation_Keep;
+        face.passOp = sten ? WGPUStencilOperation_Replace : WGPUStencilOperation_Keep;
+        ds.stencilFront = ds.stencilBack = face;
+        ds.stencilReadMask = 0xFF;
+        ds.stencilWriteMask = sten ? 0xFF : 0;
+        pd.depthStencil = &ds;
+    }
+    s_clr_pipes[s_nclr_pipes].key = key;
+    s_clr_pipes[s_nclr_pipes].p = wgpuDeviceCreateRenderPipeline(s_dev, &pd);
+    return s_clr_pipes[s_nclr_pipes++].p;
+}
+
+static void clear_rect(const GpDraw *d, const Slots *sl)
+{
+    Res *rt, *ds;
+    WGPURenderPipeline pipe;
+    uint32_t f = d->clr_flags, offs[4] = { 0, 0, 0, 0 }, wmask;
+    int has_ds, dw, sten;
+    if (!sl->xf || !(rt = bind_target(d, &ds))) { s_st.skipped++; return; }
+    has_ds = ds != NULL;
+    wmask = ((f & 0x10) ? WGPUColorWriteMask_Red : 0) | ((f & 0x20) ? WGPUColorWriteMask_Green : 0)
+          | ((f & 0x40) ? WGPUColorWriteMask_Blue : 0) | ((f & 0x80) ? WGPUColorWriteMask_Alpha : 0);
+    dw = has_ds && (f & 1); sten = has_ds && (f & 2);
+    if (!(pipe = clear_pipeline(has_ds, wmask, dw, sten))) { s_st.skipped++; return; }
+    wgpuRenderPassEncoderSetPipeline(s_pass, pipe);
+    offs[0] = sl->xf;
+    wgpuRenderPassEncoderSetBindGroup(s_pass, 0, s_group0, 4, offs);
+    if (sten) wgpuRenderPassEncoderSetStencilReference(s_pass, d->clr_zs & 0xFF);
+    set_scissor(d, rt);
+    wgpuRenderPassEncoderDraw(s_pass, 3, 1, 0, 0);
+    s_st.clears++;
+}
+
+static void do_clear(const GpDraw *d, const Slots *sl)
 {
     Res *rt = res(d->target), *ds;
     float c[4], z;
-    uint32_t s, zkey;
+    uint32_t s, zkey, rx, ry, rw, rh;
     if (!rt || rt->kind != R_RT) return;
+    if (draw_rect(d, rt, &rx, &ry, &rw, &rh)) { clear_rect(d, sl); return; }
     ds = depth_for(d, rt, &zkey);
     c[0] = ((d->clr_argb >> 16) & 0xFF) / 255.0f; c[1] = ((d->clr_argb >> 8) & 0xFF) / 255.0f;
     c[2] = (d->clr_argb & 0xFF) / 255.0f;         c[3] = (d->clr_argb >> 24) / 255.0f;
@@ -1030,6 +1174,7 @@ static void do_draw(const GpDraw *d, const Slots *sl)
         bc[0] = bc[1] = bc[2] = bc[3];
     wgpuRenderPassEncoderSetBlendConstant(s_pass, &(WGPUColor){ bc[0], bc[1], bc[2], bc[3] });
     if (ds) wgpuRenderPassEncoderSetStencilReference(s_pass, d->st.stencil_ref & 0xFF);
+    set_scissor(d, rt);
     wgpuRenderPassEncoderSetVertexBuffer(s_pass, 0, s_vb.b, d->vtx_off, (uint64_t)d->vtx_count * d->vtx_stride);
     if (d->idx_count) {
         wgpuRenderPassEncoderSetIndexBuffer(s_pass, s_ib.b, WGPUIndexFormat_Uint32,
@@ -1569,7 +1714,7 @@ void gp_wgpu_consume(const GpFrame *f)
     s_cur_target = s_cur_zeta = ~0u;
     for (i = 0; i < f->draw_count; i++) {
         const GpDraw *d = &f->draws[i];
-        if (d->kind == GP_CLEAR) do_clear(d);
+        if (d->kind == GP_CLEAR) do_clear(d, &s_slots[i]);
         else if (d->kind == GP_DRAW) do_draw(d, &s_slots[i]);
         else s_st.skipped++;
     }

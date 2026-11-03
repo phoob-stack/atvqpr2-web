@@ -15,7 +15,9 @@
  *     binding 0..3  texture_2d<f32> or texture_cube<f32>, stage 0..3   t0..t3
  *     binding 4..7  sampler, stage 0..3                                s0..s3
  *
- * Vertex inputs: program VS 16 x float32x4 at locations 0..15 (stride 256);
+ * Vertex inputs: program VS float32x4 at location k for each input register
+ * k it reads (gpu_vs_input_mask), packed in register order (stride 16 x the
+ * count; captures from before the packing carry all 16, stride 256);
  * pass-through 8 x float32x4 (GpXfVertex, stride 128); TVERT float32x4,
  * unorm8x4 (BGRA bytes), float32x2 (GpTVertex, stride 28).
  *
@@ -49,8 +51,8 @@ _Static_assert(sizeof(GpWgslSmp) == 96, "GpWgslSmp layout");
 int gpu_gen_vs_program_wgsl(const uint32_t (*prog)[4], uint32_t len, uint32_t flags,
                             char *out, size_t cap);
 /* The input registers a vertex program reads (bit a: v<a>; bit 0 always).
- * The program VS declares only these, and the browser's vertex arena packs
- * just these, in location order (16 bytes each). */
+ * The program VS declares only these, and the vertex arena packs just
+ * these, in location order (16 bytes each), for every back end. */
 uint32_t gpu_vs_input_mask(const uint32_t (*prog)[4], uint32_t len);
 int gpu_gen_vs_passthrough_wgsl(uint32_t flags, char *out, size_t cap);
 int gpu_gen_vs_tvert_wgsl(char *out, size_t cap);

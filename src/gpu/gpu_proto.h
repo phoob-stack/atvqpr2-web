@@ -87,7 +87,10 @@ typedef struct {
 
 /* ---- vertices ------------------------------------------------------------ */
 
-typedef struct { float v[16][4]; } GpProgVertex;      /* program input registers */
+/* Program vertices in the arena: the input registers the program reads
+ * (GP_SHADER_VS b, nv2a_vsh_input_mask), 16 bytes each, in register order;
+ * vtx_stride = 16 x their count. GpProgVertex is all 16 (the vertex probe). */
+typedef struct { float v[16][4]; } GpProgVertex;
 typedef struct {                                       /* Nv2aVshOutput */
     float pos[4], d0[4], d1[4], fog[4], tex[4][4];
 } GpXfVertex;
@@ -123,7 +126,7 @@ enum {
     GP_TEX_CREATE,      /* id, a=mip levels (0 = 1), b=w, c=h, d=GP_FMT_*, e=faces (1 or 6); payload:
                            per face its levels, each tightly packed */
     GP_TEX_FREE,        /* id */
-    GP_SHADER_VS,       /* id; payload: HLSL */
+    GP_SHADER_VS,       /* id, a=program length, b=input mask (the vertex layout); payload: HLSL */
     GP_SHADER_PS,       /* id; payload: HLSL */
     GP_RT_NO_WRITEBACK, /* unused (superseded by GpDraw.target_swz) */
     GP_SUB_CREATE       /* id, a=source render target id, b=w, c=h, d=x0 | y0<<16:
