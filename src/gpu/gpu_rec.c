@@ -550,7 +550,9 @@ static uint32_t smp_key(const Nv2aTexture *t, int border)
 static struct { uint64_t key; uint32_t id; } s_vs[SH_HASH], s_ps[SH_HASH];
 static char s_hlsl[256 * 1024];
 
-static uint32_t vs_get(const uint32_t (*prog)[4], uint32_t len)
+/* GP_SHADER_VS: a = program length, b = the input mask (the vertex layout:
+ * those inputs, packed in register order, 16 bytes each). */
+static uint32_t vs_lookup(const uint32_t (*prog)[4], uint32_t len, uint32_t mask)
 {
     uint64_t key = fnv(prog, (size_t)len * 16, FNV0) | 1;
     uint32_t slot = (uint32_t)key & (SH_HASH - 1), p;
@@ -561,14 +563,35 @@ static uint32_t vs_get(const uint32_t (*prog)[4], uint32_t len)
         if (!s_vs[i].key) {
             n = gpu_gen_vs_program(prog, len, s_hlsl, sizeof s_hlsl);
             if (n < 0) return 0;
+            if (mask != gpu_vs_input_mask(prog, len))       /* the two rules must agree */
+                fprintf(stderr, "  [GPUREC] VS input mask %04X from the executor, %04X here\n",
+                        mask, gpu_vs_input_mask(prog, len));
             s_vs[i].key = key;
             s_vs[i].id = s_next_id++;
-            q_cmd(GP_SHADER_VS, s_vs[i].id, len, 0, 0, 0, 0, s_hlsl, (uint32_t)n + 1);
+            q_cmd(GP_SHADER_VS, s_vs[i].id, len, mask, 0, 0, 0, s_hlsl, (uint32_t)n + 1);
             gp_wgsl_note_vs(s_vs[i].id, prog, len);
             return s_vs[i].id;
         }
     }
     return 0;
+}
+
+/* Runs of draws share a program: compare with the last one (a memcmp)
+ * before hashing it byte by byte. */
+static uint32_t vs_get(const uint32_t (*prog)[4], uint32_t len, uint32_t mask)
+{
+    static uint32_t last[256][4], last_len, last_id;
+    uint32_t id;
+    if (last_id && len == last_len && !memcmp(prog, last, (size_t)len * 16))
+        return last_id;
+    id = vs_lookup(prog, len, mask);
+    last_id = 0;
+    if (id && len <= 256) {
+        memcpy(last, prog, (size_t)len * 16);
+        last_len = len;
+        last_id = id;
+    }
+    return id;
 }
 
 static uint32_t ps_get(const GpPsKey *k)
@@ -638,12 +661,17 @@ static void probe_prepare(const Nv2aDraw *dd, const GpXfConsts *xc, uint32_t vs)
     s_probe.xc = *xc;
     memcpy(&s_probe.vc, dd->constants, sizeof s_probe.vc);
     for (i = 0; i < n; i++) {
-        uint32_t v = (uint32_t)(((uint64_t)i * dd->vertex_count) / n), k, st;
+        uint32_t v = (uint32_t)(((uint64_t)i * dd->vertex_count) / n), k, st, a;
         Nv2aVshOutput o;
         float *c = s_probe.cpu[i], x, y, w;
         s_probe.idx[i] = v;
-        memcpy(s_probe.in[i].v, dd->inputs[v], sizeof s_probe.in[i].v);
-        if (!nv2a_vsh_run((const float (*)[4])dd->inputs[v], &o))
+        /* The packed inputs back in their registers; the program reads no
+         * others, so those stay 0. */
+        memset(s_probe.in[i].v, 0, sizeof s_probe.in[i].v);
+        for (a = k = 0; a < 16; a++)
+            if (dd->input_mask & (1u << a))
+                memcpy(s_probe.in[i].v[a], dd->inputs[(size_t)v * dd->input_count + k++], 16);
+        if (!nv2a_vsh_run((const float (*)[4])s_probe.in[i].v, &o))
             return;
         /* transform_vertex(): +0 w draws at w = 1; oPos is in logical pixels. */
         if (o.pos[3] == 0.0f && !signbit(o.pos[3])) o.pos[3] = 1.0f;
@@ -756,11 +784,25 @@ static GpDraw *new_draw(uint32_t kind, const Nv2aSurface *s, const Nv2aRenderSta
     return d;
 }
 
+/* Consecutive draws mostly carry the same blocks (one surface, one combiner
+ * setup): a block equal to the last one of its size is shared, so the
+ * back end sees the same offset and skips the upload. */
 static uint32_t put_consts(const void *p, uint32_t bytes)
 {
-    void *dst = buf_take(&s_consts, bytes, 16);
-    if (!dst) return ~0u;
+    static struct { uint32_t bytes, off, epoch; } last[4];
+    uint32_t k;
+    void *dst;
+    for (k = 0; k < 4 && last[k].bytes && last[k].bytes != bytes; k++) ;
+    if (k < 4 && last[k].bytes == bytes && last[k].epoch == s_epoch
+        && !memcmp(s_consts.p + last[k].off, p, bytes))
+        return last[k].off;
+    if (!(dst = buf_take(&s_consts, bytes, 16))) return ~0u;
     memcpy(dst, p, bytes);
+    if (k < 4) {
+        last[k].bytes = bytes;
+        last[k].off = (uint32_t)((uint8_t *)dst - s_consts.p);
+        last[k].epoch = s_epoch;
+    }
     return (uint32_t)((uint8_t *)dst - s_consts.p);
 }
 
@@ -929,35 +971,20 @@ static void rec_draw2(const Nv2aSurface *s, const Nv2aRenderState *rs, const Nv2
 
     if (dd->program_len) {
         uint32_t *ix;
-        d->vs = vs_get(dd->program, dd->program_len);
+        d->vs = vs_get(dd->program, dd->program_len, dd->input_mask);
         d->vsc_off = put_vs_consts(dd->constants);
         if (d->vs && nv2a_check_active())
             probe_prepare(dd, &xc, d->vs);
-#if defined(__wasm__)
-        /* The browser: only the inputs the program reads, packed in location
-         * order (the WGSL VS declares just those, gpu_vs_input_mask). A race
-         * reads 3-6 of the 16, so the arena, the page's upload and the GPU
-         * read shrink 3-5x. The D3D11 and wgpu-native back ends keep the
-         * 16-input GpProgVertex. */
+        /* Only the inputs the program reads, packed in register order, as
+         * the executor fetched them (the VS declares just those: HLSL
+         * gpu_gen_vs_program, WGSL gpu_vs_input_mask). A race reads 3-6 of
+         * the 16, so the arena, the upload and the GPU's read shrink 3-5x. */
         {
-            uint32_t mask = dd->input_mask ? dd->input_mask : gpu_vs_input_mask(dd->program, dd->program_len);
-            uint8_t used[16];
-            uint32_t na = 0, a, k, n = dd->vertex_count;
-            float (*o)[4];
-            for (a = 0; a < 16; a++)
-                if (mask & (1u << a)) used[na++] = (uint8_t)a;
-            if (!(v = buf_take(&s_vtx, n * na * 16, 16))) return;
-            o = (float (*)[4])v;
-            for (k = 0; k < n; k++, o += na)
-                for (a = 0; a < na; a++)
-                    memcpy(o[a], dd->inputs[k][used[a]], 16);
-            d->vtx_stride = na * 16;
+            uint32_t bytes = dd->vertex_count * dd->input_count * 16;
+            if (!(v = buf_take(&s_vtx, bytes, 16))) return;
+            memcpy(v, dd->inputs, bytes);
+            d->vtx_stride = dd->input_count * 16;
         }
-#else
-        if (!(v = buf_take(&s_vtx, dd->vertex_count * sizeof(GpProgVertex), 16))) return;
-        memcpy(v, dd->inputs, dd->vertex_count * sizeof(GpProgVertex));
-        d->vtx_stride = sizeof(GpProgVertex);
-#endif
         d->vtx_off = (uint32_t)((uint8_t *)v - s_vtx.p);
         d->vtx_count = dd->vertex_count;
         if (!(ix = (uint32_t *)buf_take(&s_idx, dd->index_count * 4, 4))) return;

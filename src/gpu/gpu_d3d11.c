@@ -59,6 +59,7 @@ typedef struct {
     ID3DBlob *code;                 /* vertex shaders, while checking: for stream output */
     ID3D11GeometryShader *so_gs;
     uint32_t va, w, h, bpp, fmt, swz, pitch, dirty;
+    uint32_t mask;                  /* R_VS: the inputs it reads (vertex layout) */
     /* Display options only (s_active): */
     uint32_t sw, sh;                /* scaled size (R_RT, R_DS, R_SUB) */
     uint32_t bx, by;                /* R_SUB: scaled top-left in the source */
@@ -659,20 +660,25 @@ static void q_shader_vs(const GpCmd *c, const char *src)
     Res *r = res(c->id);
     ID3DBlob *b;
     D3D11_INPUT_ELEMENT_DESC ie[16];
-    int i;
+    int i, n;
     if (!r) return;
     res_release(r);
     if (!(b = compile(src, c->bytes - 1, "main", "vs_5_0", c->id))) return;
     ID3D11Device_CreateVertexShader(s_dev, ID3D10Blob_GetBufferPointer(b),
                                     ID3D10Blob_GetBufferSize(b), NULL, &r->vs);
+    /* The inputs the program reads, packed in register order (GP_SHADER_VS
+     * b; gpu_gen_vs_program declares just those). */
     memset(ie, 0, sizeof ie);
-    for (i = 0; i < 16; i++) {
-        ie[i].SemanticName = "ATTR";
-        ie[i].SemanticIndex = i;
-        ie[i].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-        ie[i].AlignedByteOffset = i * 16;
+    r->mask = c->b ? c->b : 0xFFFF;
+    for (i = n = 0; i < 16; i++) {
+        if (!(r->mask & (1u << i))) continue;
+        ie[n].SemanticName = "ATTR";
+        ie[n].SemanticIndex = i;
+        ie[n].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        ie[n].AlignedByteOffset = n * 16;
+        n++;
     }
-    ID3D11Device_CreateInputLayout(s_dev, ie, 16, ID3D10Blob_GetBufferPointer(b),
+    ID3D11Device_CreateInputLayout(s_dev, ie, n, ID3D10Blob_GetBufferPointer(b),
                                    ID3D10Blob_GetBufferSize(b), &r->layout);
     {
         static int keep = -1;
@@ -731,9 +737,35 @@ static void upload_cb(ID3D11Buffer *cb, const void *p, size_t n)
 }
 
 static UINT s_vb_pos, s_ib_pos;
-/* Constant-buffer upload cache: the VS file is 3 KB and shared by runs of
- * draws. Keyed on the arena offset within one consume call (s_seq). */
-static uint32_t s_seq, s_last_vsc = ~0u, s_last_vsc_seq = ~0u;
+/* Constant-buffer upload cache: runs of draws share their blocks (the
+ * recorder hands out one offset for equal consecutive blocks). Keyed on the
+ * arena offset, so forgotten at every consume call. */
+static uint32_t s_seq, s_last_vsc = ~0u, s_last_xfc = ~0u, s_last_psc = ~0u;
+
+/* The frame's vertex and index arenas, uploaded once per consume (one Map
+ * each, not one per draw); ~0 when they did not fit and draws upload their
+ * own. */
+static UINT s_frame_voff = ~0u, s_frame_ioff = ~0u;
+
+/* What the context has bound, so a run of draws sets only what changes.
+ * Forgotten (s_bound.valid = 0) whenever something else binds: clears, the
+ * stream-output probe, the window thread's blit (between consumes). */
+static struct {
+    int valid;
+    ID3D11InputLayout *lay;
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11ShaderResourceView *srv[4];
+    ID3D11SamplerState *smp[4];
+    ID3D11BlendState *bs;
+    float bf[4];
+    ID3D11DepthStencilState *ds;
+    UINT sref;
+    D3D11_RECT sc;
+    ID3D11Buffer *pcb;
+    UINT stride, voff;
+    int ib;
+} s_bound;
 
 /* Append to a dynamic ring; returns the byte offset, or ~0 if it cannot fit. */
 static UINT ring_put(ID3D11Buffer *buf, UINT cap, UINT *pos, const void *p, UINT n)
@@ -766,6 +798,7 @@ static Res *bind_target(const GpDraw *d, int *have_ds)
         D3D11_VIEWPORT vp;
         ID3D11ShaderResourceView *none[4] = { NULL, NULL, NULL, NULL };
         ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 4, none);
+        memset(s_bound.srv, 0, sizeof s_bound.srv);
         memset(&vp, 0, sizeof vp);
         if (s_active) {
             ID3D11RenderTargetView *v = draw_rtv(rt);
@@ -829,6 +862,8 @@ static void do_clear(const GpDraw *d)
         st.stencil_fmask = st.stencil_wmask = 0xFF;
         st.stencil_fail = st.stencil_zfail = 0x1E00; st.stencil_zpass = 0x1E01;
         upload_cb(s_cb_xf, &cc, sizeof cc);
+        s_last_xfc = ~0u;
+        s_bound.valid = 0;
         ID3D11DeviceContext_VSSetConstantBuffers(s_ctx, 0, 1, &s_cb_xf);
         ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 0, 1, &s_cb_xf);
         ID3D11DeviceContext_IASetInputLayout(s_ctx, NULL);
@@ -914,43 +949,79 @@ static void do_draw(const GpFrame *f, const GpDraw *d)
         smp[st] = sampler(d->smp[st], d->border[st]);
     }
 
-    voff = ring_put(s_vb, s_vb_bytes, &s_vb_pos, f->vtx + d->vtx_off, d->vtx_count * d->vtx_stride);
+    if (s_frame_voff != ~0u)
+        voff = s_frame_voff + d->vtx_off;
+    else
+        voff = ring_put(s_vb, s_vb_bytes, &s_vb_pos, f->vtx + d->vtx_off, d->vtx_count * d->vtx_stride);
     if (voff == ~0u) { s_st.no_buf++; s_st.skipped++; return; }
     if (d->idx_count) {
-        ioff = ring_put(s_ib, s_ib_bytes, &s_ib_pos, f->idx + d->idx_off, d->idx_count * 4);
+        if (s_frame_ioff != ~0u)
+            ioff = s_frame_ioff + d->idx_off * 4;
+        else
+            ioff = ring_put(s_ib, s_ib_bytes, &s_ib_pos, f->idx + d->idx_off, d->idx_count * 4);
         if (ioff == ~0u) { s_st.no_buf++; s_st.skipped++; return; }
     }
 
-    if (d->xfc_off != ~0u)
+    if (!s_bound.valid) {
+        ID3D11Buffer *vcb[2] = { s_cb_xf, s_cb_vs };
+        void *none = (void *)~(uintptr_t)0;   /* matches no real object */
+        memset(&s_bound, 0, sizeof s_bound);
+        s_bound.valid = 1;
+        s_bound.lay = none; s_bound.vs = none; s_bound.ps = none;
+        s_bound.bs = none; s_bound.ds = none; s_bound.pcb = none;
+        s_bound.sc.left = -1;
+        s_bound.stride = s_bound.voff = ~0u;
+        s_bound.sref = ~0u;
+        s_bound.ib = -1;
+        ID3D11DeviceContext_VSSetConstantBuffers(s_ctx, 0, 2, vcb);
+        ID3D11DeviceContext_IASetPrimitiveTopology(s_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D11DeviceContext_RSSetState(s_ctx, s_rs);
+        ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 4, s_bound.srv);
+        ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 4, s_bound.smp);
+    }
+    if (d->xfc_off != ~0u && d->xfc_off != s_last_xfc) {
         upload_cb(s_cb_xf, f->consts + d->xfc_off,
                   d->vs == GP_VS_TVERT ? sizeof(GpTvConsts) : sizeof(GpXfConsts));
-    if (d->vsc_off != ~0u) {
-        if (s_last_vsc != d->vsc_off || s_last_vsc_seq != s_seq) {
-            upload_cb(s_cb_vs, f->consts + d->vsc_off, sizeof(GpVsConsts));
-            s_last_vsc = d->vsc_off; s_last_vsc_seq = s_seq;
-        }
+        s_last_xfc = d->xfc_off;
     }
-    if (d->psc_off != ~0u)
+    if (d->vsc_off != ~0u && d->vsc_off != s_last_vsc) {
+        upload_cb(s_cb_vs, f->consts + d->vsc_off, sizeof(GpVsConsts));
+        s_last_vsc = d->vsc_off;
+    }
+    if (d->psc_off != ~0u && d->psc_off != s_last_psc) {
         upload_cb(s_cb_ps, f->consts + d->psc_off, sizeof(GpPsConsts));
+        s_last_psc = d->psc_off;
+    }
 
     {
-        ID3D11Buffer *vcb[2] = { s_cb_xf, s_cb_vs };
         ID3D11Buffer *pcb = d->ps == GP_PS_TVERT ? s_cb_xf : s_cb_ps;
-        ID3D11DeviceContext_VSSetConstantBuffers(s_ctx, 0, 2, vcb);
-        ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 0, 1, &pcb);
+        if (pcb != s_bound.pcb) {
+            ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 0, 1, &pcb);
+            s_bound.pcb = pcb;
+        }
     }
-    ID3D11DeviceContext_IASetInputLayout(s_ctx, lay);
-    ID3D11DeviceContext_IASetPrimitiveTopology(s_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ID3D11DeviceContext_IASetVertexBuffers(s_ctx, 0, 1, &s_vb, &stride, &voff);
-    ID3D11DeviceContext_VSSetShader(s_ctx, vs, NULL, 0);
-    ID3D11DeviceContext_PSSetShader(s_ctx, ps, NULL, 0);
-    ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 4, srv);
-    ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 4, smp);
-    ID3D11DeviceContext_RSSetState(s_ctx, s_rs);
+    if (lay != s_bound.lay) { ID3D11DeviceContext_IASetInputLayout(s_ctx, lay); s_bound.lay = lay; }
+    if (stride != s_bound.stride || voff != s_bound.voff) {
+        ID3D11DeviceContext_IASetVertexBuffers(s_ctx, 0, 1, &s_vb, &stride, &voff);
+        s_bound.stride = stride; s_bound.voff = voff;
+    }
+    if (vs != s_bound.vs) { ID3D11DeviceContext_VSSetShader(s_ctx, vs, NULL, 0); s_bound.vs = vs; }
+    if (ps != s_bound.ps) { ID3D11DeviceContext_PSSetShader(s_ctx, ps, NULL, 0); s_bound.ps = ps; }
+    if (memcmp(srv, s_bound.srv, sizeof srv)) {
+        ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 4, srv);
+        memcpy(s_bound.srv, srv, sizeof srv);
+    }
+    if (memcmp(smp, s_bound.smp, sizeof smp)) {
+        ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 4, smp);
+        memcpy(s_bound.smp, smp, sizeof smp);
+    }
     {
         D3D11_RECT rc;
         draw_rect(d, rt, &rc);
-        ID3D11DeviceContext_RSSetScissorRects(s_ctx, 1, &rc);
+        if (memcmp(&rc, &s_bound.sc, sizeof rc)) {
+            ID3D11DeviceContext_RSSetScissorRects(s_ctx, 1, &rc);
+            s_bound.sc = rc;
+        }
     }
 
     bf[0] = ((d->st.blend_color >> 16) & 0xFF) / 255.0f;
@@ -960,12 +1031,31 @@ static void do_draw(const GpFrame *f, const GpDraw *d)
     if (d->st.blend_src == 0x8003 || d->st.blend_src == 0x8004
      || d->st.blend_dst == 0x8003 || d->st.blend_dst == 0x8004)
         bf[0] = bf[1] = bf[2] = bf[3];
-    ID3D11DeviceContext_OMSetBlendState(s_ctx, blend_state(&d->st), bf, 0xFFFFFFFF);
-    ID3D11DeviceContext_OMSetDepthStencilState(s_ctx, depth_state(&d->st, have_ds),
-                                               d->st.stencil_ref & 0xFF);
+    {
+        ID3D11BlendState *bs = blend_state(&d->st);
+        ID3D11DepthStencilState *dss = depth_state(&d->st, have_ds);
+        UINT ref = d->st.stencil_ref & 0xFF;
+        if (bs != s_bound.bs || memcmp(bf, s_bound.bf, sizeof bf)) {
+            ID3D11DeviceContext_OMSetBlendState(s_ctx, bs, bf, 0xFFFFFFFF);
+            s_bound.bs = bs; memcpy(s_bound.bf, bf, sizeof bf);
+        }
+        if (dss != s_bound.ds || ref != s_bound.sref) {
+            ID3D11DeviceContext_OMSetDepthStencilState(s_ctx, dss, ref);
+            s_bound.ds = dss; s_bound.sref = ref;
+        }
+    }
     if (d->idx_count) {
-        ID3D11DeviceContext_IASetIndexBuffer(s_ctx, s_ib, DXGI_FORMAT_R32_UINT, ioff);
-        ID3D11DeviceContext_DrawIndexed(s_ctx, d->idx_count, 0, 0);
+        if (s_frame_ioff != ~0u) {
+            if (s_bound.ib != 0) {
+                ID3D11DeviceContext_IASetIndexBuffer(s_ctx, s_ib, DXGI_FORMAT_R32_UINT, 0);
+                s_bound.ib = 0;
+            }
+            ID3D11DeviceContext_DrawIndexed(s_ctx, d->idx_count, ioff / 4, 0);
+        } else {
+            ID3D11DeviceContext_IASetIndexBuffer(s_ctx, s_ib, DXGI_FORMAT_R32_UINT, ioff);
+            s_bound.ib = -1;
+            ID3D11DeviceContext_DrawIndexed(s_ctx, d->idx_count, 0, 0);
+        }
         s_st.tris += d->idx_count / 3;
     } else {
         ID3D11DeviceContext_Draw(s_ctx, d->vtx_count, 0);
@@ -1139,6 +1229,7 @@ static void blit(ID3D11ShaderResourceView *src, uint32_t srcw, uint32_t srch,
     ID3D11DeviceContext_Draw(s_ctx, 3, 0);
     ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &none);
     s_cur_target = s_cur_zeta = 0;            /* the next draw binds its target again */
+    s_bound.valid = 0;                        /* and the rest of its state */
 }
 
 static void resolve(Res *r)
@@ -1395,9 +1486,14 @@ static void consume_draws(const GpFrame *f, int sync)
     uint32_t i;
     s_cur_target = s_cur_zeta = 0;
     s_seq++;
+    s_bound.valid = 0;                     /* the window thread may have bound its blit */
+    s_last_vsc = s_last_xfc = s_last_psc = ~0u;   /* offsets are per frame (and per sync) */
     if (s_active && (s_want_sx != s_sx || s_want_sy != s_sy))
         rescale(s_want_sx, s_want_sy);
     drain_queue(f);
+    /* The frame's vertices and indices in one Map each. */
+    s_frame_voff = f->vtx_bytes ? ring_put(s_vb, s_vb_bytes, &s_vb_pos, f->vtx, f->vtx_bytes) : ~0u;
+    s_frame_ioff = f->idx_count ? ring_put(s_ib, s_ib_bytes, &s_ib_pos, f->idx, f->idx_count * 4) : ~0u;
     for (i = 0; i < f->draw_count; i++) {
         const GpDraw *d = &f->draws[i];
         if (d->kind == GP_CLEAR) do_clear(d);
@@ -1481,11 +1577,20 @@ uint32_t gp_d3d11_vs_probe(uint32_t vs, const GpXfConsts *xc, const GpVsConsts *
         if (shown++ < 3) fprintf(stderr, "  [GPU11] stream-output GS for shader %u failed\n", vs);
         return 0;
     }
-    voff = ring_put(s_vb, s_vb_bytes, &s_vb_pos, in, n * vstride);
+    {   /* the layout's form: the inputs the program reads, packed */
+        static float pk[GP_PROBE_MAX * 16][4];
+        uint32_t i, a, k = 0;
+        for (i = 0; i < n; i++)
+            for (a = 0; a < 16; a++)
+                if (r->mask & (1u << a)) memcpy(pk[k++], in[i].v[a], 16);
+        vstride = (k / n) * 16;
+        voff = ring_put(s_vb, s_vb_bytes, &s_vb_pos, pk, k * 16);
+    }
     if (voff == ~0u) return 0;
     upload_cb(s_cb_xf, xc, sizeof *xc);
     upload_cb(s_cb_vs, vc, sizeof *vc);
-    s_last_vsc = ~0u;                            /* the VS file no longer holds a draw's */
+    s_last_vsc = s_last_xfc = ~0u;               /* the cbuffers no longer hold a draw's */
+    s_bound.valid = 0;
     vcb[0] = s_cb_xf; vcb[1] = s_cb_vs;
     ID3D11DeviceContext_VSSetConstantBuffers(s_ctx, 0, 2, vcb);
     ID3D11DeviceContext_IASetInputLayout(s_ctx, r->layout);

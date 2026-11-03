@@ -16,7 +16,13 @@ typedef struct {
     uint32_t rc_seen, textured;
 } GpPsKey;
 
-/* Return the HLSL length, or -1 if `cap` was too small. */
+/* The input registers a vertex program reads (bit a: v<a>; bit 0 always),
+ * nv2a_vsh_input_mask()'s rule (gpu_shadergen_wgsl.c). */
+uint32_t gpu_vs_input_mask(const uint32_t (*prog)[4], uint32_t len);
+
+/* Return the HLSL length, or -1 if `cap` was too small. The program VS
+ * declares only the inputs it reads, ATTRk for register k (input layout:
+ * those, packed in register order). */
 int gpu_gen_vs_program(const uint32_t (*prog)[4], uint32_t len, char *out, size_t cap);
 int gpu_gen_vs_passthrough(char *out, size_t cap);
 int gpu_gen_ps(const GpPsKey *k, char *out, size_t cap);

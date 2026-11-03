@@ -139,15 +139,25 @@ static void vsh_write(Sb *b, const char *dst, uint32_t mask, const char *src)
 int gpu_gen_vs_program(const uint32_t (*prog)[4], uint32_t len, char *out, size_t cap)
 {
     Sb b = { out, 0, cap, 0 };
-    uint32_t s;
+    uint32_t s, mask = gpu_vs_input_mask(prog, len);
+    int k;
 
     emit(&b, "%s", k_xf_cb);
     emit(&b, "cbuffer VSC : register(b1) { float4 c[192]; };\n");
-    emit(&b, "struct VI { float4 v[16] : ATTR; };\n");
+    /* Only the inputs the program reads (ATTRk = register k): the vertex
+     * buffer packs just those, in register order (gpu_rec.c). */
+    emit(&b, "struct VI {");
+    for (k = 0; k < 16; k++)
+        if (mask & (1u << k))
+            emit(&b, " float4 v%d : ATTR%d;", k, k);
+    emit(&b, " };\n");
     emit(&b, "int cidx(int i) { return (i < 0 || i >= 192) ? 0 : i; }\n");
-    emit(&b, "VO main(VI vin) {\n"
-             "    float4 v[16] = vin.v;\n"
-             "    float4 R[12]; [unroll] for (int k = 0; k < 12; k++) R[k] = 0;\n"
+    emit(&b, "VO main(VI vin) {\n    float4 v[16];\n");
+    for (k = 0; k < 16; k++) {
+        if (mask & (1u << k)) emit(&b, "    v[%d] = vin.v%d;\n", k, k);
+        else emit(&b, "    v[%d] = 0;\n", k);
+    }
+    emit(&b, "    float4 R[12]; [unroll] for (int k = 0; k < 12; k++) R[k] = 0;\n"
              "    float4 opos = 0; int a0 = 0;\n"
              "    float4 o[13]; [unroll] for (int k2 = 0; k2 < 13; k2++) o[k2] = 0;\n"
              "    o[3].w = 1; o[4].w = 1;\n"
