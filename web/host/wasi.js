@@ -72,7 +72,10 @@ export class Wasi {
   // ---- the imports ---------------------------------------------------------
   imports() {
     const self = this;
+    // wasm i32 arguments arrive signed; pointers above 2 GB (the runtime's
+    // data and heap sit at 0x84100000+) must be read as unsigned.
     const wrap = (name, fn) => (...a) => {
+      for (let k = 0; k < a.length; k++) if (typeof a[k] === 'number') a[k] >>>= 0;
       try {
         const r = fn.apply(self, a);
         if (self.trace) self.onLog(2, `[wasi] ${name}(${a.join(',')}) = ${r ?? 0}`);

@@ -1,6 +1,6 @@
 // Local dev server for the browser build. Node only, no packages.
 //
-//   node web/host/serve.mjs [--game <folder>] [--port 8460] [--log <file>]
+//   node web/host/serve.mjs [--game <folder>] [--port 8460] [--log <file>] [--overlay <dir>]
 //
 // Binds 127.0.0.1 only. Sends COOP/COEP (+CORP) so the page is cross-origin
 // isolated (SharedArrayBuffer, shared WebAssembly.Memory). Serves:
@@ -24,6 +24,9 @@ const GAME = resolve(arg('--game', join(ROOT, 'game/atv2')));
 const PORT = Number(arg('--port', 8460));
 const LOG = resolve(arg('--log', join(ROOT, 'build-wasm/web.log')));
 const MOUNTS = { '/host/': join(ROOT, 'web/host'), '/gpu/': join(ROOT, 'web/gpu'), '/wasm/': join(ROOT, 'build-wasm') };
+// --overlay <dir>: files there shadow /host/* (try another worker's host JS
+// without copying it into the tree).
+const OVERLAY = arg('--overlay') ? resolve(arg('--overlay')) : null;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript',
   '.json': 'application/json', '.wasm': 'application/wasm', '.wgsl': 'text/plain' };
 const ISOLATION = { 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp',
@@ -87,6 +90,10 @@ const srv = createServer((req, res) => {
     const file = resolve(GAME, '.' + path.slice(5));
     if (!inside(GAME, file)) { res.writeHead(403, ISOLATION); res.end(); return; }
     return sendFile(req, res, file);
+  }
+  if (OVERLAY && path.startsWith('/host/')) {
+    const file = resolve(OVERLAY, '.' + path.slice(5));
+    try { if (inside(OVERLAY, file) && statSync(file).isFile()) return sendFile(req, res, file); } catch { /* not overlaid */ }
   }
   for (const [prefix, dir] of Object.entries(MOUNTS)) {
     if (!path.startsWith(prefix)) continue;

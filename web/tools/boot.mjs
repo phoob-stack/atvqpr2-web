@@ -1,7 +1,7 @@
 // Boot the browser build in headless Edge and report how far it gets.
 //
 //   node web/tools/boot.mjs [seconds=60] [--env K=V,K=V] [--keys 20:13,25:90] [--out dir]
-//        [--game <folder>] [--wasm <url>] [--args a,b]   (tests: another module/folder)
+//        [--game <folder>] [--wasm <url>] [--args a,b] [--overlay <dir>] [--audio]
 //
 // Starts web/host/serve.mjs (127.0.0.1, a free port), opens the page, polls
 // the boot stage and the status line, presses keys at the given seconds
@@ -24,9 +24,9 @@ const keys = (opt('--keys', '') || '').split(',').filter(Boolean).map((s) => s.s
 mkdirSync(out, { recursive: true });
 
 const port = 8600 + Math.floor(Math.random() * 300);
-const game = opt('--game'), wasm = opt('--wasm'), args = opt('--args');
+const game = opt('--game'), wasm = opt('--wasm'), args = opt('--args'), overlay = opt('--overlay');
 const srv = spawn(process.execPath, [join(ROOT, 'web/host/serve.mjs'), '--port', String(port), '--log', join(out, 'serve-web.log'),
-  ...(game ? ['--game', game] : [])],
+  ...(game ? ['--game', game] : []), ...(overlay ? ['--overlay', overlay] : [])],
   { stdio: ['ignore', 'pipe', 'inherit'] });
 await new Promise((r) => srv.stdout.once('data', r));
 const qs = new URLSearchParams();
@@ -43,6 +43,7 @@ try {
     for (const [at, vk] of keys) {
       if (at === s) { await b.eval(`atv.key(${vk}, 1)`); setTimeout(() => b.eval(`atv.key(${vk}, 0)`).catch(() => {}), 150); }
     }
+    if (s === 1 && argv.includes('--audio')) console.log(`audio: ${await b.eval('atv.startAudio().then(() => atv.state.audio, (e) => String(e))')}`);
     const st = await b.eval(`({ status: document.getElementById('status').textContent, exit: atv.state.exit, err: atv.state.error ?? null })`);
     if (st.status !== last) { console.log(`${String(s + 1).padStart(4)}s ${st.status}`); last = st.status; }
     if (st.exit !== null || st.err) break;

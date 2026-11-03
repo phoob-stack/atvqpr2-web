@@ -1,7 +1,7 @@
 // The browser host page: loads the game module, starts the guest main thread
 // on a worker (game-worker.js), and owns display, input and audio.
 //
-//   index.html?env=K=V,K=V   extra/overriding environment variables
+//   index.html?env=K=V,K=V   extra/overriding environment variables (-K unsets K)
 //             &trace=1        log every WASI call
 //             &wasm=<name|url> module (default atv2.wasm, from build-wasm/)
 //             &args=a,b       argv[1..]
@@ -85,6 +85,7 @@ async function boot() {
   const args = ['atv2', ...(q.get('args') ?? '').split(',').filter(Boolean)];
   const env = { ...DEFAULT_ENV };
   for (const kv of (q.get('env') ?? '').split(',').filter(Boolean)) {
+    if (kv[0] === '-') { delete env[kv.slice(1)]; continue; }   // -NAME unsets
     const i = kv.indexOf('=');
     env[i < 0 ? kv : kv.slice(0, i)] = i < 0 ? '1' : kv.slice(i + 1);
   }
@@ -149,7 +150,7 @@ ${m.stack ?? ''}`, 'err'); };
   let presenter = null, input = null, hostPtr = 0;
   (async () => {
     const w = new Int32Array(io);
-    while (!(hostPtr = Atomics.load(w, IO_HOST_PTR))) await Atomics.waitAsync(w, IO_HOST_PTR, 0).value;
+    while (!(hostPtr = Atomics.load(w, IO_HOST_PTR) >>> 0)) await Atomics.waitAsync(w, IO_HOST_PTR, 0).value;
     hostView(memory, hostPtr);
     input = new Input(memory, hostPtr);
     presenter = new Presenter({ device: gpu.device, features: gpu.features, canvas: $('screen'),
@@ -170,10 +171,14 @@ ${m.stack ?? ''}`, 'err'); };
     const node = new AudioWorkletNode(audioCtx, 'atv2-ring', { numberOfInputs: 0, outputChannelCount: [2],
       processorOptions: { buffer: memory.buffer, ring } });
     node.connect(audioCtx.destination);
-    await audioCtx.resume();
+    // resume() only settles after a user gesture; do not wait for it.
+    audioCtx.resume().catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
     state.audio = `${audioCtx.state} ${audioCtx.sampleRate} Hz`;
+    audioCtx.onstatechange = () => { state.audio = `${audioCtx.state} ${audioCtx.sampleRate} Hz`; };
     log(`[page] audio: ${state.audio}`);
   };
+  window.atv.startAudio = startAudio;
   addEventListener('pointerdown', startAudio);
   addEventListener('keydown', startAudio);
 
