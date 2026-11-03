@@ -1435,6 +1435,7 @@ static void rec_flip(void)
     s_epoch++;
     s_frame++;
     { extern void atv2_freeride_frame(void); atv2_freeride_frame(); }
+    { extern volatile int atv2_roam_on; extern void atv2_roam_flip(void); if (atv2_roam_on) atv2_roam_flip(); }
     { extern void atv2_control_frame(unsigned); atv2_control_frame((unsigned)f.draw_count); }
 }
 
