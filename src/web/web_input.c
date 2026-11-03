@@ -101,3 +101,14 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     pState->dwPacketNumber = ++packet;
     return ERROR_SUCCESS;
 }
+
+/* Rumble from the emulated pad (ohci.c): the page plays it on the Gamepad's
+ * vibrationActuator when it has one. */
+DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
+{
+    if (dwPort != 0 || !pVibration)
+        return ERROR_DEVICE_NOT_CONNECTED;
+    __atomic_store_n(&web_host()->pad_rumble, (uint32_t)pVibration->wLeftMotorSpeed << 16 |
+                     pVibration->wRightMotorSpeed, __ATOMIC_SEQ_CST);
+    return ERROR_SUCCESS;
+}

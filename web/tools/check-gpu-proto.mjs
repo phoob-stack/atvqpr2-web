@@ -20,7 +20,7 @@ let c = '#include <stdio.h>\n#include <stddef.h>\n#include "gpu_shadergen_wgsl.h
 for (const k of Object.keys(table)) {
   let expr;
   if (k.startsWith('sizeof(')) expr = k;
-  else if (k === 'GP_WG_LAYOUT') expr = 'GP_WG_LAYOUT';
+  else if (!k.includes('.')) expr = k;              // a constant
   else { const [s, f] = k.split('.'); expr = `offsetof(${s}, ${f})`; }
   c += `  printf("%s %u\\n", "${k}", (unsigned)(${expr}));\n`;
 }

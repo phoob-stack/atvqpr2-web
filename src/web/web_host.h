@@ -67,7 +67,11 @@ typedef struct WebHost {
      * audio_ring: WebAudioRing * (web_audio.c), 0 until xa2_init. */
     volatile uint32_t audio_ring;
 
-    uint32_t reserved[8];
+    /* rumble (game -> page): left motor << 16 | right motor, 0..65535 each;
+     * the page plays it on the Gamepad's vibrationActuator. */
+    volatile uint32_t pad_rumble;
+
+    uint32_t reserved[7];
     volatile uint8_t keys[256];
 } WebHost;
 

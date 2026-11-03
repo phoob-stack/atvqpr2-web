@@ -81,6 +81,12 @@ export class Input {
       i[at.pad_thumb + 2] = ax(2); i[at.pad_thumb + 3] = ax(3, -1);
       i[at.pad_connected] = 1;
       this.padName = g.id;
+      const rb = i[at.pad_rumble] >>> 0;
+      if (rb !== this.rumble && g.vibrationActuator) {
+        this.rumble = rb;
+        g.vibrationActuator.playEffect('dual-rumble', { duration: rb ? 1000 : 0,
+          strongMagnitude: (rb >>> 16) / 65535, weakMagnitude: (rb & 0xffff) / 65535 }).catch(() => {});
+      }
     }
     Atomics.add(i, at.pad_seq, 1);                 // even: done
   }

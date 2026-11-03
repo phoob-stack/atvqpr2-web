@@ -7,7 +7,7 @@ export const UNIFORM_SLOTS = [
   { binding: 0, size: 112, stride: 256 },   // GpXfConsts (or GpTvConsts, 32)
   { binding: 1, size: 3072, stride: 3072 }, // GpVsConsts
   { binding: 2, size: 320, stride: 512 },   // GpPsConsts
-  { binding: 3, size: 80, stride: 256 },    // GpWgslSmp
+  { binding: 3, size: 96, stride: 256 },    // GpWgslSmp
 ];
 
 export function makeLayouts(device) {

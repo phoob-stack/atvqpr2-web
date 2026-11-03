@@ -12,8 +12,10 @@ export const GP_DRAW = 0, GP_CLEAR = 1;
 export const GP_VS_PASSTHRU = 1, GP_VS_TVERT = 2, GP_VS_FIRST_PROGRAM = 16;
 export const GP_PS_TVERT = 1, GP_PS_FIRST = 16;
 export const GP_TEX_RT = 0x80000000;
-export const GP_SMP_LINEAR = 0x1, GP_SMP_BORDER = 0x1000;
-export const GP_RT_CREATE = 1, GP_DS_CREATE = 2, GP_TEX_CREATE = 3, GP_TEX_FREE = 4,
+export const GP_SMP_LINEAR = 0x1, GP_SMP_BORDER = 0x1000, GP_SMP_FILTER = 0x2000;
+export const GP_SMP_MIN_OF = (k) => (k >>> 16) & 15, GP_SMP_MAG_OF = (k) => (k >>> 20) & 15;
+export const GP_SMP_BIAS_OF = (k) => ((k << 0) >> 24) * 16;   // signed, 1/256 levels
+export const GP_RT_CREATE = 1, GP_DS_CREATE = 2, GP_TEX_CREATE = 3, GP_TEX_FREE = 4, GP_SUB_CREATE = 8,
   GP_SHADER_VS = 5, GP_SHADER_PS = 6, GP_RT_NO_WRITEBACK = 7;
 export const GP_FMT_BGRA8 = 1, GP_FMT_BC1 = 2, GP_FMT_BC2 = 3, GP_FMT_BC3 = 4;
 
@@ -58,7 +60,7 @@ export const GpPsConsts = layout([
   ['f0', 32], ['f1', 32], ['fc0', 4], ['fc1', 4], ['fogc', 4],
   ['alpha_ref'], ['alpha_func'], ['alpha_on'], ['clip_mode'],
 ]);
-export const GpWgslSmp = layout([['border', 16], ['flags', 4]]);
+export const GpWgslSmp = layout([['border', 16], ['flags', 4], ['bias', 4]]);
 export const GpCapHeader = layout([
   ['magic'], ['version'], ['layout'], ['frame'],
   ['queue_bytes'], ['draw_count'], ['vtx_bytes'], ['idx_count'], ['const_bytes'],
@@ -79,6 +81,10 @@ export function probeTable() {
     for (const [f, o] of Object.entries(l.off)) t[`${s}.${f}`] = o;
   }
   t.GP_WG_LAYOUT = GP_WG_LAYOUT;
+  // Enum and flag values the page acts on.
+  Object.assign(t, { GP_RT_CREATE, GP_DS_CREATE, GP_TEX_CREATE, GP_TEX_FREE, GP_SHADER_VS, GP_SHADER_PS,
+    GP_SUB_CREATE, GP_SMP_LINEAR, GP_SMP_BORDER, GP_SMP_FILTER, GP_TEX_RT, GP_FMT_BGRA8, GP_FMT_BC1,
+    GP_FMT_BC2, GP_FMT_BC3, GP_VS_PASSTHRU, GP_VS_TVERT, GP_PS_TVERT });
   return t;
 }
 

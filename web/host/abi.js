@@ -19,7 +19,7 @@ export const Host = words([
   ['disp_seq'], ['disp_va'], ['disp_pitch'], ['disp_aa'], ['disp_w'], ['disp_h'], ['disp_cpu'],
   ['cpu_fb'], ['flips'], ['last_draws'], ['mem_offset'],
   ['pad_seq'], ['pad_connected'], ['pad_buttons'], ['pad_analog', 2], ['pad_thumb', 4],
-  ['audio_ring'], ['reserved', 8],
+  ['audio_ring'], ['pad_rumble'], ['reserved', 7],
 ]);
 export const HOST_KEYS_OFFSET = Host.size;          // uint8_t keys[256]
 export const HOST_SIZE = Host.size + 256;

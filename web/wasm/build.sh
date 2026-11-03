@@ -32,9 +32,15 @@ compile() {  # dir src -> prints OK/FAIL line
 }
 
 echo "== generated shards"
+# Stores go through MEMn_ST(addr, value) on wasm, where a device register is an
+# explicit check rather than a page fault (recomp_types.h, xboxrecomp
+# tools/recomp/store_form.py). The rewrite goes to build-wasm/gen-src; files
+# whose output is unchanged keep their timestamp. Headers still come from $GEN.
+if command -v py >/dev/null 2>&1; then PY="py -3"; else PY=python3; fi
+(cd "$RT" && $PY -m tools.recomp.store_form "$GEN" "$OUT/gen-src") || exit 1
 # SKIP_GEN=1 reuses the shard objects of the last run (they take most of the time).
 if [ "${SKIP_GEN:-0}" != 1 ]; then
-n=0; for f in "$GEN"/*.c; do compile "$OUT/gen" "$f" & n=$((n+1)); [ $((n % 8)) = 0 ] && wait; done; wait
+n=0; for f in "$OUT"/gen-src/*.c; do compile "$OUT/gen" "$f" & n=$((n+1)); [ $((n % 8)) = 0 ] && wait; done; wait
 fi
 echo "== runtime and game sources"
 # Skipped on purpose: the D3D8->D3D11 HLE (d3d8_*), SDL and Win32-only input/video
@@ -65,9 +71,10 @@ echo "== game module for the page (build-wasm/atv2.wasm, loaded by web/host)"
 # --allow-undefined is bring-up only: whatever is still missing becomes an
 # "env" import, and web/host stubs each one with a function that logs its name
 # when called -- so a run shows exactly which missing piece it reached first.
-# Memory and thread flags are placeholders for wasm-mem / wasm-threads to set.
 rm -f "$OUT/rt.a"; "$SDK/bin/llvm-ar" rcs "$OUT/rt.a" "$OUT"/rt/*.o
-$CC --target=wasm32-wasip1-threads -pthread "$OUT"/gen/*.o "$OUT/rt.a" -o "$OUT/atv2.wasm"   -Wl,--import-memory,--export-memory,--shared-memory,--max-memory=4294967296   -Wl,-z,stack-size=8388608 -Wl,--allow-undefined -Wl,--error-limit=0   -mllvm -wasm-enable-sjlj -lsetjmp -lwasi-emulated-mman -lwasi-emulated-signal -lwasi-emulated-process-clocks   2> "$OUT/link-web.err"
+# --global-base/--no-stack-first: wasm-mem's map (runtime data above the guest
+# windows, WASM-MEM.md); wasm-threads' link-flags.sh replaces this line.
+$CC --target=wasm32-wasip1-threads -pthread "$OUT"/gen/*.o "$OUT/rt.a" -o "$OUT/atv2.wasm"   -Wl,--import-memory,--export-memory,--shared-memory,--max-memory=4294967296   -Wl,--global-base=2215641088 -Wl,--no-stack-first -Wl,-z,stack-size=8388608   -Wl,--export=wasi_thread_start -Wl,--allow-undefined -Wl,--error-limit=0   -lsetjmp -lwasi-emulated-mman -lwasi-emulated-signal -lwasi-emulated-process-clocks   2> "$OUT/link-web.err"
 grep -v "^$" "$OUT/link-web.err" | head -20
 [ -f "$OUT/atv2.wasm" ] && ls -la "$OUT/atv2.wasm"
 
