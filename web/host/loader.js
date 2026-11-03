@@ -17,7 +17,10 @@
 //   otherwise         /data/ when the dev server serves a game folder, else
 //                     the imported files, else the import UI (resolves once
 //                     an import has finished)
-// /save (saves) is not touched by any of this.
+// /save (saves) is not touched by any of this. Saves never go into the game
+// files either: a game folder's own UDATA/TDATA/CACHE/TitleCache (older
+// native builds kept saves there) is left out of the import (SAVE_FOLDERS);
+// saves.js imports saves.
 
 export const GAME_DIR = 'atv2-game';           // the player's import
 export const CACHE_DIR = 'atv2-game-cache';    // vfs.js block cache of the dev server's /data/
@@ -30,6 +33,13 @@ const $ = (id) => document.getElementById(id);
 const MB = (n) => (n / 1048576).toFixed(0);
 const isMovie = (path) => /^movies\/[^/]+\.xmv$/i.test(path);
 const skipName = (name) => name.startsWith('.') || /^(thumbs\.db|desktop\.ini)$/i.test(name);
+/** Top-level folders of a game folder that hold saves or scratch, not game files. */
+export const SAVE_FOLDERS = /^(udata|tdata|cache|titlecache)$/i;
+const notSaves = (entries) => {
+  const keep = entries.filter((e) => !(e.path.includes('/') && SAVE_FOLDERS.test(e.path.split('/')[0])));
+  loaderState.savesLeftOut = entries.length - keep.length;
+  return keep;
+};
 
 /** What tests (web/tools/import.mjs) and the page read: phase, message, progress. */
 export const loaderState = { phase: 'idle', error: null, progress: null, result: null };
@@ -92,7 +102,7 @@ export async function scanHandle(dir) {
   if (!await hasXbe(dir)) {
     for await (const h of dir.values()) if (h.kind === 'directory' && await hasXbe(h)) { root = h; break; }
   }
-  return walkHandle(root, '', []);
+  return notSaves(await walkHandle(root, '', []));
 }
 
 /** <input webkitdirectory>'s files. Paths are '<picked>/<...>'; the game root
@@ -102,8 +112,8 @@ export function scanFileList(files) {
   const xbes = all.filter(({ rel }) => rel.split('/').at(-1).toLowerCase() === 'default.xbe')
     .sort((a, b) => a.rel.split('/').length - b.rel.split('/').length);
   const base = xbes.length ? xbes[0].rel.slice(0, -'default.xbe'.length) : '';
-  return all.filter(({ rel }) => rel.startsWith(base) && !rel.slice(base.length).split('/').some(skipName))
-    .map(({ f, rel }) => ({ path: rel.slice(base.length), size: f.size, file: async () => f }));
+  return notSaves(all.filter(({ rel }) => rel.startsWith(base) && !rel.slice(base.length).split('/').some(skipName))
+    .map(({ f, rel }) => ({ path: rel.slice(base.length), size: f.size, file: async () => f })));
 }
 
 // ---- validation --------------------------------------------------------------
@@ -227,6 +237,8 @@ function runImporter(log) {
         const sha = await validate(entries);
         const skipMovies = $('skipmovies').checked;
         log(`[loader] default.xbe is the retail USA build (SHA-256 ${sha.slice(0, 16)}…); ${entries.length} files`);
+        if (loaderState.savesLeftOut) log(`[loader] left out ${loaderState.savesLeftOut} files in the folder's UDATA/TDATA/CACHE: ` +
+          "saves are not game files (Saves > Import the Windows build's save folder brings saves in)");
         $('imp-msg').textContent = 'This is ATV Quad Power Racing 2 (USA). Copying the files into this browser…';
         loaderState.phase = 'importing';
         bar.hidden = false;
