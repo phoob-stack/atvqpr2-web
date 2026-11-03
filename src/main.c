@@ -144,17 +144,20 @@ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size);
  * the 3D attract demo: two thirds of the game thread in that spin. Hardware
  * clears it at once, so answer it at once, from a thread of its own.
  *
- * Not under RECOMP_FLIP_PACING, which holds the bit to make the title feel a
- * flip stall.
+ * A flip held for its vblank (RECOMP_FLIP_PACING) keeps the bit up: that is
+ * how the title feels the flip stall, so this leaves it to the ack loop then.
  *
- * Opt-in (RECOMP_FAST_KICK=1), because the slow answer is also the only
- * back-pressure the title gets: answered at once, the game ran ahead of the
- * executor, D3D's fence wait (0x196CF0) took its "GPU far behind" path --
- * patch a software method into the pushbuffer and sleep on the event the
- * GPU's interrupt for it sets -- and nothing here delivers that interrupt, so
- * the main thread slept for good in the attract demo. Turn this on once the
- * software-method interrupt is delivered. */
+ * Answered at once, the game runs ahead of the executor, and D3D's fence wait
+ * (0x196CF0) takes its "GPU far behind" path: it patches a software method
+ * (NO_OPERATION 5) into the pushbuffer and sleeps on the event the GPU's
+ * interrupt for it sets. The runtime delivers that interrupt
+ * (xbox_Nv2aSoftwareMethod), and D3D can only patch ahead of the executor
+ * with an exact DMA_GET, which the DMA walk publishes (RECOMP_PB_WALK=dma);
+ * under the segment scan GET lags a whole segment, D3D patches commands
+ * already run and the title sleeps for good. So RECOMP_FAST_KICK=1 selects
+ * the DMA walk too unless RECOMP_PB_WALK is set (see main). */
 extern volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset);
+extern int nv2a_pb_exec_flip_held(void);
 
 static DWORD WINAPI kick_ack_thread(LPVOID unused)
 {
@@ -164,7 +167,7 @@ static DWORD WINAPI kick_ack_thread(LPVOID unused)
     while (!(r = xbox_Nv2aRegPtr(0x100410)))
         Sleep(1);
     for (;;) {
-        if (*r & 0x10000) {
+        if ((*r & 0x10000) && !nv2a_pb_exec_flip_held()) {
             InterlockedAnd((volatile LONG *)r, ~0x10000L);
             idle = 0;
         } else if (++idle < 4096) {
@@ -190,11 +193,12 @@ static DWORD WINAPI stderr_flusher(LPVOID unused)
 static void kick_ack_start(void)
 {
     const char *e = getenv("RECOMP_FAST_KICK");
-    const char *pacing = getenv("RECOMP_FLIP_PACING");
-    if (!e || *e != '1' || (pacing && *pacing && *pacing != '0'))
+    if (!e || *e != '1')
         return;
     CloseHandle(CreateThread(NULL, 0, kick_ack_thread, NULL, 0, NULL));
-    fprintf(stderr, "[BOOT] fast kickoff ack on (RECOMP_FAST_KICK=1)\n");
+    fprintf(stderr, "[BOOT] fast kickoff ack on (RECOMP_FAST_KICK=1), pushbuffer"
+            " walk %s\n", getenv("RECOMP_PB_WALK") ? getenv("RECOMP_PB_WALK")
+                                                   : "segment");
 }
 #endif
 
@@ -341,7 +345,13 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
          * TODO: Implement mini x86-64 decoder for instruction skipping,
          * or connect to the xbox_nv2a library for proper handling.
          */
+        /* The guest is mapped at offset 0 here, so this host range is the
+         * NV2A's own: let the runtime's traps (the PGRAPH page while a
+         * software-method interrupt waits for its acknowledgement) see it
+         * first. */
         if (fault_addr >= 0xFD000000 && fault_addr < 0xFE000000) {
+            if (xbox_VehMmioFault(ep))
+                return EXCEPTION_CONTINUE_EXECUTION;
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
@@ -438,13 +448,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * thread, disabled SOF after the enable, and the new endpoint was never
      * serviced: the pad's interrupt pipe never opened (5 boots in 12 with no
      * input), and the same overlap is how a cancel walked off a TD list
-     * (the sub_001ABCF2 crash). With the gate: 12 of 12. */
+     * (the sub_001ABCF2 crash). With the gate: 39 of 39 boots. */
     if (!getenv("RECOMP_DISPATCH_GATE")) {
 #ifdef _WIN32
         _putenv_s("RECOMP_DISPATCH_GATE", "1");
 #else
         setenv("RECOMP_DISPATCH_GATE", "1", 0);
 #endif
+    }
+    /* Fast kickoff needs the DMA walk's exact DMA_GET (kick_ack_thread). */
+    {
+        const char *fk = getenv("RECOMP_FAST_KICK");
+        if (fk && *fk == '1' && !getenv("RECOMP_PB_WALK")) {
+#ifdef _WIN32
+            _putenv_s("RECOMP_PB_WALK", "dma");
+#else
+            setenv("RECOMP_PB_WALK", "dma", 0);
+#endif
+        }
     }
 
     printf("=== YOUR_GAME_NAME - Static Recompilation ===\n");
