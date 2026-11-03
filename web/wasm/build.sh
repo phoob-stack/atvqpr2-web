@@ -31,7 +31,13 @@ compile() {  # dir src -> prints OK/FAIL line
 }
 
 echo "== generated shards"
-n=0; for f in "$GEN"/*.c; do compile "$OUT/gen" "$f" & n=$((n+1)); [ $((n % 8)) = 0 ] && wait; done; wait
+# Stores go through MEMn_ST(addr, value) on wasm, where a device register is an
+# explicit check rather than a page fault (recomp_types.h, xboxrecomp
+# tools/recomp/store_form.py). The rewrite goes to build-wasm/gen-src; files
+# whose output is unchanged keep their timestamp. Headers still come from $GEN.
+if command -v py >/dev/null 2>&1; then PY="py -3"; else PY=python3; fi
+(cd "$RT" && $PY -m tools.recomp.store_form "$GEN" "$OUT/gen-src") || exit 1
+n=0; for f in "$OUT"/gen-src/*.c; do compile "$OUT/gen" "$f" & n=$((n+1)); [ $((n % 8)) = 0 ] && wait; done; wait
 echo "== runtime and game sources"
 # Skipped on purpose: the D3D8->D3D11 HLE (d3d8_*), SDL and Win32-only input/video
 # back ends, and the D3D11 GPU consumer -- the web build replaces them.
