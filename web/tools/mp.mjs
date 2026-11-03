@@ -2,7 +2,10 @@
 // Dunes: Lagoon race, each on its own Xbox port, then fps per second.
 //
 //   node web/tools/mp.mjs <players 1-4> [seconds=30] [--keyboard] [--warm secs=6]
-//        [--port n] [--profile dir] [--opfs] [--out dir] [--env K=V,...] [--wasm url]
+//        [--port n] [--profile dir] [--opfs] [--out dir] [--env K=V,...] [--wasm url] [--single]
+//
+// --single (1 player): the one-player SINGLE RACE instead of MULTIPLAYER;
+// with --keyboard that is the one-player keyboard game as before split screen.
 //
 // Fake Gamepad API pads replace navigator.getGamepads (standard mapping), one
 // per player at index 0..N-1, so web/host/input.js maps them by index to Xbox
@@ -29,12 +32,12 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const pos = argv.filter((a, i) => !a.startsWith('--') && !(i && argv[i - 1].startsWith('--') &&
-  !['--keyboard', '--opfs'].includes(argv[i - 1])));
+  !['--keyboard', '--opfs', '--single'].includes(argv[i - 1])));
 const players = Number(pos[0] ?? 2), secs = Number(pos[1] ?? 30);
 if (!(players >= 1 && players <= 4)) { console.log('players 1-4'); process.exit(2); }
-const kbd = argv.includes('--keyboard');
+const kbd = argv.includes('--keyboard'), single = argv.includes('--single');
 const warm = Number(opt('--warm', 6));
-const out = resolve(opt('--out', join(ROOT, `build-wasm/mp${players}${kbd ? 'k' : ''}`)));
+const out = resolve(opt('--out', join(ROOT, `build-wasm/mp${players}${kbd ? 'k' : ''}${single ? 's' : ''}`)));
 const env = ['RECOMP_SKIP_MOVIES=1', opt('--env', '')].filter(Boolean).join(',');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 mkdirSync(out, { recursive: true });
@@ -158,6 +161,9 @@ try {
   }
   if (s !== 'title') throw new Error('no title screen');
   console.log(`${el()} title; ${(await status()).status.split('|').pop().trim()}`);
+  // The keyboard player plugs its pad in with a first key press (else the
+  // game greys out MULTIPLAYER: one controller).
+  if (kbd && players > 1) { await press(players - 1, 'x'); await sleep(1500); }
   // 2. title -> profiles -> main menu
   // (a fresh browser profile has no save: A creates one, A picks the rider,
   // A on OK names it)
@@ -169,6 +175,17 @@ try {
     if (mm) break;
   }
   if (!mm) throw new Error(`lost at ${await screen()} before the main menu`);
+  if (single) {
+    // --single: the one-player SINGLE RACE (main menu row 3), A through
+    // RIDER and ATV SELECT, as the native "race dunes_lagoon" route.
+    for (let i = 0; i < 12 && !(await rowOrange(155)); i++) { await press(0, 'down'); await sleep(200); }
+    if (!(await rowOrange(155))) throw new Error('could not reach SINGLE RACE');
+    for (let i = 0; i < 8 && (await waitScreen(['track_select'], 100)) !== 'track_select'; i++) {
+      await press(0, 'a');
+      await waitScreen(['rider_select', 'atv_select', 'track_select'], 3000);
+      await sleep(600);
+    }
+  } else {
   // 3. MULTIPLAYER -> SINGLE RACE
   for (let i = 0; i < 12 && !(await rowOrange(340)); i++) { await press(0, 'down'); await sleep(200); }
   if (!(await rowOrange(340))) throw new Error('could not reach MULTIPLAYER');
@@ -187,6 +204,7 @@ try {
     await all(i === 0 ? 'start' : 'a');
     await sleep(2200);
     if (i === 0) await shot('joined');
+  }
   }
   if ((await waitScreen(['track_select'], 8000)) !== 'track_select') throw new Error('no TRACK SELECT after joining');
   for (let i = 0; i < 20 && (await peek(TRACK_INDEX)) !== 0; i++) { await press(0, 'right'); await sleep(400); }
