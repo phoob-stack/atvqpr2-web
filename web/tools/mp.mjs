@@ -3,7 +3,11 @@
 //
 //   node web/tools/mp.mjs <players 1-4> [seconds=30] [--keyboard] [--warm secs=6]
 //        [--port n] [--profile dir] [--opfs] [--out dir] [--env K=V,...] [--wasm url] [--single] [--qs 'res=2']
-//        [--cpuprof secs] [--keep-profiles]
+//        [--cpuprof secs] [--keep-profiles] [--save-pipes] [--vsranges]
+//
+// --save-pipes: merge the render pipelines the run created into
+// build-wasm/pipelines.json (pipelist.mjs), which the page creates ahead of
+// time at boot. --vsranges: the VS constant rows each program reads.
 //
 // --cpuprof N: V8 CPU profile of the page and every Worker (threadprof.mjs)
 // over the first N seconds of the measurement, printed busiest first;
@@ -32,13 +36,14 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launch } from './cdp.mjs';
+import { savePipelines } from './pipelist.mjs';
 import { profileThreads } from './threadprof.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const pos = argv.filter((a, i) => !a.startsWith('--') && !(i && argv[i - 1].startsWith('--') &&
-  !['--keyboard', '--opfs', '--single', '--keep-profiles'].includes(argv[i - 1])));
+  !['--keyboard', '--opfs', '--single', '--keep-profiles', '--save-pipes', '--vsranges'].includes(argv[i - 1])));
 const players = Number(pos[0] ?? 2), secs = Number(pos[1] ?? 30);
 if (!(players >= 1 && players <= 4)) { console.log('players 1-4'); process.exit(2); }
 const kbd = argv.includes('--keyboard'), single = argv.includes('--single');
@@ -258,6 +263,7 @@ try {
     `${(rows.reduce((a, r) => a + r.encode, 0) / Math.max(1, rows.length)).toFixed(2)} ms per frame`);
   console.log(`status: ${(await status()).status}`);
   await shot('race-end');
+  if (argv.includes('--save-pipes')) console.log(await savePipelines(b, join(ROOT, 'build-wasm/pipelines.json')));
   result = 0;
 } catch (e) {
   console.log(`${el()} FAILED: ${e.message}`);

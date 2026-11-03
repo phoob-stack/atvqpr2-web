@@ -72,6 +72,18 @@ const CLEAR_WGSL = `struct C { col: vec4f, z: f32 };
 @fragment fn fs() -> @location(0) vec4f { return c.col; }`;
 const CLEAR_SLOTS = 64;
 
+// A pipeline spec's key, and a shader's (FNV-1a over the WGSL text).
+const specKey = (sp) => [sp.vs, sp.ps, sp.kind, sp.cube, sp.stride, sp.inputs, sp.writeMask,
+  sp.blend ? sp.blend.join(',') : '-', sp.ds ? sp.ds.join(',') : '-', sp.sten ? sp.sten.join(',') : '-'].join('|');
+function codeHash(code) {
+  let a = 0x811c9dc5, b = 0x01000193 ^ code.length;
+  for (let i = 0; i < code.length; i++) {
+    const c = code.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193); b = Math.imul(b ^ c, 0x5bd1e995) ^ (b >>> 15);
+  }
+  return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0') + code.length.toString(16);
+}
+
 const unpack = (c) => [((c >>> 16) & 255) / 255, ((c >>> 8) & 255) / 255, (c & 255) / 255, (c >>> 24) / 255];
 
 // GpDraw / GpState field offsets in words.
@@ -140,6 +152,12 @@ export class GpEncoder {
     this.vsMods = new Map();   // id -> { module }   (built-ins 1, 2 share ids with
     this.psMods = new Map();   // id -> { module, cube }  PS 1: separate maps)
     this.pipes = new Map();
+    // Pipelines by what they are made of (shader text hashes and state; ids
+    // differ from run to run): what this run used (exportPipelines) and what
+    // preloadPipelines() created ahead of time.
+    this.codes = new Map();    // code hash -> WGSL
+    this.specs = new Map();    // stable key -> spec
+    this.pre = new Map();      // stable key -> GPURenderPipeline (created ahead)
     this.samplers = new Map();
     this.bufs = {};
     this.serial = 0;           // every resource gets a new one: the bind-group cache key
@@ -283,8 +301,10 @@ export class GpEncoder {
         case P.GP_SHADER_VS: case P.GP_SHADER_PS: {
           const code = dec.decode(payload.slice(0, Math.max(0, c.bytes - 1)));   // slice: not shared
           const module = this.dev.createShaderModule({ label: `${c.op === P.GP_SHADER_VS ? 'vs' : 'ps'}_${c.id}`, code });
-          if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module, inputs: inputMaskOf(code), crange: constRangeOf(code) });
-          else this.psMods.set(c.id, { module, cube: cubeMaskOf(code) });
+          const h = codeHash(code);
+          if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module, inputs: inputMaskOf(code), crange: constRangeOf(code), h });
+          else this.psMods.set(c.id, { module, cube: cubeMaskOf(code), h });
+          this.codes.set(h, code);
           this.stats.shMs += performance.now() - t0; this.stats.shN++;
           break;
         }
@@ -507,41 +527,96 @@ export class GpEncoder {
     return this.samplers.get(key);
   }
 
+  /** The render pipeline for a draw. Its key is what the pipeline is made
+   * of -- both shaders' WGSL (by hash) and the fixed-function state -- so a
+   * pipeline created ahead of time from an earlier run's list
+   * (preloadPipelines) is found under the same key. */
   pipeline(d, kind, vs, ps, cube, hasDs) {
     const st = d.st, m = st.color_mask;
     const writeMask = (m & 0x00010000 ? 1 : 0) | (m & 0x00000100 ? 2 : 0) | (m & 0x00000001 ? 4 : 0) | (m & 0x01000000 ? 8 : 0);
     const dt = hasDs && st.depth_test, dw = dt && st.depth_write, sten = hasDs && st.stencil_en;
-    const key = [d.vs, d.ps, kind, cube, d.vtx_stride, st.blend_en ? 1 : 0, st.blend_src, st.blend_dst, st.blend_eq, writeMask,
-      hasDs ? 1 : 0, dt ? 1 : 0, dw ? 1 : 0, st.depth_func, sten ? [st.stencil_func, st.stencil_fmask & 255,
-        st.stencil_wmask & 255, st.stencil_fail, st.stencil_zfail, st.stencil_zpass].join(',') : '-'].join('|');
+    const spec = { vs: vs.h, ps: ps.h, kind, cube, stride: d.vtx_stride, inputs: vs.inputs, writeMask,
+      blend: st.blend_en ? [st.blend_src, st.blend_dst, st.blend_eq] : null,
+      ds: hasDs ? [dt ? 1 : 0, dw ? 1 : 0, st.depth_func] : null,
+      sten: sten ? [st.stencil_func, st.stencil_fmask & 255, st.stencil_wmask & 255, st.stencil_fail, st.stencil_zfail, st.stencil_zpass] : null };
+    const key = specKey(spec);
     let p = this.pipes.get(key);
     if (p) return p;
-    let blend;
-    if (st.blend_en) {
-      const op = BLEND_OP[st.blend_eq] ?? 'add', minmax = op === 'min' || op === 'max';
-      const f = (x, a) => (minmax ? 'one' : (BLEND_FACTOR[x] ?? ['one', 'one'])[a]);
-      blend = { color: { operation: op, srcFactor: f(st.blend_src, 0), dstFactor: f(st.blend_dst, 0) },
-        alpha: { operation: op, srcFactor: f(st.blend_src, 1), dstFactor: f(st.blend_dst, 1) } };
+    p = this.pre.get(key);
+    if (p) this.stats.prePipes = (this.stats.prePipes ?? 0) + 1;
+    else {
+      const t0 = performance.now();
+      p = this.dev.createRenderPipeline(this.pipeDesc(spec, key, vs.module, ps.module));
+      this.stats.pipelines++;
+      this.stats.pipeMs += performance.now() - t0;
     }
-    const face = sten ? { compare: CMP[st.stencil_func] ?? 'always', failOp: STENCIL_OP[st.stencil_fail] ?? 'keep',
-      depthFailOp: STENCIL_OP[st.stencil_zfail] ?? 'keep', passOp: STENCIL_OP[st.stencil_zpass] ?? 'keep' } : {};
-    const t0 = performance.now();
-    p = this.dev.createRenderPipeline({
-      label: key,
-      layout: this.L.pipelineLayout(cube),
-      vertex: { module: vs.module, entryPoint: 'main', buffers: vertexLayout(kind, vs.inputs, d.vtx_stride) },
-      fragment: { module: ps, entryPoint: 'main', targets: [{ format: 'bgra8unorm', blend, writeMask }] },
+    this.pipes.set(key, p);
+    this.specs.set(key, spec);
+    return p;
+  }
+
+  /** The descriptor for a spec (pipeline() above, preloadPipelines below). */
+  pipeDesc(spec, label, vsModule, psModule) {
+    let blend;
+    if (spec.blend) {
+      const [src, dst, eq] = spec.blend;
+      const op = BLEND_OP[eq] ?? 'add', minmax = op === 'min' || op === 'max';
+      const f = (x, a) => (minmax ? 'one' : (BLEND_FACTOR[x] ?? ['one', 'one'])[a]);
+      blend = { color: { operation: op, srcFactor: f(src, 0), dstFactor: f(dst, 0) },
+        alpha: { operation: op, srcFactor: f(src, 1), dstFactor: f(dst, 1) } };
+    }
+    const sn = spec.sten;
+    const face = sn ? { compare: CMP[sn[0]] ?? 'always', failOp: STENCIL_OP[sn[3]] ?? 'keep',
+      depthFailOp: STENCIL_OP[sn[4]] ?? 'keep', passOp: STENCIL_OP[sn[5]] ?? 'keep' } : {};
+    const ds = spec.ds;
+    return {
+      label,
+      layout: this.L.pipelineLayout(spec.cube),
+      vertex: { module: vsModule, entryPoint: 'main', buffers: vertexLayout(spec.kind, spec.inputs, spec.stride) },
+      fragment: { module: psModule, entryPoint: 'main', targets: [{ format: 'bgra8unorm', blend, writeMask: spec.writeMask }] },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       multisample: { count: this.msaa },
-      depthStencil: hasDs ? { format: this.dsFormat, depthWriteEnabled: !!dw,
-        depthCompare: dt ? CMP[st.depth_func] ?? 'always' : 'always',
+      depthStencil: ds ? { format: this.dsFormat, depthWriteEnabled: !!ds[1],
+        depthCompare: ds[0] ? CMP[ds[2]] ?? 'always' : 'always',
         stencilFront: face, stencilBack: face,
-        stencilReadMask: sten ? st.stencil_fmask & 255 : 0xFF, stencilWriteMask: sten ? st.stencil_wmask & 255 : 0 } : undefined,
-    });
-    this.pipes.set(key, p);
-    this.stats.pipelines++;
-    this.stats.pipeMs += performance.now() - t0;
-    return p;
+        stencilReadMask: sn ? sn[1] : 0xFF, stencilWriteMask: sn ? sn[2] : 0 } : undefined,
+    };
+  }
+
+  /** The pipelines this run created, with their shaders: what
+   * preloadPipelines() takes (web/tools/pipelines.mjs writes it to
+   * build-wasm/pipelines.json, beside the module it was recorded with). */
+  exportPipelines() {
+    const shaders = {};
+    for (const sp of this.specs.values()) for (const h of [sp.vs, sp.ps]) shaders[h] = this.codes.get(h);
+    return { version: 1, msaa: this.msaa, dsFormat: this.dsFormat, shaders, pipes: [...this.specs.values()] };
+  }
+
+  /** Create an earlier run's pipelines in the background
+   * (createRenderPipelineAsync), so the first draw that needs one finds it
+   * ready instead of waiting for the browser to compile it (a brand-new
+   * browser profile has no compiled shaders: 40-170 ms at the race start).
+   * A draw whose pipeline is not ready yet creates it as before; nothing is
+   * skipped or drawn differently. Returns a promise of { made, failed }. */
+  async preloadPipelines(list) {
+    if (!list || list.version !== 1 || list.msaa !== this.msaa || list.dsFormat !== this.dsFormat) return { made: 0, failed: 0, skipped: true };
+    const mods = new Map();
+    const mod = (h) => {
+      if (!mods.has(h)) mods.set(h, list.shaders[h] ? this.dev.createShaderModule({ label: `pre_${h}`, code: list.shaders[h] }) : null);
+      return mods.get(h);
+    };
+    let made = 0, failed = 0;
+    await Promise.all(list.pipes.map(async (spec) => {
+      const key = specKey(spec);
+      const vm = mod(spec.vs), pm = mod(spec.ps);
+      if (!vm || !pm || this.pipes.has(key) || this.pre.has(key)) return;
+      try {
+        const p = await this.dev.createRenderPipelineAsync(this.pipeDesc(spec, key, vm, pm));
+        if (!this.pre.has(key)) this.pre.set(key, p);
+        made++;
+      } catch { failed++; }
+    }));
+    return { made, failed };
   }
 
   // ---- passes --------------------------------------------------------------
@@ -715,7 +790,7 @@ export class GpEncoder {
     }
     const pass = this.pass, b = this.bound;
     this.scissor(rectOf(d, t.rt));
-    const pipe = this.pipeline(d, kind, vs, ps.module, cube, !!t.ds);
+    const pipe = this.pipeline(d, kind, vs, ps, cube, !!t.ds);
     if (pipe !== b.pipe) { pass.setPipeline(pipe); b.pipe = pipe; }
     pass.setBindGroup(0, this.group0, [d.slots.xf, d.slots.vsc, d.slots.ps, d.slots.smp]);
     if (g1 !== b.g1) { pass.setBindGroup(1, g1); b.g1 = g1; }
