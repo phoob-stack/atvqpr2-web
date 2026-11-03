@@ -255,7 +255,10 @@ int main(int argc, char **argv)
 
     xbox_WatchdogStart();
     /* ATV 2 retail: XDK D3D device pointer at 0x1A50E8; write sequence +0x2C,
-     * pointer to the GPU's progress +0x30 (fence wait 0x196CF0). */
+     * pointer to the GPU's progress +0x30 (fence wait 0x196CF0). With the fast
+     * kick (the DMA walk) the mirror only names that word: the walk's
+     * SEMAPHORE_RELEASE writes it, since a mirror let D3D overwrite pushbuffer
+     * the walk had not read (xboxrecomp nv2a_pb_walk_owns_fence). */
     xbox_Nv2aMirrorFence(0x001A50E8, 0x2C, 0x30);
     {
         extern void atv2_gpu_backend_install(void);
