@@ -172,6 +172,24 @@ try {
   check(same(await opfsHashes(), h1), 'the saves equal the exported ones');
   check((await backups()).length === Math.min(5, nb + 1), `one more backup (${(await backups()).length})`);
 
+  // 8. the API other pages use (saves.js exports)
+  const api = (expr) => b.eval(`import('/host/saves.js').then(async (s) => ${expr})`);
+  const profs = await api('s.listProfiles()');
+  const prof = profs.find((p) => p.kind === 'profile');
+  check(prof?.rider === 'Player One' && prof?.name === 'Profile 1' && profs.some((p) => p.kind === 'records'),
+    `listProfiles: ${profs.map((p) => `${p.id} ${p.kind} "${p.name}" rider "${p.rider}" ${p.bytes} B`).join('; ')}`);
+  const ex = await api(`s.exportSaves({ ids: [${JSON.stringify(prof.id)}] }).then((r) => ({ name: r.name, size: r.size, files: r.files }))`);
+  check(ex.files === 5, `exportSaves({ ids: [profile] }): ${ex.name}, ${ex.files} files (the profile's 2 + the title's 3), ${ex.size} bytes`);
+  check(await api('s.gameRunningElsewhere()') === false, 'gameRunningElsewhere() is false on the game page itself');
+  const del = await api(`s.deleteProfile(${JSON.stringify(prof.id)})`);
+  check(del.restartNeeded && !!del.backup, `deleteProfile: staged, backup ${del.backup}`);
+  await b.send('Page.reload', {}); await sleep(1500); await waitTitle();
+  const left = await api('s.listProfiles()');
+  check(!left.some((p) => p.id === prof.id) && !Object.keys(await opfsHashes()).some((p) => p.includes(prof.id)), `after the restart the profile is gone (${left.map((p) => p.kind).join(', ')})`);
+  await api('s.listBackups().then((b) => s.restoreBackup(b[0]))');
+  await b.send('Page.reload', {}); await sleep(1500); await waitTitle();
+  check(same(await opfsHashes(), h1), 'restoreBackup(listBackups()[0]) brought it back');
+
   // 7. Forget game files keeps the saves
   if (opfs) {
     await b.eval(`document.getElementById('forget').click(); setTimeout(() => document.getElementById('forget').click(), 300); 1`);

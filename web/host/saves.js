@@ -470,7 +470,8 @@ const done = (r) => ({ count: r.count, bytes: r.bytes, notes: r.notes, backup: r
 /** "Name=..." of a SaveMeta.xbx (UTF-8 or UTF-16LE text). */
 function metaName(u8) {
   if (!u8) return '';
-  const t = (u8[1] === 0 && u8.length > 2 ? new TextDecoder('utf-16le') : new TextDecoder()).decode(u8).replace(/^\uFEFF/, '');
+  const utf16 = (u8[0] === 0xff && u8[1] === 0xfe) || (u8.length > 2 && u8[1] === 0);
+  const t = new TextDecoder(utf16 ? 'utf-16le' : 'utf-8').decode(u8);    // either drops its BOM
   return /Name=([^\r\n]*)/.exec(t)?.[1] ?? '';
 }
 /** The rider's name in "Rider Data": after the c7 2e ee 01 tag, a u16 length and the bytes. */

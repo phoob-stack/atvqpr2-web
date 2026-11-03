@@ -247,9 +247,15 @@ export class Vfs {
         d = d.get(p) ?? d.add(new Dir(p, { readOnly: true }));
         h = await h.getDirectoryHandle(p);
       }
+      // After a reload (a save import restarts the page) the previous page's
+      // I/O worker can hold the handles for a moment: retry for up to 10 s
+      // before calling it another tab.
       let sync;
-      try { sync = await (await h.getFileHandle(parts.at(-1))).createSyncAccessHandle(); } catch (e) {
-        throw new Error(`${f.path}: ${e.name === 'NoModificationAllowedError' ? 'in use by another tab of this page' : e.message}`);
+      for (let tries = 0; ; tries++) {
+        try { sync = await (await h.getFileHandle(parts.at(-1))).createSyncAccessHandle(); break; } catch (e) {
+          if (e.name === 'NoModificationAllowedError' && tries < 100) { await new Promise((r) => setTimeout(r, 100)); continue; }
+          throw new Error(`${f.path}: ${e.name === 'NoModificationAllowedError' ? 'in use by another tab of this page' : e.message}`);
+        }
       }
       if (sync.getSize() !== f.size) throw new Error(`${f.path}: ${sync.getSize()} bytes in OPFS, ${f.size} expected; choose the game folder again`);
       d.add(new OpfsGameFile(parts.at(-1), f, sync));
