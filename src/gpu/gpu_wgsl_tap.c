@@ -132,6 +132,9 @@ static void init(void)
     }
 #endif
     s_on = s_dump_dir || s_cap_dir || s_wgpu;
+#ifdef __wasm__
+    s_on = 1;          /* the page draws with WGSL: always keep it, by shader id */
+#endif
     if (!s_on) return;
 #ifdef _WIN32
     if (s_dump_dir) _mkdir(s_dump_dir);
@@ -462,7 +465,14 @@ void gp_backend_flip(const GpFrame *f)
     } else if (s_wgpu) gp_wgpu_consume(f);
     else
 #endif
+#ifdef __wasm__
+    {
+        extern void gp_web_consume(const GpFrame *f);   /* src/web/web_present.c */
+        gp_web_consume(f);                               /* the page is the consumer */
+    }
+#else
     gp_d3d11_consume(f);
+#endif
     if (cap) capture_ref(f);
     if (s_on && f->frame % 600 == 599)
         fprintf(stderr, "  [GPUWEB] WGSL: %u vertex programs, %u combiner shaders, %u failures\n",

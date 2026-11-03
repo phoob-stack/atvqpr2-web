@@ -271,6 +271,8 @@ static uint32_t pext(uint32_t v, uint32_t mask)
 static struct { uint32_t rt, x0, y0, w, h, id; } s_sub[MAX_SUB];
 static int s_nsub, s_sub_next;
 
+static int size_from_format(uint32_t f);   /* defined below; clang wants it declared before use */
+
 /* GP_TEX_RT | id for a texture that is a whole target, a GP_SUB_CREATE id for
  * a tile of one, 0 for neither. *full: the whole target (coordinates are
  * then scaled to it). */
