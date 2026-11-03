@@ -2,7 +2,7 @@
 // Dunes: Lagoon race, each on its own Xbox port, then fps per second.
 //
 //   node web/tools/mp.mjs <players 1-4> [seconds=30] [--keyboard] [--warm secs=6]
-//        [--port n] [--profile dir] [--opfs] [--out dir] [--env K=V,...] [--wasm url] [--single]
+//        [--port n] [--profile dir] [--opfs] [--out dir] [--env K=V,...] [--wasm url] [--single] [--qs 'res=2']
 //
 // --single (1 player): the one-player SINGLE RACE instead of MULTIPLAYER;
 // with --keyboard that is the one-player keyboard game as before split screen.
@@ -49,6 +49,8 @@ await new Promise((r) => srv.stdout.once('data', r));
 const qs = new URLSearchParams();
 qs.set('env', env);
 if (opt('--wasm')) qs.set('wasm', opt('--wasm'));
+// --qs 'res=2&msaa=4&widescreen=1': more page parameters (main.js), e.g. the display options.
+for (const [k, v] of new URLSearchParams(opt('--qs', ''))) qs.set(k, v);
 const b = await launch(`http://127.0.0.1:${port}/host/index.html?${qs}`, { profile: opt('--profile') });
 const t0 = Date.now();
 const el = () => `${((Date.now() - t0) / 1000).toFixed(0).padStart(4)}s`;

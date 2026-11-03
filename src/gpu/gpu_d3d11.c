@@ -1314,7 +1314,7 @@ int gp_d3d11_present_frame(void *hwnd, uint32_t fb_va, uint32_t aw, uint32_t ah)
 {
     Res *best = NULL;
     int j, shown = 0;
-    if (!s_active || !s_dev) return 0;
+    if (!s_active || !s_dev || s_failed) return 0;   /* s_failed until ensure_device is done */
     AcquireSRWLockExclusive(&s_lock);
     for (j = 0; j < s_nrt_ids; j++) {
         Res *r = res(s_rt_ids[j]);
@@ -1362,7 +1362,7 @@ int gp_d3d11_present_pixels(void *hwnd, const uint32_t *px, uint32_t w, uint32_t
                             uint32_t aw, uint32_t ah)
 {
     int ok = 0;
-    if (!s_active || !px || !s_dev) return 0;
+    if (!s_active || !px || !s_dev || s_failed) return 0;   /* the window thread can get here while the flip thread is still in ensure_device */
     /* Never wait for the lock here: the flip thread can hold it while DXGI
      * (swap chain creation, resize) sends this thread's window a message,
      * and waiting would deadlock the two. A skipped tick is redrawn 16 ms on. */
