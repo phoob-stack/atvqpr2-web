@@ -163,27 +163,51 @@ static void vsh_write(Sb *b, const char *dst, uint32_t mask, const char *src)
             emit(b, "    %s.%c = %s.%c;\n", dst, "xyzw"[i], src, "xyzw"[i]);
 }
 
+/* nv2a_vsh_input_mask()'s rule (xboxrecomp nv2a_vsh_interp.c), which the
+ * pushbuffer executor uses to fetch only these inputs: keep the two equal. */
+uint32_t gpu_vs_input_mask(const uint32_t (*prog)[4], uint32_t len)
+{
+    uint32_t s, mask = 1;
+
+    for (s = 0; s < len; s++) {
+        const uint32_t *ins = prog[s];
+        if (field(ins, 2, 26, 2) == 2 || field(ins, 2, 11, 2) == 2 || field(ins, 3, 28, 2) == 2)
+            mask |= 1u << field(ins, 1, 9, 4);
+        if (field(ins, 3, 0, 1))
+            break;
+    }
+    return mask;
+}
+
 int gpu_gen_vs_program_wgsl(const uint32_t (*prog)[4], uint32_t len, uint32_t flags,
                             char *out, size_t cap)
 {
     Sb b = { out, 0, cap, 0 };
-    uint32_t s;
+    uint32_t s, mask = gpu_vs_input_mask(prog, len);
     int k;
 
     emit_xf_common(&b, flags);
     emit(&b, "struct VsC { c: array<vec4f, 192> };\n"
              "@group(0) @binding(1) var<uniform> K: VsC;\n"
              "struct VI {\n");
+    /* Only the inputs the program reads: the browser's vertex arena carries
+     * just those (gpu_rec.c, packed in location order; web/gpu/layout.js
+     * reads this list back). A 16-input buffer layout still fits. */
     for (k = 0; k < 16; k++)
-        emit(&b, "  @location(%d) v%d: vec4f,\n", k, k);
+        if (mask & (1u << k))
+            emit(&b, "  @location(%d) v%d: vec4f,\n", k, k);
     emit(&b, "};\n"
              "fn cidx(i: i32) -> i32 { return select(i, 0, i < 0 || i >= 192); }\n"
              /* Runtime, not constant: an infinite constant expression is an error. */
              "fn inf_of(neg: bool) -> f32 { var u = 0x7f800000u; if (neg) { u = 0xff800000u; } return bitcast<f32>(u); }\n"
              "@vertex fn main(vin: VI) -> VO {\n"
-             "  let v = array<vec4f, 16>(vin.v0, vin.v1, vin.v2, vin.v3, vin.v4, vin.v5, vin.v6, vin.v7,\n"
-             "                           vin.v8, vin.v9, vin.v10, vin.v11, vin.v12, vin.v13, vin.v14, vin.v15);\n"
-             "  var R: array<vec4f, 12>;\n"
+             "  let v = array<vec4f, 16>(");
+    for (k = 0; k < 16; k++) {
+        if (mask & (1u << k)) emit(&b, "vin.v%d", k);
+        else emit(&b, "vec4f(0.0)");
+        emit(&b, "%s", k < 15 ? ", " : ");\n");
+    }
+    emit(&b, "  var R: array<vec4f, 12>;\n"
              "  var opos = vec4f(0.0); var a0: i32 = 0;\n"
              "  var o: array<vec4f, 13>;\n"
              "  o[3].w = 1.0; o[4].w = 1.0;\n"

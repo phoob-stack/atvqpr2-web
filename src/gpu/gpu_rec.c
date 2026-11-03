@@ -923,11 +923,33 @@ static void rec_draw2(const Nv2aSurface *s, const Nv2aRenderState *rs, const Nv2
         d->vsc_off = put_vs_consts(dd->constants);
         if (d->vs && nv2a_check_active())
             probe_prepare(dd, &xc, d->vs);
+#if defined(__wasm__)
+        /* The browser: only the inputs the program reads, packed in location
+         * order (the WGSL VS declares just those, gpu_vs_input_mask). A race
+         * reads 3-6 of the 16, so the arena, the page's upload and the GPU
+         * read shrink 3-5x. The D3D11 and wgpu-native back ends keep the
+         * 16-input GpProgVertex. */
+        {
+            uint32_t mask = dd->input_mask ? dd->input_mask : gpu_vs_input_mask(dd->program, dd->program_len);
+            uint8_t used[16];
+            uint32_t na = 0, a, k, n = dd->vertex_count;
+            float (*o)[4];
+            for (a = 0; a < 16; a++)
+                if (mask & (1u << a)) used[na++] = (uint8_t)a;
+            if (!(v = buf_take(&s_vtx, n * na * 16, 16))) return;
+            o = (float (*)[4])v;
+            for (k = 0; k < n; k++, o += na)
+                for (a = 0; a < na; a++)
+                    memcpy(o[a], dd->inputs[k][used[a]], 16);
+            d->vtx_stride = na * 16;
+        }
+#else
         if (!(v = buf_take(&s_vtx, dd->vertex_count * sizeof(GpProgVertex), 16))) return;
         memcpy(v, dd->inputs, dd->vertex_count * sizeof(GpProgVertex));
+        d->vtx_stride = sizeof(GpProgVertex);
+#endif
         d->vtx_off = (uint32_t)((uint8_t *)v - s_vtx.p);
         d->vtx_count = dd->vertex_count;
-        d->vtx_stride = sizeof(GpProgVertex);
         if (!(ix = (uint32_t *)buf_take(&s_idx, dd->index_count * 4, 4))) return;
         memcpy(ix, dd->indices, dd->index_count * 4);
         d->idx_off = (uint32_t)(ix - (uint32_t *)s_idx.p);

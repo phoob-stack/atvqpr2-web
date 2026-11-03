@@ -17,7 +17,7 @@
 //   - pipelines (blend/depth/stencil/write mask are baked) are cached by key;
 //     nfsu2-web additionally prewarms them with createRenderPipelineAsync.
 import * as P from './proto.js';
-import { makeLayouts, UNIFORM_SLOTS, vertexLayout, cubeMaskOf } from './layout.js';
+import { makeLayouts, UNIFORM_SLOTS, vertexLayout, cubeMaskOf, inputMaskOf } from './layout.js';
 
 const BLEND_FACTOR = {
   0x0000: ['zero', 'zero'], 0x0001: ['one', 'one'],
@@ -114,7 +114,7 @@ export class GpEncoder {
         case P.GP_SHADER_VS: case P.GP_SHADER_PS: {
           const code = dec.decode(payload.slice(0, Math.max(0, c.bytes - 1)));   // slice: not shared
           const module = this.dev.createShaderModule({ label: `${c.op === P.GP_SHADER_VS ? 'vs' : 'ps'}_${c.id}`, code });
-          if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module });
+          if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module, inputs: inputMaskOf(code) });
           else this.psMods.set(c.id, { module, cube: cubeMaskOf(code) });
           break;
         }
@@ -276,7 +276,7 @@ export class GpEncoder {
     const st = d.st, m = st.color_mask;
     const writeMask = (m & 0x00010000 ? 1 : 0) | (m & 0x00000100 ? 2 : 0) | (m & 0x00000001 ? 4 : 0) | (m & 0x01000000 ? 8 : 0);
     const dt = hasDs && st.depth_test, dw = dt && st.depth_write, sten = hasDs && st.stencil_en;
-    const key = [d.vs, d.ps, kind, cube, st.blend_en ? 1 : 0, st.blend_src, st.blend_dst, st.blend_eq, writeMask,
+    const key = [d.vs, d.ps, kind, cube, d.vtx_stride, st.blend_en ? 1 : 0, st.blend_src, st.blend_dst, st.blend_eq, writeMask,
       hasDs ? 1 : 0, dt ? 1 : 0, dw ? 1 : 0, st.depth_func, sten ? [st.stencil_func, st.stencil_fmask & 255,
         st.stencil_wmask & 255, st.stencil_fail, st.stencil_zfail, st.stencil_zpass].join(',') : '-'].join('|');
     let p = this.pipes.get(key);
@@ -293,7 +293,7 @@ export class GpEncoder {
     p = this.dev.createRenderPipeline({
       label: key,
       layout: this.L.pipelineLayout(cube),
-      vertex: { module: vs, entryPoint: 'main', buffers: vertexLayout(kind) },
+      vertex: { module: vs.module, entryPoint: 'main', buffers: vertexLayout(kind, vs.inputs, d.vtx_stride) },
       fragment: { module: ps, entryPoint: 'main', targets: [{ format: 'bgra8unorm', blend, writeMask }] },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: hasDs ? { format: this.dsFormat, depthWriteEnabled: !!dw,
@@ -409,7 +409,7 @@ export class GpEncoder {
       this.groups1.set(key, g1);
     }
     const pass = this.pass, b = this.bound;
-    const pipe = this.pipeline(d, kind, vs.module, ps.module, cube, !!t.ds);
+    const pipe = this.pipeline(d, kind, vs, ps.module, cube, !!t.ds);
     if (pipe !== b.pipe) { pass.setPipeline(pipe); b.pipe = pipe; }
     pass.setBindGroup(0, this.group0, [d.slots.xf, d.slots.vsc, d.slots.ps, d.slots.smp]);
     if (g1 !== b.g1) { pass.setBindGroup(1, g1); b.g1 = g1; }

@@ -48,6 +48,10 @@ _Static_assert(sizeof(GpWgslSmp) == 96, "GpWgslSmp layout");
 
 int gpu_gen_vs_program_wgsl(const uint32_t (*prog)[4], uint32_t len, uint32_t flags,
                             char *out, size_t cap);
+/* The input registers a vertex program reads (bit a: v<a>; bit 0 always).
+ * The program VS declares only these, and the browser's vertex arena packs
+ * just these, in location order (16 bytes each). */
+uint32_t gpu_vs_input_mask(const uint32_t (*prog)[4], uint32_t len);
 int gpu_gen_vs_passthrough_wgsl(uint32_t flags, char *out, size_t cap);
 int gpu_gen_vs_tvert_wgsl(char *out, size_t cap);
 int gpu_gen_ps_tvert_wgsl(char *out, size_t cap);

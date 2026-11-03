@@ -52,13 +52,29 @@ export function cubeMaskOf(wgsl) {
   return m;
 }
 
-// Vertex buffer layouts by vertex shader kind.
-export function vertexLayout(kind) {
+/** The inputs a program VS module declares (@location(k) vk), as a mask
+ * (gpu_vs_input_mask in gpu_shadergen_wgsl.c); 0 for other modules. */
+export function inputMaskOf(wgsl) {
+  let m = 0;
+  for (const x of wgsl.matchAll(/@location\((\d+)\) v(\d+): vec4f/g)) if (x[1] === x[2]) m |= 1 << Number(x[1]);
+  return m;
+}
+
+// Vertex buffer layouts by vertex shader kind. Program vertices are either
+// all 16 inputs (GpProgVertex, 256 bytes: captures, native) or only the
+// inputs the module declares, packed in location order (the wasm recorder).
+export function vertexLayout(kind, inputs = 0xFFFF, stride = 256) {
   if (kind === 'tvert')
     return [{ arrayStride: 28, attributes: [
       { shaderLocation: 0, offset: 0, format: 'float32x4' },
       { shaderLocation: 1, offset: 16, format: 'unorm8x4' },
       { shaderLocation: 2, offset: 20, format: 'float32x2' }] }];
+  if (kind === 'program' && stride !== 256) {
+    const attributes = [];
+    for (let k = 0; k < 16; k++)
+      if (inputs & (1 << k)) attributes.push({ shaderLocation: k, offset: attributes.length * 16, format: 'float32x4' });
+    return [{ arrayStride: stride, attributes }];
+  }
   const n = kind === 'passthru' ? 8 : 16;
   return [{ arrayStride: n * 16, attributes: Array.from({ length: n }, (_, i) =>
     ({ shaderLocation: i, offset: i * 16, format: 'float32x4' })) }];
