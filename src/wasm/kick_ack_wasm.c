@@ -46,9 +46,17 @@ static DWORD WINAPI kick_ack_wasm_thread(LPVOID unused)
     return 0;
 }
 
+extern void xbox_WasmKickAckInline(int on);   /* wasm_mem.c */
+
 void atv_kick_ack_start_wasm(void)
 {
-    HANDLE t = CreateThread(NULL, 0, kick_ack_wasm_thread, NULL, 0, NULL);
+    HANDLE t;
+    /* The store that sets the bit clears it too (wasm_mem.c), so a KickOff
+     * needs no wake-up of this thread; it stays for held flips released
+     * later and as the backstop. RECOMP_WASM_KICK_INLINE=0: thread only (A/B). */
+    const char *in = getenv("RECOMP_WASM_KICK_INLINE");
+    xbox_WasmKickAckInline(!(in && *in == '0'));
+    t = CreateThread(NULL, 0, kick_ack_wasm_thread, NULL, 0, NULL);
     if (t)
         CloseHandle(t);
     fprintf(stderr, "[BOOT] fast kickoff ack on (wasm, waits on 0x%X), pushbuffer"

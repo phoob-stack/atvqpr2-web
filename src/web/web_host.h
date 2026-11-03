@@ -34,10 +34,11 @@ typedef struct WebHost {
      * gp_seq: bumped by the flip after gp_* describe this frame's GpFrame
      *   (gpu_proto.h; pointers are wasm addresses). The page waits on it
      *   with Atomics.waitAsync, copies the frame's arenas out of wasm memory,
-     *   then stores gp_claimed = gp_seq and notifies it. The flip waits for
-     *   the claim (not for the GPU) because the recorder reuses its arenas as
-     *   soon as the flip returns -- nfsu2-web's claim-not-completion rule.
-     *   It waits only while page_attached is set, and at most
+     *   then stores gp_claimed = gp_seq and notifies it. The next flip
+     *   waits for that claim (not for the GPU) before it overwrites the
+     *   mailbox; the recorder's arenas are double-buffered, so frame N stays
+     *   intact while N+1 is recorded -- nfsu2-web's claim-not-completion
+     *   rule. It waits only while page_attached is set, and at most
      *   WEB_CLAIM_TIMEOUT_MS (then counts gp_dropped and goes on).
      * disp_seq: bumped after disp_* name the guest framebuffer the title
      *   shows (VA, pitch, AA rows). The page shows the render target the

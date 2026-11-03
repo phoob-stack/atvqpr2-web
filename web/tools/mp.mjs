@@ -3,6 +3,11 @@
 //
 //   node web/tools/mp.mjs <players 1-4> [seconds=30] [--keyboard] [--warm secs=6]
 //        [--port n] [--profile dir] [--opfs] [--out dir] [--env K=V,...] [--wasm url] [--single] [--qs 'res=2']
+//        [--cpuprof secs] [--keep-profiles]
+//
+// --cpuprof N: V8 CPU profile of the page and every Worker (threadprof.mjs)
+// over the first N seconds of the measurement, printed busiest first;
+// --keep-profiles also writes the .cpuprofile files to <out>.
 //
 // --single (1 player): the one-player SINGLE RACE instead of MULTIPLAYER;
 // with --keyboard that is the one-player keyboard game as before split screen.
@@ -27,12 +32,13 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launch } from './cdp.mjs';
+import { profileThreads } from './threadprof.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const pos = argv.filter((a, i) => !a.startsWith('--') && !(i && argv[i - 1].startsWith('--') &&
-  !['--keyboard', '--opfs', '--single'].includes(argv[i - 1])));
+  !['--keyboard', '--opfs', '--single', '--keep-profiles'].includes(argv[i - 1])));
 const players = Number(pos[0] ?? 2), secs = Number(pos[1] ?? 30);
 if (!(players >= 1 && players <= 4)) { console.log('players 1-4'); process.exit(2); }
 const kbd = argv.includes('--keyboard'), single = argv.includes('--single');
@@ -144,7 +150,8 @@ const waitScreen = async (want, ms) => {
 };
 const status = () => b.eval(`(() => { const h = atv.presenter?.i32, s = atv.presenter?.stats ?? {};
   return { status: document.getElementById('status').textContent, exit: atv.state.exit, err: atv.state.error ?? null,
-    draws: s.lastDraws ?? 0, frames: s.frames ?? 0, flips: h ? h[atv.flipsIndex] : 0 }; })()`);
+    draws: s.lastDraws ?? 0, frames: s.frames ?? 0, copyMs: s.copyMs ?? 0, encodeMs: s.encodeMs ?? 0,
+    vtx: s.vtxBytes ?? 0, uni: atv.presenter?.enc?.stats?.uniBytes ?? 0, flips: h ? h[atv.flipsIndex] : 0 }; })()`);
 const shot = async (name) => {
   const p = await b.eval('atv.snapshot()').catch(() => null);
   if (p) writeFileSync(join(out, `${name}.png`), Buffer.from(p.split(',')[1], 'base64'));
@@ -220,22 +227,35 @@ try {
   for (let p = 0; p < players; p++) await b.eval(`__btn(${p}, 'a', 1)`);
   await sleep(warm * 1000);
   await shot('race');
+  if (argv.includes('--vsranges')) console.log('VS const ranges', JSON.stringify(await b.eval('[...atv.presenter.enc.vsMods].filter(([, v]) => v.crange).map(([k, v]) => [k, ...v.crange])')));
+  // The profile runs alongside the first seconds of the measurement, so a
+  // slow second can be matched to what each thread did in it.
+  const prof = Number(opt('--cpuprof', 0))
+    ? profileThreads(b, Number(opt('--cpuprof', 0)), { keepDir: argv.includes('--keep-profiles') ? out : null }) : null;
   // 5. fps per second
   let prev = await status();
   const rows = [];
   for (let i = 0; i < secs; i++) {
     await sleep(1000);
     const st = await status();
-    rows.push({ flips: st.flips - prev.flips, frames: st.frames - prev.frames, draws: st.draws });
-    console.log(`${el()} flips ${String(st.flips - prev.flips).padStart(3)}/s  page frames ${String(st.frames - prev.frames).padStart(3)}  draws ${st.draws}`);
+    const fr = st.frames - prev.frames;
+    const row = { flips: st.flips - prev.flips, frames: fr, draws: st.draws,
+      copy: fr ? (st.copyMs - prev.copyMs) / fr : 0, encode: fr ? (st.encodeMs - prev.encodeMs) / fr : 0,
+      vkb: fr ? (st.vtx - prev.vtx) / fr / 1024 : 0, ukb: fr ? (st.uni - prev.uni) / fr / 1024 : 0 };
+    rows.push(row);
+    console.log(`${el()} flips ${String(row.flips).padStart(3)}/s  page frames ${String(fr).padStart(3)}  draws ${String(st.draws).padStart(4)}  ` +
+      `stage+claim ${row.copy.toFixed(2)} ms  encode ${row.encode.toFixed(2)} ms  vtx ${row.vkb.toFixed(0)} KB uniforms ${row.ukb.toFixed(0)} KB per frame`);
     prev = st;
     if (st.exit !== null || st.err) break;
   }
+  if (prof) console.log(await prof);
   const f = rows.map((r) => r.flips).sort((x, y) => x - y);
   const avg = f.reduce((a, x) => a + x, 0) / Math.max(1, f.length);
   console.log(`RESULT ${players} players${kbd ? ' (last on the keyboard)' : ''}: fps avg ${avg.toFixed(1)} min ${f[0]} ` +
     `median ${f[f.length >> 1]} max ${f[f.length - 1]} over ${f.length} s; draws avg ` +
-    `${(rows.reduce((a, r) => a + r.draws, 0) / Math.max(1, rows.length)).toFixed(0)}`);
+    `${(rows.reduce((a, r) => a + r.draws, 0) / Math.max(1, rows.length)).toFixed(0)}; page stage ` +
+    `${(rows.reduce((a, r) => a + r.copy, 0) / Math.max(1, rows.length)).toFixed(2)} ms, encode ` +
+    `${(rows.reduce((a, r) => a + r.encode, 0) / Math.max(1, rows.length)).toFixed(2)} ms per frame`);
   console.log(`status: ${(await status()).status}`);
   await shot('race-end');
   result = 0;

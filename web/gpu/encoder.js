@@ -26,7 +26,7 @@
 // target at a new scale before the next frame ("window"). Off (1x, no MSAA):
 // none of that code runs.
 import * as P from './proto.js';
-import { makeLayouts, UNIFORM_SLOTS, vertexLayout, cubeMaskOf, inputMaskOf } from './layout.js';
+import { makeLayouts, UNIFORM_SLOTS, vertexLayout, cubeMaskOf, inputMaskOf, constRangeOf } from './layout.js';
 
 const BLEND_FACTOR = {
   0x0000: ['zero', 'zero'], 0x0001: ['one', 'one'],
@@ -283,7 +283,7 @@ export class GpEncoder {
         case P.GP_SHADER_VS: case P.GP_SHADER_PS: {
           const code = dec.decode(payload.slice(0, Math.max(0, c.bytes - 1)));   // slice: not shared
           const module = this.dev.createShaderModule({ label: `${c.op === P.GP_SHADER_VS ? 'vs' : 'ps'}_${c.id}`, code });
-          if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module, inputs: inputMaskOf(code) });
+          if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module, inputs: inputMaskOf(code), crange: constRangeOf(code) });
           else this.psMods.set(c.id, { module, cube: cubeMaskOf(code) });
           this.stats.shMs += performance.now() - t0; this.stats.shN++;
           break;
@@ -396,34 +396,71 @@ export class GpEncoder {
     return b;
   }
 
-  /** Repack the constant blocks the draws use into 256-aligned slots. */
+  /** Repack the constant blocks the draws use into 256-aligned slots.
+   *
+   * Uploads were the 4-player bottleneck (4 KB of slots a draw, 3000-4000
+   * draws: 12-16 MB a frame through the GPU process), so blocks are shared:
+   *  - xf / ps: by arena offset (gpu_rec.c's put_consts hands consecutive
+   *    equal blocks the same offset), as the VS constant file already was;
+   *  - smp: with the previous draw when its sampler words match;
+   *  - vsc: only the rows the program reads (constRangeOf: [lo, hi]) are
+   *    written; the 3 KB binding window starts lo rows before them (256-
+   *    aligned), so windows overlap rows nobody reads. A relative-addressing
+   *    program gets the whole file. */
   packUniforms(frame, draws) {
     const slots = [];
     let size = 3072;                       // offset 0: zeros, the "no block" slot for every binding
-    const vscSeen = new Map();
-    const take = (stride) => { const at = size; size += stride; return at; };
+    let end = 3072;                        // the highest window end (the buffer must hold it)
+    const vscSeen = new Map(), xfSeen = new Map(), psSeen = new Map();
+    const take = (stride) => { const at = size; size += stride; if (size > end) end = size; return at; };
+    let prevSmp = null;
     for (const d of draws) {
       if (d.kind !== P.GP_DRAW) continue;
-      const s = { xf: 0, vsc: 0, ps: 0, smp: 0 };
-      if (d.xfc_off !== 0xFFFFFFFF) s.xf = take(UNIFORM_SLOTS[0].stride);
-      if (d.vsc_off !== 0xFFFFFFFF) {
-        if (!vscSeen.has(d.vsc_off)) vscSeen.set(d.vsc_off, take(UNIFORM_SLOTS[1].stride));
-        s.vsc = vscSeen.get(d.vsc_off);
+      const s = { xf: 0, vsc: 0, ps: 0, smp: 0, vlo: 0, vhi: 0, wxf: false, wps: false, wsmp: false, wvsc: false };
+      if (d.xfc_off !== 0xFFFFFFFF) {
+        const k = d.vs === P.GP_VS_TVERT ? -1 - d.xfc_off : d.xfc_off;
+        if (!xfSeen.has(k)) { xfSeen.set(k, take(UNIFORM_SLOTS[0].stride)); s.wxf = true; }
+        s.xf = xfSeen.get(k);
       }
-      if (d.psc_off !== 0xFFFFFFFF) s.ps = take(UNIFORM_SLOTS[2].stride);
-      s.smp = take(UNIFORM_SLOTS[3].stride);
+      if (d.vsc_off !== 0xFFFFFFFF) {
+        const [lo, hi] = this.vsMods.get(d.vs)?.crange ?? [0, 191];
+        const e = vscSeen.get(d.vsc_off);
+        if (e && e.lo <= lo && e.hi >= hi) s.vsc = e.at;
+        else {
+          // Rows lo..hi land at or after `size`; the window starts lo rows earlier.
+          const at = Math.max(0, (size - lo * 16 + 255) & ~255);
+          size = at + (hi + 1) * 16;
+          if (at + UNIFORM_SLOTS[1].size > end) end = at + UNIFORM_SLOTS[1].size;
+          if (size > end) end = size;
+          vscSeen.set(d.vsc_off, { at, lo, hi });
+          s.vsc = at; s.vlo = lo; s.vhi = hi; s.wvsc = true;
+          size = (size + 255) & ~255;
+        }
+      }
+      if (d.psc_off !== 0xFFFFFFFF) {
+        if (!psSeen.has(d.psc_off)) { psSeen.set(d.psc_off, take(UNIFORM_SLOTS[2].stride)); s.wps = true; }
+        s.ps = psSeen.get(d.psc_off);
+      }
+      const p = prevSmp;
+      if (p && p.smp[0] === d.smp[0] && p.smp[1] === d.smp[1] && p.smp[2] === d.smp[2] && p.smp[3] === d.smp[3] &&
+          p.border[0] === d.border[0] && p.border[1] === d.border[1] && p.border[2] === d.border[2] && p.border[3] === d.border[3])
+        s.smp = p.slots.smp;
+      else { s.smp = take(UNIFORM_SLOTS[3].stride); s.wsmp = true; }
       d.slots = s;
+      prevSmp = d;
       slots.push(d);
     }
+    size = Math.max(size, end);
     // One arena, reused frame to frame (the slots below 3072 stay zero).
     if (this.arena.byteLength < size) this.arena = new Uint8Array(Math.max(size, this.arena.byteLength * 2));
     const arena = this.arena, af = new Float32Array(arena.buffer), au = new Uint32Array(arena.buffer);
     const c = frame.consts;
     for (const d of slots) {
       const s = d.slots;
-      if (s.xf) arena.set(c.subarray(d.xfc_off, d.xfc_off + (d.vs === P.GP_VS_TVERT ? P.GpTvConsts.size : P.GpXfConsts.size)), s.xf);
-      if (s.ps) arena.set(c.subarray(d.psc_off, d.psc_off + P.GpPsConsts.size), s.ps);
-      if (s.vsc) arena.set(c.subarray(d.vsc_off, d.vsc_off + P.GpVsConsts.size), s.vsc);
+      if (s.wxf) arena.set(c.subarray(d.xfc_off, d.xfc_off + (d.vs === P.GP_VS_TVERT ? P.GpTvConsts.size : P.GpXfConsts.size)), s.xf);
+      if (s.wps) arena.set(c.subarray(d.psc_off, d.psc_off + P.GpPsConsts.size), s.ps);
+      if (s.wvsc) arena.set(c.subarray(d.vsc_off + s.vlo * 16, d.vsc_off + (s.vhi + 1) * 16), s.vsc + s.vlo * 16);
+      if (!s.wsmp) continue;
       // GpWgslSmp: border colours (16 floats), which axes are BORDER (4 u32),
       // LOD bias (4 floats).
       const w = s.smp >> 2;
@@ -435,6 +472,7 @@ export class GpEncoder {
         af[w + 20 + st] = this.filtered(k) ? P.GP_SMP_BIAS_OF(k) / 256 : 0;
       }
     }
+    this.stats.uniBytes = (this.stats.uniBytes ?? 0) + size;
     const buf = this.buffer('uniforms', size, GPUBufferUsage.UNIFORM);
     this.dev.queue.writeBuffer(buf, 0, arena, 0, size);
     if (!this.group0)

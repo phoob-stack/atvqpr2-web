@@ -25,6 +25,9 @@ CFLAGS="--target=wasm32-wasip1-threads -pthread -msimd128 -mbulk-memory -mnontra
   -O2 -fno-delete-null-pointer-checks -mllvm -wasm-enable-sjlj
   -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -Wno-everything
   -include $GAME/src/web/wasm_compat.h"
+# WASM_CFLAGS_EXTRA: more flags for every compile, e.g. -fno-inline for a
+# profiling build whose CPU profiles name each C function (not for shipping).
+CFLAGS="$CFLAGS ${WASM_CFLAGS_EXTRA:-}"
 # Link configuration (memory, threads, exports): web/wasm/link-flags.sh.
 # The guest span ends below 0x84100000 (wasm-mem, WASM-MEM.md); runtime data,
 # the main C stack and the heap start there.

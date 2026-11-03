@@ -2,11 +2,11 @@
  * The browser build's present path: hands each flip to the page.
  *
  *  - gp_web_consume(f): the recorder's frame (gpu_proto.h) at the flip. The
- *    GpFrame is copied into the host block's mailbox, gp_seq is bumped, and
- *    the flip waits for the page to claim it (copy the arenas out), because
- *    the recorder reuses its arenas once the flip returns. The page draws it
- *    with web/gpu/encoder.js. nfsu2-web's claim-not-completion hand-off,
- *    simplified: one mailbox, no double buffer, no partial-frame readback.
+ *    GpFrame is copied into the host block's mailbox and gp_seq is bumped;
+ *    the page claims it (copies the arenas out) and draws it with
+ *    web/gpu/encoder.js. nfsu2-web's claim-not-completion hand-off: one
+ *    mailbox, the recorder's arenas double-buffered, so the flip waits only
+ *    for the previous frame's claim; no partial-frame readback.
  *  - web_fb_present(va, pitch, aa): fb_present.c's wasm branch, called by
  *    the pushbuffer executor right after the back end's flip: which guest
  *    framebuffer the title shows. With GPU frames the page shows the render
@@ -102,21 +102,14 @@ static uint64_t now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-void gp_web_consume(const GpFrame *f)
+/* Until the page has claimed frame `seq` (copied its arenas out), at most
+ * WEB_CLAIM_TIMEOUT_MS; only while a page is attached. */
+static void wait_claim(WebHost *h, uint32_t seq, uint32_t frame)
 {
-    WebHost *h = web_host();
-    uint32_t seq;
     uint64_t t0;
 
-    s_frame = *f;
-    s_frame.queue = queue_wgsl(f->queue, f->queue_bytes, &s_frame.queue_bytes);
-    h->gp_frame = (uint32_t)(uintptr_t)&s_frame;
-    h->last_draws = f->draw_count;
-    seq = __atomic_add_fetch(&h->gp_seq, 1, __ATOMIC_SEQ_CST);
-    __builtin_wasm_memory_atomic_notify((int *)&h->gp_seq, ~0u);
-    s_gp_ever = 1;
-
-    if (!__atomic_load_n(&h->page_attached, __ATOMIC_SEQ_CST))
+    if (!__atomic_load_n(&h->page_attached, __ATOMIC_SEQ_CST)
+        || __atomic_load_n(&h->gp_claimed, __ATOMIC_SEQ_CST) == seq)
         return;
     t0 = now_ms();
     for (;;) {
@@ -129,7 +122,7 @@ void gp_web_consume(const GpFrame *f)
             __atomic_add_fetch(&h->gp_dropped, 1, __ATOMIC_SEQ_CST);
             if ((h->gp_dropped & (h->gp_dropped - 1)) == 0)
                 fprintf(stderr, "[WEB] page did not claim frame %u in %u ms "
-                        "(%u dropped)\n", f->frame, WEB_CLAIM_TIMEOUT_MS,
+                        "(%u dropped)\n", frame, WEB_CLAIM_TIMEOUT_MS,
                         h->gp_dropped);
             return;
         }
@@ -138,6 +131,39 @@ void gp_web_consume(const GpFrame *f)
         __builtin_wasm_memory_atomic_wait32((int *)&h->gp_claimed, (int)c,
             (int64_t)(WEB_CLAIM_TIMEOUT_MS - waited) * 1000000);
     }
+}
+
+/* The recorder double-buffers its arenas on wasm (gpu_rec.c bufs_swap): the
+ * frame handed over here stays untouched until the flip after next. So the
+ * flip waits only for the PREVIOUS frame's claim, because the mailbox
+ * (s_frame, and s_q for a rewritten queue) is about to be overwritten, and
+ * the page stages frame N while the walk records N+1 -- the walk used to
+ * stand still for the whole stage (2-3 ms a frame in 4-player split screen).
+ * RECOMP_WEB_SYNC_CLAIM=1 waits for this frame's claim as well (the old
+ * hand-off, for A/B). */
+void gp_web_consume(const GpFrame *f)
+{
+    WebHost *h = web_host();
+    static int sync_claim = -1;
+    static uint32_t prev_frame;
+    uint32_t seq;
+
+    if (sync_claim < 0) {
+        const char *e = getenv("RECOMP_WEB_SYNC_CLAIM");
+        sync_claim = e && *e == '1';
+    }
+    if (s_gp_ever)
+        wait_claim(h, __atomic_load_n(&h->gp_seq, __ATOMIC_SEQ_CST), prev_frame);
+    s_frame = *f;
+    s_frame.queue = queue_wgsl(f->queue, f->queue_bytes, &s_frame.queue_bytes);
+    h->gp_frame = (uint32_t)(uintptr_t)&s_frame;
+    h->last_draws = f->draw_count;
+    seq = __atomic_add_fetch(&h->gp_seq, 1, __ATOMIC_SEQ_CST);
+    __builtin_wasm_memory_atomic_notify((int *)&h->gp_seq, ~0u);
+    s_gp_ever = 1;
+    prev_frame = f->frame;
+    if (sync_claim)
+        wait_claim(h, seq, f->frame);
 }
 
 /* gpu_wgsl_tap.c's gp_backend_flip calls gp_web_consume directly on wasm. */
