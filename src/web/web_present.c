@@ -140,10 +140,7 @@ void gp_web_consume(const GpFrame *f)
     }
 }
 
-/* gpu_wgsl_tap.c's gp_backend_flip calls the D3D11 consumer; on wasm the
- * page is the consumer. ponytail: render can call gp_web_consume there
- * under __wasm__ and drop this alias. */
-void gp_d3d11_consume(const GpFrame *f) { gp_web_consume(f); }
+/* gpu_wgsl_tap.c's gp_backend_flip calls gp_web_consume directly on wasm. */
 
 /* ---- display ------------------------------------------------------------ */
 
