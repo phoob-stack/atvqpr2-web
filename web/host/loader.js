@@ -35,7 +35,11 @@ const isMovie = (path) => /^movies\/[^/]+\.xmv$/i.test(path);
 const skipName = (name) => name.startsWith('.') || /^(thumbs\.db|desktop\.ini)$/i.test(name);
 /** Top-level folders of a game folder that hold saves or scratch, not game files. */
 export const SAVE_FOLDERS = /^(udata|tdata|cache|titlecache)$/i;
-const notSaves = (entries) => entries.filter((e) => !(e.path.includes('/') && SAVE_FOLDERS.test(e.path.split('/')[0])));
+const notSaves = (entries) => {
+  const keep = entries.filter((e) => !(e.path.includes('/') && SAVE_FOLDERS.test(e.path.split('/')[0])));
+  loaderState.savesLeftOut = entries.length - keep.length;
+  return keep;
+};
 
 /** What tests (web/tools/import.mjs) and the page read: phase, message, progress. */
 export const loaderState = { phase: 'idle', error: null, progress: null, result: null };
@@ -233,6 +237,8 @@ function runImporter(log) {
         const sha = await validate(entries);
         const skipMovies = $('skipmovies').checked;
         log(`[loader] default.xbe is the retail USA build (SHA-256 ${sha.slice(0, 16)}…); ${entries.length} files`);
+        if (loaderState.savesLeftOut) log(`[loader] left out ${loaderState.savesLeftOut} files in the folder's UDATA/TDATA/CACHE: ` +
+          "saves are not game files (Saves > Import the Windows build's save folder brings saves in)");
         $('imp-msg').textContent = 'This is ATV Quad Power Racing 2 (USA). Copying the files into this browser…';
         loaderState.phase = 'importing';
         bar.hidden = false;

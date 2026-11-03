@@ -281,6 +281,11 @@ export async function scanSaveFolder(dir) {
     }
     return found;
   };
+  if (ROOTS.includes(dir.name.toUpperCase())) {           // the player picked UDATA (or TDATA) itself
+    for await (const t of dir.values())
+      if (t.kind === 'directory' && t.name.toLowerCase() === TITLE_ID) await take(t, `${dir.name}/${t.name}`);
+    return out;
+  }
   if (await roots(dir, '')) return out;
   // The player may have picked the folder above (e.g. ...\Local with xboxrecomp in it).
   for await (const h of dir.values()) if (h.kind === 'directory' && await roots(h, `${h.name}/`)) return out;
@@ -317,7 +322,7 @@ export class SaveStore {
     return new Promise((resolve) => {
       navigator.locks.request('atv2-saves', { ifAvailable: true }, (l) => {
         if (!l) { this.frozen = 'another tab of this page has the saves'; resolve(false); return undefined; }
-        resolve(true);
+        this.holdsLock = true; resolve(true);
         return new Promise(() => {});           // held until the page goes away
       });
     });
@@ -427,10 +432,129 @@ export class SaveStore {
   }
 }
 
+// ---- the API for other pages (the site's Saves page) -----------------------------
+//
+// Same origin, any page: these work on OPFS directly, with or without the game
+// running. Changes (import, delete, restore) are staged and take effect when
+// the game page next starts (the game keeps its saves in memory while it
+// runs); results say restartNeeded. While the game runs in ANOTHER tab they
+// refuse unless { force: true } (that tab would keep writing its own saves
+// until it is reloaded). On the game page itself, main.js registers its store
+// (useStore) and the panel reloads the page after a change.
+//
+//   listProfiles()                  -> [{ id, kind: 'profile'|'records'|'other', name, rider, files, bytes, modified }]
+//   exportSaves({ ids? })           -> { name, blob, size, files }   (.zip; ids: only those save folders + the title's own files)
+//   importSaves(file | Uint8Array, { force? })      -> { count, bytes, notes, backup, restartNeeded }
+//   importNativeFolder(dirHandle | FileList, { force? }) -> same
+//   deleteProfile(id, { force? })   -> { backup, restartNeeded }
+//   listBackups()                   -> ['20261103-060159Z-before-import', ...] newest first
+//   restoreBackup(name, { force? }) -> same as importSaves
+//   gameRunningElsewhere()          -> true while another tab's game holds the saves
+
+let sharedStore = null;
+/** The game page registers its SaveStore so that the API and the game agree. */
+export function useStore(store) { sharedStore = store; }
+const api = () => sharedStore ?? (sharedStore = new SaveStore());
+
+export async function gameRunningElsewhere() {
+  if (!navigator.locks?.query) return false;
+  const q = await navigator.locks.query();
+  return q.held.some((l) => l.name === 'atv2-saves') && !sharedStore?.holdsLock;
+}
+async function guard(force) {
+  if (!force && await gameRunningElsewhere())
+    throw new Error('The game is running in another tab. Close it (or pass { force: true } and reload that tab right after).');
+}
+const done = (r) => ({ count: r.count, bytes: r.bytes, notes: r.notes, backup: r.backup ?? null, restartNeeded: true });
+
+/** "Name=..." of a SaveMeta.xbx (UTF-8 or UTF-16LE text). */
+function metaName(u8) {
+  if (!u8) return '';
+  const t = (u8[1] === 0 && u8.length > 2 ? new TextDecoder('utf-16le') : new TextDecoder()).decode(u8).replace(/^\uFEFF/, '');
+  return /Name=([^\r\n]*)/.exec(t)?.[1] ?? '';
+}
+/** The rider's name in "Rider Data": after the c7 2e ee 01 tag, a u16 length and the bytes. */
+function riderName(u8) {
+  if (!u8) return '';
+  for (let i = 0; i + 6 < Math.min(u8.length, 256); i++)
+    if (u8[i] === 0xc7 && u8[i + 1] === 0x2e && u8[i + 2] === 0xee && u8[i + 3] === 0x01) {
+      const n = u8[i + 4] | (u8[i + 5] << 8);
+      if (n > 0 && n < 64) return new TextDecoder('latin1').decode(u8.subarray(i + 6, i + 6 + n));
+    }
+  return '';
+}
+
+export async function listProfiles() {
+  const base = `UDATA/${TITLE_ID}/`, by = new Map();
+  for (const f of await api().current()) {
+    if (f.dir || !f.path.startsWith(base)) continue;
+    const s = f.path.slice(base.length).split('/');
+    if (s.length < 2) continue;
+    const p = by.get(s[0]) ?? { id: s[0], files: 0, bytes: 0, modified: 0, data: {} };
+    p.files++; p.bytes += f.data.length; p.modified = Math.max(p.modified, f.mtime ?? 0);
+    p.data[s.slice(1).join('/').toLowerCase()] = f.data;
+    by.set(s[0], p);
+  }
+  return [...by.values()].map(({ data, ...p }) => ({ ...p,
+    kind: data['rider data'] ? 'profile' : data.records ? 'records' : 'other',
+    name: metaName(data['savemeta.xbx']), rider: riderName(data['rider data']) }))
+    .sort((a, b) => (a.kind === b.kind ? a.id.localeCompare(b.id) : a.kind === 'profile' ? -1 : 1));
+}
+
+export async function exportSaves({ ids = null } = {}) {
+  let z = await api().exportZip();
+  if (!z) throw new Error('There are no saves to export yet.');
+  if (ids) {                                   // only some save folders (plus the title's own files)
+    const want = new Set(ids.map((i) => i.toLowerCase()));
+    const all = await readZip(z);
+    const keep = all.filter((e) => {
+      const s = e.path.split('/');
+      return e.path !== MANIFEST && (s[0] !== 'UDATA' || s.length <= 3 || want.has(s[2].toLowerCase()));
+    });
+    if (!keep.some((e) => !e.dir && e.path.split('/').length > 3)) throw new Error('None of those saves exist.');
+    const manifest = { format: 'atv2-saves', version: 1, game: 'ATV Quad Power Racing 2', titleId: TITLE_ID, exportedAt: new Date().toISOString(),
+      files: keep.filter((e) => !e.dir).map((e) => ({ path: e.path, size: e.data.length })) };
+    z = writeZip([{ path: MANIFEST, data: new TextEncoder().encode(JSON.stringify(manifest, null, 1)) },
+      ...keep]);
+  }
+  const files = (await readZip(z)).filter((e) => !e.dir && e.path !== MANIFEST).length;
+  return { name: `atv2-saves-${stamp(Date.now())}.zip`, blob: new Blob([z], { type: 'application/zip' }), size: z.length, files };
+}
+
+export async function importSaves(file, { force = false } = {}) {
+  await guard(force);
+  const u8 = file instanceof Uint8Array ? file : new Uint8Array(await file.arrayBuffer());
+  if (u8.length > 4 * MAX_BYTES) throw new Error(`That file is ${(u8.length / 1048576).toFixed(0)} MB; an ATV 2 save archive is a few KB.`);
+  return done(await api().importZip(u8, file.name ?? 'This file'));
+}
+
+export async function importNativeFolder(src, { force = false } = {}) {
+  await guard(force);
+  const raw = src?.kind === 'directory' ? await scanSaveFolder(src) : await scanSaveFileList([...src]);
+  return done(await api().importEntries(raw, src?.name ? `The folder ${src.name}` : 'That folder'));
+}
+
+export async function deleteProfile(id, { force = false } = {}) {
+  await guard(force);
+  const st = api(), cur = await st.current(), pre = `UDATA/${TITLE_ID}/${id}`.toLowerCase();
+  if (!id || /[\/]/.test(id) || !cur.some((f) => f.path.toLowerCase() === pre)) throw new Error(`There is no save ${id}.`);
+  const rest = cur.filter((f) => f.path.toLowerCase() !== pre && !f.path.toLowerCase().startsWith(pre + '/'));
+  const r = await st.replace(rest, { reason: 'delete' });
+  return { backup: r.backup, restartNeeded: true };
+}
+
+export const listBackups = () => api().backups();
+
+export async function restoreBackup(name, { force = false } = {}) {
+  await guard(force);
+  return done(await api().restoreBackup(name));
+}
+
 // ---- the page's UI ---------------------------------------------------------------
 
 /** The "Saves" button and panel (index.html). `reload` restarts the page. */
 export function wireSavesUI(store, { reload = () => location.reload() } = {}) {
+  useStore(store);
   const $ = (id) => document.getElementById(id);
   const btn = $('saves-btn'), panel = $('saves');
   if (!btn || !panel) return;
@@ -444,7 +568,7 @@ export function wireSavesUI(store, { reload = () => location.reload() } = {}) {
     $('saves-export').disabled = !s.files;
     const b = await store.backups();
     $('saves-restore').hidden = !b.length;
-    $('saves-restore').textContent = b.length ? `Restore the saves from before the last import (${b[0].slice(0, 15)})` : '';
+    $('saves-restore').textContent = b.length ? `Put back the previous saves (backup ${b[0].replace(/^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d).*$/, '$1-$2-$3 $4:$5 UTC')})` : '';
     $('saves-restore').dataset.name = b[0] ?? '';
   };
   btn.onclick = () => { panel.hidden = !panel.hidden; if (!panel.hidden) { msg(''); refresh().catch((e) => msg(e.message, 'err')); } };
@@ -497,7 +621,7 @@ export function wireSavesUI(store, { reload = () => location.reload() } = {}) {
     const list = [...$('saves-dir').files];
     $('saves-dir').value = '';
     if (!list.length) return;
-    run(async () => done(await store.importEntries(await scanSaveFileList(list), 'That folder'), 'the folder'));
+    run(async () => { msg('Checking the folder…'); done(await store.importEntries(await scanSaveFileList(list), 'That folder'), 'the folder'); });
   };
   $('saves-restore').onclick = () => run(async () => {
     const name = $('saves-restore').dataset.name;
