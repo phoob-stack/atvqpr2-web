@@ -20,7 +20,11 @@
  * When the race clock (0x1DA05C) starts, the driver stops for good and the
  * hook with it: the pause menu, RESTART, QUIT and the menus behave as usual.
  *
- * Off unless RECOMP_FREERIDE=1; off, nothing here runs but one flag test per
+ * RECOMP_FREERIDE=pick does the same but leaves RIDER SELECT and ATV SELECT
+ * to the player (their A), then carries on. Changing rider or ATV later: pause,
+ * QUIT, and the game's own flow returns to the time picker, rider and ATV select.
+ *
+ * Off unless RECOMP_FREERIDE=1 (or pick); off, nothing here runs but one flag test per
  * flip and per indirect call. Addresses are default.xbe SHA-256 1E3C2FCE...
  * (ATV Quad Power Racing 2, USA); a check of the strings and vtables used
  * turns it off on anything else.
@@ -50,6 +54,7 @@ void sub_000B62C0(void);
 #define FR_FS_CURSOR        0x001D86B0u  /* time picker's remembered cursor         */
 #define FR_RACE_TIME        0x001DA05Cu  /* f32 s, runs from the race start         */
 #define FR_UNLIMITED        0x497423F0u  /* 999999.0f                               */
+#define FR_CFG_COUNTDOWN    0x001D73CCu  /* USER.XML config (0x1D73C0) mCountdown    */
 
 /* State classes (vtables). Root's current state is at +0x10; a mode state
  * (freestyle) sits at +0x18 with its own sub-state at +0x10. */
@@ -78,6 +83,9 @@ volatile int    atv2_freeride_hook;
 static uint32_t s_t0;             /* init, ms                                  */
 static uint32_t s_screen, s_since, s_last_press;
 static int      s_presses;
+static int      s_pick;           /* RECOMP_FREERIDE=pick: player picks rider/ATV */
+static uint32_t s_deadline;       /* give up if no race by then                */
+static uint32_t s_countdown = ~0u; /* mCountdown as loaded, while we hold it at 0 */
 
 static uint32_t fr_ms(void)
 {
@@ -132,6 +140,8 @@ void atv2_freeride_init(void)
     s_on = 1;
     s_active = 1;
     s_t0 = fr_ms();
+    s_deadline = s_t0 + 180000u;
+    s_pick = !strcmp(e, "pick");
     /* The intro movies come before the title; Free Ride skips them unless
      * RECOMP_SKIP_MOVIES says otherwise (read at the first file open). */
     if (!getenv("RECOMP_SKIP_MOVIES")) {
@@ -141,7 +151,8 @@ void atv2_freeride_init(void)
         setenv("RECOMP_SKIP_MOVIES", "1", 0);
 #endif
     }
-    fprintf(stderr, "[FREERIDE] on: Freestyle, Unlimited Time, Stadium: Main Event\n");
+    fprintf(stderr, "[FREERIDE] on: Freestyle, Unlimited Time, Stadium: Main Event%s\n",
+            s_pick ? " (rider and ATV picked by the player)" : "");
     fflush(stderr);
 }
 
@@ -149,6 +160,10 @@ static void fr_stop(const char *why)
 {
     s_active = 0;
     atv2_freeride_hook = 0;
+    if (s_countdown != ~0u) {         /* RESTART counts down again, as usual */
+        wr32(FR_CFG_COUNTDOWN, s_countdown);
+        s_countdown = ~0u;
+    }
     fprintf(stderr, "[FREERIDE] %s at %.1f s after start (%d presses)\n", why,
             (fr_ms() - s_t0) / 1000.0, s_presses);
     fflush(stderr);
@@ -260,11 +275,13 @@ void atv2_freeride_frame(void)
         atv2_freeride_hook = 1;
     }
     now = fr_ms();
-    if (now - s_t0 > 180000u) {
+    scr = fr_screen();
+    if (s_pick && (scr == VT_FS_RIDER || scr == VT_FS_ATV))
+        s_deadline = now + 180000u;       /* the player's turn: no hurry */
+    if ((int32_t)(now - s_deadline) > 0) {
         fr_stop("gave up (no race after 180 s)");
         return;
     }
-    scr = fr_screen();
     if (scr != s_screen) {
         fprintf(stderr, "[FREERIDE] %.2f s: %s (%06X)\n", (now - s_t0) / 1000.0,
                 fr_name(scr), scr);
@@ -284,6 +301,12 @@ void atv2_freeride_frame(void)
     case VT_MAIN_MENU:
         /* The time picker starts on the cursor it remembers: 4 = UNLIMITED. */
         wr32(FR_FS_CURSOR, 4);
+        /* No 3-2-1 before the first ride (USER.XML's mCountdown, put back
+         * when riding). */
+        if (s_countdown == ~0u) {
+            s_countdown = rd32(FR_CFG_COUNTDOWN);
+            wr32(FR_CFG_COUNTDOWN, 0);
+        }
         btn = "a";
         break;
     case VT_FS_TIME:
@@ -299,6 +322,8 @@ void atv2_freeride_frame(void)
             wr32(FR_FSMODE, 4);
             wr32(FR_TIMELIMIT, FR_UNLIMITED);
         }
+        if (s_pick)
+            return;                       /* the player's own A */
         btn = "a";
         break;
     case VT_FS_RACE:
