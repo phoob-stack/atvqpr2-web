@@ -40,9 +40,143 @@
   #imp-bar { width: 100%; height: 14px; margin-top: 10px; }
   #imp-stats { font: 12px ui-monospace, Consolas, monospace; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
+<!-- [site] the start page, in-game menu and settings (site/*.js); site.css overrides the styles above where needed. -->
+<link rel="stylesheet" href="./site/site.css">
 </head>
-<body>
+<body class="boot">
+<!-- [site] the start page (site/home.js). Hidden while the game runs. -->
+<div id="home">
+  <header class="top">
+    <a class="brand" href="#play" aria-label="ATV 2 start page">
+      <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+        <circle cx="32" cy="32" r="26" fill="none" stroke="currentColor" stroke-width="8" stroke-dasharray="6.5 4.4"/>
+        <circle cx="32" cy="32" r="14" fill="none" stroke="currentColor" stroke-width="4"/>
+        <circle cx="32" cy="32" r="4.5" fill="currentColor"/>
+      </svg>
+      <span class="name"><b>ATV 2</b><small>Quad Power Racing &middot; in your browser</small></span>
+    </a>
+    <nav id="nav" aria-label="Sections">
+      <a href="#play">Play</a><a href="#settings">Settings</a><a href="#saves">Saves</a><a href="#data">Game data</a><a href="#about">About</a>
+    </nav>
+  </header>
+  <main>
+    <section id="tab-play" class="tab-page">
+      <div class="hero">
+        <div class="hero-text">
+          <h1>Get muddy.</h1>
+          <p>The original Xbox ATV Quad Power Racing 2, recompiled and running in this browser at 60 fps, from your own copy of the game.</p>
+        </div>
+        <div class="launch">
+          <button id="btn-play" class="play" disabled><span>Play</span></button>
+          <button id="btn-freeride" class="freeride" disabled title="Freestyle on the Stadium with no clock (RECOMP_FREERIDE=1)">Free Ride</button>
+          <div id="play-summary" class="small muted"></div>
+          <div id="game-state" class="game-state">Looking for your game files&hellip;</div>
+        </div>
+      </div>
+      <div id="import-slot" hidden></div>
+      <div class="cards">
+        <div class="card">
+          <h3>Keyboard</h3>
+          <ul class="keys">
+            <li><kbd>Enter</kbd> START</li><li><kbd>Z</kbd> A, accelerate</li><li><kbd>X</kbd> B, brake</li>
+            <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> steer and lean</li><li><kbd>&larr;</kbd><kbd>&uarr;</kbd><kbd>&rarr;</kbd><kbd>&darr;</kbd> menus</li>
+            <li><kbd>Backspace</kbd> BACK</li><li><kbd>F1</kbd> or <kbd>Esc</kbd> page menu</li>
+          </ul>
+          <p class="small"><a href="#settings">Rebind keys and gamepad buttons</a></p>
+        </div>
+        <div class="card">
+          <h3>Gamepad</h3>
+          <p class="small">Plug in any pad with the standard layout and press a button: it drives player 1. The sound starts with your first click or key.</p>
+          <h3>Free Ride</h3>
+          <p class="small">Ride the Stadium with no clock and no rivals. It needs the Free Ride update of the game runtime; without it the button starts the game as usual.</p>
+        </div>
+        <div class="card">
+          <h3>Trouble?</h3>
+          <p class="small">If the game stops or will not start, Retry on the loading screen starts it again. The log is what a bug report needs.</p>
+          <button id="btn-homelog" class="btn ghost">Download log</button>
+          <div id="home-note" class="small muted"></div>
+        </div>
+      </div>
+    </section>
+    <section id="tab-settings" class="tab-page" hidden>
+      <h2>Settings</h2>
+      <p class="lead">Kept in this browser. Display and movie settings apply the next time the game starts; volume, the FPS counter and controls apply at once.</p>
+      <div id="settings-body"></div>
+    </section>
+    <section id="tab-saves" class="tab-page" hidden>
+      <h2>Saves</h2>
+      <div id="saves-body"></div>
+    </section>
+    <section id="tab-data" class="tab-page" hidden>
+      <h2>Game data</h2>
+      <div id="data-body"></div>
+    </section>
+    <section id="tab-about" class="tab-page" hidden>
+      <h2>About</h2>
+      <div class="cards about">
+        <div class="card wide">
+          <h3>What this is</h3>
+          <p>ATV Quad Power Racing 2 (Climax, 2003) for the original Xbox, statically recompiled: the game's x86 code is translated to C ahead of time, built for WebAssembly, and run here with its graphics drawn by WebGPU and its sound played by an AudioWorklet. Nothing is emulated instruction by instruction.</p>
+          <p><strong>No game data is included in this page or served by it.</strong> The server on this computer sends the page and the program only. The game's files come from your own copy, which you choose on the Play tab, and stay in this browser's private storage on this computer.</p>
+        </div>
+        <div class="card">
+          <h3>Using your own copy</h3>
+          <ol class="small">
+            <li>Copy the files of your ATV Quad Power Racing 2 disc to a folder: the one with <code>default.xbe</code>, <code>ATV.bah</code>, <code>ATV.bad</code>, <code>Fonts</code>, <code>Movies</code>, <code>Music</code>, <code>Sound</code>&hellip;</li>
+            <li>On the Play tab, choose that folder. The page checks that <code>default.xbe</code> is the retail <b>USA</b> release (its size and SHA-256); other releases and modified copies are refused.</li>
+            <li>The files are copied into the browser once (about 0.7 GB; "Skip the movies" saves about 380 MB). After that, Play starts straight away.</li>
+          </ol>
+          <p class="small">Game data &rarr; Forget game files removes the copy; your saves stay.</p>
+        </div>
+        <div class="card">
+          <h3>Credits</h3>
+          <ul class="small">
+            <li><b>xboxrecomp</b>: the static recompiler and the Xbox runtime under the game (kernel, NV2A, APU, USB).</li>
+            <li><b>nfsu2-web</b> (and nfsu2.xyz): the techniques this port learned from (frame packets drawn with WebGPU, a worker per guest thread, OPFS files, an AudioWorklet ring) and the idea of a start page like this one. No code, text or art is taken from it.</li>
+            <li><b>wasi-sdk</b>: the WebAssembly compiler and C library.</li>
+            <li><b>wgpu</b> (wgpu-native): the native WebGPU back end the shaders were proven on.</li>
+            <li>ATV Quad Power Racing 2 is the work of Climax and Acclaim. This is an unofficial project for people who own the game.</li>
+          </ul>
+        </div>
+        <div class="card wide">
+          <h3>Changelog</h3>
+          <ol id="changelog" class="changelog"></ol>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer class="small muted">Runs only on this computer (127.0.0.1). Works offline. Nothing is uploaded.</footer>
+</div>
 <canvas id="screen" width="1280" height="960" tabindex="0"></canvas>
+<!-- [site] over the game: loading card, fps counter, menu button, in-game menu (site/loading.js, site/overlay.js). -->
+<div id="loading" hidden>
+  <div class="ld-card">
+    <div class="spinner" aria-hidden="true"></div>
+    <h2 id="loading-title">ATV Quad Power Racing 2</h2>
+    <p id="loading-msg" role="status">Loading&hellip;</p>
+    <p id="loading-time" class="small muted"></p>
+    <div class="row"><button id="ld-retry" class="btn">Retry</button><button id="ld-reload" class="btn ghost">Reload</button><button id="ld-log" class="btn ghost">Download log</button></div>
+    <p id="loading-note" class="small muted"></p>
+  </div>
+</div>
+<div id="fps" hidden></div>
+<button id="menu-btn" title="Menu (F1 or Esc)" aria-label="Menu">&#9776;</button>
+<dialog id="menu" aria-label="Game menu">
+  <div class="mn-box">
+    <h2>Menu <small class="muted">The game keeps running: press START first to pause a race.</small></h2>
+    <div class="mn-items">
+      <button id="mn-back" class="mn"><span class="label">Back to the game</span><span class="key">F1 / Esc</span></button>
+      <button id="mn-fps" class="mn" aria-pressed="false"><span class="label">FPS counter</span><span class="state"></span></button>
+      <button id="mn-full" class="mn"><span class="label">Fullscreen</span><span class="state"></span></button>
+      <button id="mn-shot" class="mn"><span class="label">Screenshot (PNG)</span></button>
+      <button id="mn-settings" class="mn"><span class="label">Settings</span></button>
+      <button id="mn-log" class="mn"><span class="label">Download log</span></button>
+      <button id="mn-quit" class="mn quit"><span class="label">Quit to the start page</span></button>
+    </div>
+    <p id="mn-note" class="small muted" role="status"></p>
+    <div id="mn-settings-pane" hidden><div id="mn-settings-body"></div></div>
+  </div>
+</dialog>
 <div id="bar"><div id="status">loading…</div><button id="forget" hidden title="Delete the imported game files from this browser (saves stay)">Forget game files</button></div>
 <div id="importer" hidden>
   <div class="card">
@@ -61,7 +195,8 @@
   </div>
 </div>
 <div id="log"></div>
-<script type="module" src="./main.js"></script>
+<!-- [site] shell.js shows the start page, or boots the game (main.js) for Play and for any of main.js's own parameters. -->
+<script type="module" src="./site/shell.js"></script>
 <script>
   // Keep the canvas backing store at the element's size (letterboxing is in present.js).
   const cv = document.getElementById('screen');

@@ -31,7 +31,7 @@ const MOUNTS = { '/host/': join(ROOT, 'web/host'), '/gpu/': join(ROOT, 'web/gpu'
 // without copying it into the tree).
 const OVERLAY = arg('--overlay') ? resolve(arg('--overlay')) : null;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript',
-  '.json': 'application/json', '.wasm': 'application/wasm', '.wgsl': 'text/plain' };
+  '.json': 'application/json', '.wasm': 'application/wasm', '.wgsl': 'text/plain', '.css': 'text/css; charset=utf-8' };
 const ISOLATION = { 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp',
   'Cross-Origin-Resource-Policy': 'same-origin', 'Cache-Control': 'no-store' };
 

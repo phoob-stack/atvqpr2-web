@@ -4,6 +4,8 @@
 // stick, Backspace = BACK. A standard-mapping gamepad is mapped here to the
 // Xbox layout and merged with the keys.
 import { Host, HOST_KEYS_OFFSET } from './abi.js';
+// [site] the player's bindings (site/keymap.js): keyVks() is null with the default keys.
+import { keyVks, remapPad } from './site/keymap.js';
 
 const VK = {
   Enter: 0x0d, NumpadEnter: 0x0d, Backspace: 0x08, Tab: 0x09, Escape: 0x1b, Space: 0x20,
@@ -38,7 +40,7 @@ export class Input {
     this.down = new Set();
     this.padName = '';
     const set = (e, v) => {
-      const vks = vkOf(e.code);
+      const vks = keyVks(e.code) ?? vkOf(e.code);   // [site] rebinding
       if (!vks.length) return;
       for (const k of vks) this.keys[k] = v;
       if (v) this.down.add(e.code); else this.down.delete(e.code);
@@ -55,7 +57,7 @@ export class Input {
   /** Once per animation frame: the first connected gamepad -> pad_* fields. */
   pollGamepad() {
     const pads = navigator.getGamepads?.() ?? [];
-    const g = [...pads].find((p) => p && p.connected);
+    const g = remapPad([...pads].find((p) => p && p.connected));   // [site] pad bindings, menu
     const i = this.i32, at = Host.at;
     Atomics.add(i, at.pad_seq, 1);                 // odd: writing
     if (!g) {

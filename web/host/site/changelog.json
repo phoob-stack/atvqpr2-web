@@ -1,0 +1,24 @@
+[
+  { "date": "2026-11-03", "title": "Start page", "items": [
+    "A start page with Play and Free Ride, settings (display, movies, volume, controls, settings as text), saves, game data and this page.",
+    "In-game menu on F1 or Esc: FPS counter, fullscreen, screenshot, settings, download log, quit.",
+    "Keyboard and gamepad controls can be rebound." ] },
+  { "date": "2026-11-03", "title": "Your own game folder", "items": [
+    "The page asks for the folder of your own ATV Quad Power Racing 2 (USA) copy, checks default.xbe, and copies the files into this browser's storage once (about 0.7 GB; less without the movies).",
+    "An interrupted import resumes; \"Forget game files\" removes the copy and keeps the saves.",
+    "The local server sends no game data at all." ] },
+  { "date": "2026-11-03", "title": "A race at 60 fps in Edge", "items": [
+    "Races run at a steady 60 fps (uncapped about 116): the game thread no longer spins in D3D's kick-off, and the page draws straight from shared memory.",
+    "Keyboard and gamepad drive player 1; the controller no longer gives up when it starts late." ] },
+  { "date": "2026-11-03", "title": "Sound and movie skip", "items": [
+    "Sound plays in the browser through an AudioWorklet after the first click or key.",
+    "Skip the movies to reach PRESS START in under 15 seconds." ] },
+  { "date": "2026-11-03", "title": "WebGPU", "items": [
+    "The game's GPU work is recorded as frame packets and drawn with WebGPU: NV2A vertex programs and register combiners become WGSL shaders.",
+    "Guest memory and the hardware registers work without page faults, as WebAssembly needs." ] },
+  { "date": "2026-11-02", "title": "GPU renderer", "items": [
+    "First GPU-drawn frames, then vertex programs and combiners on the GPU, then a full race at full speed.",
+    "Mipmaps, tyres and the black-square bug fixed." ] },
+  { "date": "2026-11-01", "title": "Static recompile", "items": [
+    "The retail Xbox game translated to C with xboxrecomp and running on Windows: menus, races, movies." ] }
+]
