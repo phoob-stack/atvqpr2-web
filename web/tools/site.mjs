@@ -209,6 +209,8 @@ try {
     await sleep(800);
     const png = downloads().find((d) => d.f.endsWith('.png'));
     check(png && png.size > 10000, `screenshot saved: ${png ? `${png.f}, ${png.size} bytes` : 'none'}`);
+    const fb = await b.eval(`import('/host/site/overlay.js').then((m) => m.canvasShot()).then((x) => x?.size ?? 0)`);
+    check(fb > 10000, `screenshot fallback from the canvas: ${fb} bytes`);
     await click('#mn-log');
     await sleep(800);
     const txt = downloads().find((d) => d.f.startsWith('atv2-log-') && d.f.endsWith('.txt'));

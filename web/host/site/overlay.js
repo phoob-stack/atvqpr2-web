@@ -77,10 +77,36 @@ function armQuit(on) {
   $('mn-quit').querySelector('.label').textContent = on ? 'Click again to quit (unsaved progress is lost)' : 'Quit to the start page';
 }
 
+/**
+ * What the canvas shows, as a PNG blob, or null. A WebGPU canvas can only be
+ * read in the animation frame it was drawn in, so this tries in the frames
+ * that follow (its callback runs after main.js's tick, which presents), for
+ * up to a second, until one comes back with a picture.
+ */
+export async function canvasShot() {
+  const cv = $('screen');
+  if (!cv.width || !cv.height) return null;
+  const c = new OffscreenCanvas(cv.width, cv.height), cx = c.getContext('2d', { willReadFrequently: true });
+  for (let n = 0; n < 60; n++) {
+    await new Promise((r) => requestAnimationFrame(r));
+    cx.clearRect(0, 0, c.width, c.height);
+    cx.drawImage(cv, 0, 0);
+    const px = cx.getImageData(0, 0, c.width, c.height).data;
+    for (let i = 0; i < px.length; i += 4 * 97) if (px[i] | px[i + 1] | px[i + 2]) return c.convertToBlob({ type: 'image/png' });
+  }
+  return null;
+}
+
 export async function screenshot() {
-  const url = await window.atv?.snapshot?.();
-  if (!url) { note('No frame to save yet.'); return null; }
-  const blob = await (await fetch(url)).blob();
+  // The game's own frame at its render size (presenter.snapshot); when the shown framebuffer has no
+  // render target right now (the presenter keeps the last frame up), what the canvas shows.
+  let url = null;
+  for (let n = 0; n < 30 && !url; n++) {          // the shown framebuffer can lack a render target for a frame or two
+    url = await window.atv?.snapshot?.().catch(() => null);
+    if (!url) await new Promise((r) => requestAnimationFrame(r));
+  }
+  const blob = url ? await (await fetch(url)).blob() : await canvasShot().catch(() => null);
+  if (!blob) { note('No frame to save yet.'); return null; }
   const name = `atv2-${stamp()}.png`;
   downloadBlob(blob, name);
   siteLog(`screenshot ${name}, ${blob.size} bytes`);
