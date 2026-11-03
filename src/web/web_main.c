@@ -70,6 +70,8 @@ void atv2_control_init(void) {}
 
 /* ---- crash report (called by the worker after a trap) ------------------ */
 
+void xbox_WasmStdioDrain(unsigned ms);   /* xboxrecomp platform/wasm_stdio.c */
+
 __attribute__((export_name("web_report_crash")))
 void web_report_crash(void)
 {
@@ -91,6 +93,9 @@ void web_report_crash(void)
             fprintf(stderr, "    (no return addresses in range)\n");
     }
     fflush(stderr);
+    /* stdout and stderr are queued for a drain thread (wasm_stdio.c): give
+     * it the report before the page ends the Workers. */
+    xbox_WasmStdioDrain(500);
 }
 
 /* ---- fast kickoff ack (main.c's kick_ack_thread, on pthreads) ---------- */
