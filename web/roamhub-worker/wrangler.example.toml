@@ -1,0 +1,38 @@
+# wrangler.example.toml -- an EXAMPLE configuration for the free-roam hub as a
+# Cloudflare Worker + Durable Object. Nothing here is deployed. Copy it to
+# wrangler.toml and fill in the placeholders on your own account; no account id
+# or secret belongs in this repository.
+
+name = "atv2-roamhub"                 # <your worker name>
+main = "worker.js"
+compatibility_date = "2025-01-01"     # <a date your account supports>
+# account_id = "<YOUR_ACCOUNT_ID>"    # or CLOUDFLARE_ACCOUNT_ID in the environment, never committed
+
+# One Durable Object per room (worker.js: env.ROOMS.idFromName(room)).
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RoamRoom"
+
+# SQLite-backed Durable Objects (the free plan's kind); the object only uses
+# the key-value storage API (players in their resume grace, the room name).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoamRoom"]
+
+[vars]
+MAX_PLAYERS = "8"          # per room (at most 8: the local rider + 7 rider slots)
+GRACE_S = "10"             # a dropped player keeps its id this long for a resume
+COLLIDE = "0"              # "1": collisions on in every room (clients get it in the welcome)
+GHOST_S = "3"              # ghost period after spawn / respot, seconds
+ALLOWED_ORIGINS = ""       # e.g. "https://<your site>" -- empty: any (native clients send none)
+LOG = "0"                  # "1": room events to the Worker log
+
+# Optional: a rate limit on new connections per IP (Workers rate limiting
+# binding). worker.js uses it when env.RL exists.
+# [[unsafe.bindings]]
+# name = "RL"
+# type = "ratelimit"
+# namespace_id = "<A NUMBER YOU CHOOSE>"
+# simple = { limit = 20, period = 60 }
+
+# routes = [{ pattern = "<roam.your-domain.example>/roam*", zone_name = "<your-domain.example>" }]

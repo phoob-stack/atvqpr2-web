@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>   /* ptrdiff_t */
+#include <stdlib.h>   /* getenv */
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -190,6 +191,12 @@ void recomp_icall_not_code_log(uint32_t va)
                     "(null or wild function pointer, at call #%llu)\n",
             va, (unsigned long long)hits[i],
             (unsigned long long)g_icall_count);
+    /* RE aid (RECOMP_ICALL_STACK=1): the first time, the guest return
+     * addresses on the stack (values that point into .text), innermost first. */
+    if (hits[i] == 1 && getenv("RECOMP_ICALL_STACK")) {
+        extern void atv2_roam_stack_dump(void);   /* src/roam.c */
+        atv2_roam_stack_dump();
+    }
     fflush(stderr);
 }
 
