@@ -50,6 +50,8 @@ Thumbs.db
 
 # Local build dirs and logs
 build-*/
+# Prebuilt runtime kits (web/wasm/package-runtime.sh): binaries, never committed
+dist/
 *.log
 
 # ── Anything taken from the disc never goes in this repo ──────────────

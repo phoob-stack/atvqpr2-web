@@ -21,22 +21,18 @@ OUT="$GAME/build-wasm"
 GEN="$GAME/src/recomp/gen"
 mkdir -p "$OUT/gen" "$OUT/rt" "$OUT/fuzz"
 
-CFLAGS="--target=wasm32-wasip1-threads -pthread -msimd128 -mbulk-memory -mnontrapping-fptoint -mtail-call
-  -O2 -fno-delete-null-pointer-checks -mllvm -wasm-enable-sjlj
-  -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -Wno-everything
-  -include $GAME/src/web/wasm_compat.h"
+# Flags, path map, include path and runtime source list: runtime-flags.sh,
+# shared with package-runtime.sh (the prebuilt runtime kit).
+. "$HERE/runtime-flags.sh"
+CFLAGS="$WASM_CFLAGS_COMMON -include $GAME/src/web/wasm_compat.h $WASM_PREFIX_MAP"
 # WASM_CFLAGS_EXTRA: more flags for every compile, e.g. -fno-inline for a
 # profiling build whose CPU profiles name each C function (not for shipping).
 CFLAGS="$CFLAGS ${WASM_CFLAGS_EXTRA:-}"
-# Link configuration (memory, threads, exports): web/wasm/link-flags.sh.
-# The guest span ends below 0x84100000 (wasm-mem, WASM-MEM.md); runtime data,
-# the main C stack and the heap start there.
-WASM_GLOBAL_BASE=${WASM_GLOBAL_BASE:-0x84100000}
-WASM_INITIAL_MEMORY=${WASM_INITIAL_MEMORY:-$(( 0x84100000 + (128 << 20) ))}
+# Link configuration (memory, threads, exports): web/wasm/link-flags.sh, with
+# the game module's memory map from runtime-flags.sh.
 . "$HERE/link-flags.sh"
 
-INC="-I$GEN -I$RT/include -I$RT/src -I$RT/src/kernel -I$RT/src/d3d -I$RT/src/platform -I$RT/src/usb
-  -I$RT/src/nv2a -I$RT/src/apu -I$RT/src/audio -I$RT/src/video -I$RT/src/input -I$GAME/src -I$GAME/src/gpu"
+INC="-I$GEN $RUNTIME_INC"
 
 compile() {  # dir src -> prints OK/FAIL line
   local o="$1/$(basename "$2" .c).o" e="$1/$(basename "$2" .c).err"
@@ -56,15 +52,10 @@ if [ "${SKIP_GEN:-0}" != 1 ]; then
 n=0; for f in "$OUT"/gen-src/*.c; do compile "$OUT/gen" "$f" & n=$((n+1)); [ $((n % 8)) = 0 ] && wait; done; wait
 fi
 echo "== runtime and game sources"
-# Skipped on purpose: the D3D8->D3D11 HLE (d3d8_*), SDL and Win32-only input/video
-# back ends, and the D3D11 GPU consumer -- the web build replaces them. main.c and
-# the control channel (winsock) are native only: src/web is the browser's main,
-# libc shims and the audio/input/present back ends (web/host is the page).
+# What is in the runtime, and what is left out and why: runtime_sources in
+# runtime-flags.sh.
 rm -f "$OUT"/rt/main.o "$OUT"/rt/control*.o
-for f in "$RT"/src/{apu,audio,kernel,nv2a,platform,usb,video,input}/*.c "$GAME"/src/recomp_manual.c "$GAME"/src/freeride.c "$GAME"/src/roam.c "$GAME"/src/roam_net.c \
-         "$GAME"/src/web/*.c "$GAME"/src/wasm/*.c "$GAME"/src/gpu/gpu_rec.c "$GAME"/src/gpu/gpu_shadergen*.c \
-         "$GAME"/src/gpu/gpu_wgsl_tap.c; do
-  case "$(basename "$f")" in *sdl*|d3d8_*|mkb_input.c|xinput_device.c) continue;; esac
+for f in $(runtime_sources); do
   compile "$OUT/rt" "$f"
 done
 echo "== trial link (everything kept, so every missing symbol shows)"

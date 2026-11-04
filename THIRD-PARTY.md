@@ -16,7 +16,13 @@ It is built against, but does not contain:
   `LICENSES/LGPL-2.1.txt`.
 - **wasi-sdk** (https://github.com/WebAssembly/wasi-sdk): the toolchain for
   the browser build. Apache-2.0 WITH LLVM-exception; it is installed
-  separately, not bundled.
+  separately, not bundled. The prebuilt runtime kit that
+  `web/wasm/package-runtime.sh` makes (outside git, in `dist/`) carries a
+  subset of it: wasi-libc headers and libraries, clang's builtin headers and
+  compiler-rt builtins. The kit's `THIRD-PARTY.md`
+  (`web/wasm/runtime-THIRD-PARTY.md`) lists them; `web/wasm/licenses/` holds
+  the standard texts of their licences (Apache-2.0, the LLVM exception, MIT,
+  BSD-2-Clause).
 
 Not included in any form: the game's files, and anything lifted or compiled
 from them. Players supply their own USA retail disc.
