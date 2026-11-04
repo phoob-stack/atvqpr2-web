@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configs · ATV 2 Port</title>
+<meta name="description" content="Every setting of the ATV 2 browser build: display, audio, controls and saves. Export it, import it, or open the local game with it.">
+<link rel="stylesheet" href="css/site.css">
+<script>try{var t=localStorage.getItem('atv2.site.theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="index.html" aria-label="ATV 2 port: home">
+    <span class="name"><b>ATV 2</b><small>PC &amp; browser port</small></span>
+  </a>
+  <nav class="nav" aria-label="Site">
+    <a href="index.html">Home</a><a href="configs.html" aria-current="page">Configs</a><a href="stats.html">Stats</a><a href="setup.html">Setup</a><a href="about.html">About</a>
+    <button id="theme-btn" class="theme-btn" type="button">Theme</button>
+  </nav>
+</header>
+<main id="main">
+  <h2>Configs</h2>
+  <p class="lead">Every setting the browser build has. Changes are kept in this browser as you make them, and the game on this site (Home &rarr; Play) uses them directly. Take them to the PC launcher's game as a <a href="#to-game">launch link or settings text</a>, or <a href="#file">export a file</a>.</p>
+  <noscript><p class="notice warn">This page needs JavaScript.</p></noscript>
+
+  <div id="cfg-forms"></div>
+
+  <section class="card wide" id="controls" aria-labelledby="controls-title" style="margin-top:14px">
+    <h3 id="controls-title">Controls</h3>
+    <div class="tabs" role="tablist" aria-label="Controls">
+      <button class="tab" role="tab" id="tab-kb" aria-controls="pane-kb" aria-selected="true" type="button">Keyboard</button>
+      <button class="tab" role="tab" id="tab-pad" aria-controls="pane-pad" aria-selected="false" type="button" tabindex="-1">Gamepad</button>
+    </div>
+    <div id="pane-kb" role="tabpanel" aria-labelledby="tab-kb"></div>
+    <div id="pane-pad" role="tabpanel" aria-labelledby="tab-pad" hidden></div>
+  </section>
+
+  <section class="card wide" id="saves-opts" aria-labelledby="saves-title" style="margin-top:14px">
+    <h3 id="saves-title">Saves and start</h3>
+    <div id="cfg-launch" class="set-grid"></div>
+    <p class="small muted">The game on this site keeps saves in this browser's private storage for this site; the PC launcher's game keeps its own, for <code>127.0.0.1:8460</code>. Back them up from its Saves tab ("Download backup"); the zip opens on the <a href="stats.html">Stats</a> page here and in the Windows build's save folder.</p>
+  </section>
+
+  <section class="card wide" id="file" aria-labelledby="json-title" style="margin-top:14px">
+    <h3 id="json-title">Edit as text</h3>
+    <p class="small">The whole config as JSON. Edit it here or paste one from elsewhere; it is checked as you type and applied only when it is valid. A setting left out goes back to its default.</p>
+    <label for="cfg-json" class="sr-only">Config as JSON</label>
+    <textarea id="cfg-json" class="code" spellcheck="false" rows="18" aria-describedby="cfg-check"></textarea>
+    <div id="cfg-check" class="msg" role="status" aria-live="polite"></div>
+    <ul id="cfg-problems" class="problems" aria-label="Problems in the text"></ul>
+    <div class="row">
+      <button class="btn" type="button" id="cfg-apply">Apply text</button>
+      <button class="btn ghost" type="button" id="cfg-revert">Undo edits</button>
+      <button class="btn ghost" type="button" id="cfg-export">Export config file</button>
+      <label class="btn ghost" for="cfg-import">Import config file</label>
+      <input type="file" id="cfg-import" accept=".json,application/json" class="sr-only">
+    </div>
+    <div id="cfg-msg" class="msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card wide" id="to-game" aria-labelledby="togame-title" style="margin-top:14px">
+    <h3 id="togame-title">To the local game</h3>
+    <p class="small"><strong>Launch link.</strong> Opens the local game at <code>127.0.0.1:8460</code> and starts it with this config's display, movie, frame-rate and saves options. It works with the local game as it is today.</p>
+    <code class="linkbox" id="launch-url"></code>
+    <div class="row">
+      <a class="btn" id="launch-open" href="#" target="_blank" rel="noopener">Open the local game with these settings</a>
+      <button class="btn ghost" type="button" id="launch-copy">Copy link</button>
+    </div>
+    <ul id="launch-notes" class="problems"></ul>
+    <p class="small"><strong>Everything else</strong> (volume, FPS counter, keys, gamepad buttons): copy the settings text and paste it into the local game page under Settings &rarr; Edit settings as text &rarr; Apply text.</p>
+    <div class="row">
+      <button class="btn ghost" type="button" id="text-copy">Copy settings text</button>
+      <button class="btn ghost" type="button" id="text-download">Download settings text</button>
+    </div>
+    <details><summary class="small">Show the settings text</summary><pre class="tree" id="text-preview"></pre></details>
+    <p class="small muted">The exported JSON file's <code>version</code> and <code>values</code> are the exact form the local game stores, so a future "Import config file" button there can read it directly.</p>
+  </section>
+
+  <div class="row" style="margin-top:14px">
+    <button class="btn danger" type="button" id="cfg-reset">Reset every setting</button>
+  </div>
+</main>
+<footer class="site">
+  <p>Settings are kept in this browser only (localStorage). Nothing is uploaded.</p>
+</footer>
+<script type="module" src="js/configs.js"></script>
+</body>
+</html>

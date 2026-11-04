@@ -2,7 +2,8 @@
 
 A port of the original Xbox game *ATV Quad Power Racing 2* (2003) to Windows
 and to the web browser. The game's own x86 program is translated to C ahead of
-time by [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) and compiled for
+time by [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) (this project uses the fork
+[phoob-stack/xboxrecomp-atv2](https://github.com/phoob-stack/xboxrecomp-atv2)) and compiled for
 the target. A runtime stands in for the console's kernel, graphics chip, sound
 chip and USB controllers. Nothing is interpreted instruction by instruction.
 
@@ -33,11 +34,13 @@ compiled `atv2.wasm`, shader caches and saves.
      (`wasm32-wasip1-threads`). It writes `build-wasm/atv2.wasm`, and the
      build is reproducible.
    - **Windows:** CMake + Ninja with Visual Studio 2022 (MSVC, x64):
-     `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DXBOXRECOMP_DIR=<path to xboxrecomp>`, then
+     `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DXBOXRECOMP_DIR=<path to xboxrecomp-atv2>`, then
      `cmake --build build`.
 
-A **builder** package does steps 1 to 3 and starts the local server: one
-command, about 2 minutes on a fast PC. It isn't published yet. It needs:
+The **builder** (`builder/`) does steps 1 to 3 and starts the local server: one
+command (`build-atv2.cmd`, or `node builder.mjs`), about 2 minutes on a fast PC.
+Its `make-package.mjs` vendors this repository and the xboxrecomp fork into
+`sources/` (not committed). It needs:
 
 | Tool | Version |
 |---|---|
@@ -84,6 +87,10 @@ Hosting notes are in `web/tools/ROAMHUB-HOSTING.md`.
 | `web/wasm/` | The wasm build script and the prebuilt-runtime packaging |
 | `web/tools/` | Test and measurement tools (Edge via CDP), the free-roam hub |
 | `config/` | Function seeds for the lifter |
+| `builder/` | The bring-your-own-disc builder: checks `default.xbe`, lifts, compiles `atv2.wasm`, writes the play folder |
+| `site/` | The project website (https://atvqpr2.com): Play panel, Configs, Stats, Setup; `site/play/` is a copy of `web/host` made by `site/tools/sync-play.mjs` |
+| `delivery/` | Asset streaming: manifest, asset server, browser asset manager (server/CDN and local-files sources, OPFS cache), the test title, deploy pipeline |
+| `deploy/pterodactyl/` | Pterodactyl egg and steps for hosting the free-roam hub |
 
 ## Licence
 

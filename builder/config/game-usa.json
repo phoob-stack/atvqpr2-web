@@ -1,0 +1,11 @@
+{
+  "comment": "The one game this builder accepts: ATV: Quad Power Racing 2, USA retail disc, extracted to a folder. Size and SHA-256 of its default.xbe (the same values web/host/loader.js checks). Only these numbers are here, never the file.",
+  "title": "ATV: Quad Power Racing 2",
+  "region": "USA (NTSC-U) retail",
+  "defaultXbe": {
+    "name": "default.xbe",
+    "size": 1904640,
+    "sha256": "1e3c2fcebf62709f2f867da846942470ef3455da6c46a0f3eb2f18aec93bd22f"
+  },
+  "requiredFiles": ["default.xbe", "ATV.bah", "ATV.bad"]
+}

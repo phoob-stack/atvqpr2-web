@@ -1,0 +1,134 @@
+# The delivery stack on one VPS: the project site, the asset backend (with the
+# launcher page), the free-roam hub, and one of two front doors:
+#
+#   docker compose --profile caddy up -d     Caddy on :80/:443 with automatic TLS (Let's Encrypt)
+#   docker compose --profile tunnel up -d    Cloudflare Tunnel: no open ports at all
+#
+# Everything it serves comes from the pipeline's output (OUT_DIR, default
+# ../out, made by `node pipeline/build.mjs --hub-url /hub/`), mounted
+# read-only. Nothing is built into an image; the containers run the stock
+# node / caddy / cloudflared images. See deploy/README.md. Settings: .env
+# (copy .env.example; never commit .env).
+name: delivery
+
+x-node: &node
+  image: node:24.13.1-alpine          # pin by digest once pulled: node:24.13.1-alpine@sha256:...
+  user: "1000:1000"
+  read_only: true
+  restart: unless-stopped
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp:size=16m"]
+  networks: [internal]
+  logging: &logging
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+x-caddy: &caddy
+  image: caddy:2.10.2-alpine          # pin by digest once pulled
+  restart: unless-stopped
+  cap_drop: [ALL]
+  cap_add: [NET_BIND_SERVICE]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  networks: [internal]
+  depends_on:
+    assets: { condition: service_healthy }
+    hub: { condition: service_started }
+  logging: *logging
+
+services:
+  # The asset backend: manifest + objects at /assets/, the launcher page at /.
+  # Refuses to start if its folders fail the no-game-content scan.
+  assets:
+    <<: *node
+    command: ["node", "/app/server/asset-server.mjs"]
+    environment:
+      ASSET_HOST: "0.0.0.0"           # inside the container network only; no published port
+      ASSET_ALLOW_PUBLIC: "1"
+      ASSET_PORT: "8853"
+      ASSET_DIR: /srv/assets
+      WEB_DIR: /srv/web
+      ASSET_TRUST_PROXY: "1"          # the client address comes from Caddy's X-Forwarded-For
+      ASSET_TRUST_PROXY_HOPS: ${ASSET_TRUST_PROXY_HOPS:-1}
+      ASSET_RATE_RPS: ${ASSET_RATE_RPS:-50}
+      ASSET_RATE_BURST: ${ASSET_RATE_BURST:-200}
+      ASSET_CDN_BASE: ${ASSET_CDN_BASE:-}
+      ASSET_CDN_MODE: ${ASSET_CDN_MODE:-redirect}
+      ASSET_CORP: ${ASSET_CORP:-same-origin}
+    volumes:
+      - ${OUT_DIR:-../out}/app:/app:ro
+      - ${OUT_DIR:-../out}/assets:/srv/assets:ro
+      - ${OUT_DIR:-../out}/web:/srv/web:ro
+    expose: ["8853"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8853/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # The free-roam hub (WebSocket), behind the proxy at /hub/.
+  hub:
+    <<: *node
+    command: ["node", "/app/hub/hub.mjs", "--quiet"]
+    environment:
+      HUB_HOST: "0.0.0.0"
+      HUB_ALLOW_REMOTE: "1"
+      HUB_PORT: "8854"
+      HUB_ORIGINS: https://${DOMAIN:-example.invalid}
+      HUB_MAX_PLAYERS: ${HUB_MAX_PLAYERS:-64}
+    volumes:
+      - ${OUT_DIR:-../out}/app:/app:ro
+    expose: ["8854"]
+
+  # Front door A: Caddy with automatic TLS for DOMAIN (ports 80 and 443 open).
+  caddy:
+    <<: *caddy
+    profiles: [caddy]
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      SITE_ADDRESS: ${DOMAIN:-example.invalid}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${OUT_DIR:-../out}/site:/srv/site:ro
+      - ${OUT_DIR:-../out}/site.caddy:/etc/caddy/site.caddy:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Front door B: the same Caddy routes on plain HTTP inside the network,
+  # reached only through cloudflared (TLS ends at Cloudflare; no open ports).
+  caddy-tunnel:
+    <<: *caddy
+    profiles: [tunnel]
+    environment:
+      SITE_ADDRESS: ":80"
+      ACME_EMAIL: ""
+    tmpfs: ["/data:size=16m"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${OUT_DIR:-../out}/site:/srv/site:ro
+      - ${OUT_DIR:-../out}/site.caddy:/etc/caddy/site.caddy:ro
+      - caddy_config:/config
+
+  cloudflared:
+    image: cloudflare/cloudflared:2025.10.1   # check the current release and pin by digest
+    profiles: [tunnel]
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}  # from the Cloudflare dashboard; only in .env, never committed
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [internal]
+    depends_on: [caddy-tunnel]
+    logging: *logging
+
+networks:
+  internal: {}
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}

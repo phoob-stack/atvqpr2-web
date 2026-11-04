@@ -1,0 +1,46 @@
+{
+  "comment": "Source snapshots vendored under sources/. make-package.mjs rebuilds them with `git archive <commit> -- <paths>` (core.autocrlf off). Only the listed paths go in; nothing generated is tracked in either repository.",
+  "package": "atv2-builder",
+  "version": "0.4.0",
+  "atvrecomp": {
+    "commit": "0923f0fe51d94a057e8ee28590b022262cfb4609",
+    "branch": "master",
+    "paths": [
+      ".gitattributes",
+      "LICENSE",
+      "README.md",
+      "THIRD-PARTY.md",
+      "CMakeLists.txt",
+      "config",
+      "src",
+      "web"
+    ],
+    "exclude": [
+      "src/recomp"
+    ]
+  },
+  "xboxrecomp": {
+    "commit": "975ef5ff918399e6d07c95dc4358a5f416481be5",
+    "branch": "atv2-local",
+    "upstream": "https://github.com/sp00nznet/xboxrecomp (MIT; atv2-local carries this project's local changes on top)",
+    "paths": [
+      "LICENSE",
+      "LICENSES",
+      "NOTICE",
+      "CONTRIBUTORS.md",
+      "README.md",
+      "include",
+      "src",
+      "templates/runtime",
+      "tools/__init__.py",
+      "tools/xbe_parser",
+      "tools/disasm",
+      "tools/func_id",
+      "tools/abi_analysis",
+      "tools/recomp"
+    ],
+    "exclude": [
+      "**/test_*.py"
+    ]
+  }
+}

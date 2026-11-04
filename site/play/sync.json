@@ -1,0 +1,228 @@
+{
+ "comment": "Written by tools/sync-play.mjs. The game page, copied from atvrecomp; our own code only.",
+ "atvrecomp": "00e0aa98f0e4360b83ab80c9188819e346bb3ffd",
+ "builds": [
+  {
+   "builder": "0.4.0",
+   "atvrecomp": "0923f0fe51d94a057e8ee28590b022262cfb4609",
+   "xboxrecomp": "975ef5ff918399e6d07c95dc4358a5f416481be5",
+   "wasiSdk": "34.0",
+   "wasm": {
+    "size": 22125567,
+    "sha256": "89698d4dd38158e43efbd900e10e21400de75045b6584b32161d52306c52508e"
+   }
+  }
+ ],
+ "files": [
+  {
+   "path": "gpu/encoder.js",
+   "size": 45915,
+   "sha256": "c9c806f7dd2783ad8a8f9085efac11f5f941bf482dd3c8d983d84f9f86e5dbb1"
+  },
+  {
+   "path": "gpu/layout.js",
+   "size": 4542,
+   "sha256": "a00413c9572b1d60e7da9d1593b2ee648913db93f52348521f0edfd592e3fe91"
+  },
+  {
+   "path": "gpu/proto.js",
+   "size": 5078,
+   "sha256": "f7c12f7d54ceff2f71701015f621f003d4794628a93ed0de1041ffee5bf02688"
+  },
+  {
+   "path": "host/abi.js",
+   "size": 2673,
+   "sha256": "ba9b3e9479dc42a6b460b3f28c7a6b3a376559a383adcfcbe111ccac178a4a2e"
+  },
+  {
+   "path": "host/audio-worklet.js",
+   "size": 4052,
+   "sha256": "34095b20d5aaf3a856fec8b42374e244755e28233e94514a3ff8ddb6bd9115d5"
+  },
+  {
+   "path": "host/canvas.js",
+   "size": 521,
+   "sha256": "8f8a0f792e9a57ab1f1c575c7bae0c2484b8c52322d89037520d40a2c31d68be"
+  },
+  {
+   "path": "host/compat.js",
+   "size": 18919,
+   "sha256": "aa51e09a74c4b18294c37d82d619dfd5deb9fd9bf7a1790e807dae6ddec3b856"
+  },
+  {
+   "path": "host/deploy.js",
+   "size": 749,
+   "sha256": "b51a3a41e7fe68be6e8d089e96b65602391be82fa3e0f6a9fd8138d01c1275a6"
+  },
+  {
+   "path": "host/early.js",
+   "size": 350,
+   "sha256": "60fb0791ebf463aeba4349a98f5e9025e8166626d860e8034aa29d8076d8f255"
+  },
+  {
+   "path": "host/game-worker.js",
+   "size": 1908,
+   "sha256": "928c050c8b6f0c641a009a10ddd86022f101597c6e96c1a9cf9d90955f9254af"
+  },
+  {
+   "path": "host/gamebuild.js",
+   "size": 7632,
+   "sha256": "b14f51d66f06cfd3542823463a3d86f341ced955063450428aae9d1f71d1bc01"
+  },
+  {
+   "path": "host/imports.js",
+   "size": 2348,
+   "sha256": "9dca9727bebed632b73ce3adf72c54a24af710dce4a083a9207ce4917ef2affd"
+  },
+  {
+   "path": "host/index.html",
+   "size": 17841,
+   "sha256": "ce971f6e0824534400b35e4a7655af0a54ac5031a4c480de0b2cd97ead5f2b45"
+  },
+  {
+   "path": "host/input.js",
+   "size": 6801,
+   "sha256": "521fc3e8ffa40cd2bdba9055d907ce5745f2f00b22fcb71ca6d38c3b65ac6eb6"
+  },
+  {
+   "path": "host/io-worker.js",
+   "size": 2534,
+   "sha256": "bb3ef6ea69a93a3efbd97050130feef5f7de8da6bf81bc90f9a865795c9239d9"
+  },
+  {
+   "path": "host/io.js",
+   "size": 2886,
+   "sha256": "3c415d45d3fa336041e658e68e260041748a1303efa41ae9de9003eabbad7670"
+  },
+  {
+   "path": "host/loader.js",
+   "size": 20667,
+   "sha256": "9f3858f8939b2493924df0c53b4e2e708edff340c9cca1192d5b74a5307c9cdd"
+  },
+  {
+   "path": "host/main.js",
+   "size": 26570,
+   "sha256": "5af8a407e2bf2856ea5d2f9e1945236029997f891d8e028869d9aef9dfa07951"
+  },
+  {
+   "path": "host/present.js",
+   "size": 10632,
+   "sha256": "a657b425683b783576da14c4f3a2cea45edb977923d0944892ebe8a02149b9f4"
+  },
+  {
+   "path": "host/roam.js",
+   "size": 8201,
+   "sha256": "ec0a6898afb063416d4682e60eada3722b1ca735c5c11e506088783501192aeb"
+  },
+  {
+   "path": "host/saves.js",
+   "size": 31831,
+   "sha256": "830c8da7510564d6143082edf8762102751e2f3642ae960351f87305284f0053"
+  },
+  {
+   "path": "host/site/changelog.json",
+   "size": 2278,
+   "sha256": "22889b81ca0ed0227bd62bd8409afa78fe6cbb0495a0496d09383180452aca44"
+  },
+  {
+   "path": "host/site/config-import.js",
+   "size": 2391,
+   "sha256": "e398a2e0f020700e14efe0b35acc7c7dfdd9b9c7cdc3f3d6bf39250c0f51267b"
+  },
+  {
+   "path": "host/site/gamedata-page.js",
+   "size": 6103,
+   "sha256": "bdc5ff7b0fc067cb50ec5196bb1237bc9c2401bc20e42f52f4d66853c294a26d"
+  },
+  {
+   "path": "host/site/gamedata.js",
+   "size": 3529,
+   "sha256": "0ea1212cedff4f81f65bb51c015eeb86272379a95af88102d9e991c2103d2b1d"
+  },
+  {
+   "path": "host/site/home.js",
+   "size": 5193,
+   "sha256": "5dc78bae5d173f3513e0b5fcc638ec5e25dabe4fb9bdebd13386007e93370b84"
+  },
+  {
+   "path": "host/site/keymap.js",
+   "size": 6673,
+   "sha256": "7ba19739e0af10f1dc7ea703fdcb9be832c3b1a9808ee7bb644c09d054fa55c6"
+  },
+  {
+   "path": "host/site/loading.js",
+   "size": 4608,
+   "sha256": "d916aa2d393cf724a2698242c6453c96281214a0705e148a7f65e43fd282bc05"
+  },
+  {
+   "path": "host/site/logs.js",
+   "size": 4094,
+   "sha256": "14645283d855879d3943dc7801f15cd4107d8e560e3529deac803658ab3a08fe"
+  },
+  {
+   "path": "host/site/overlay.js",
+   "size": 9509,
+   "sha256": "938bd8d8d83fad26191b9a7bd434890261def1aec6c9db206fc5744e9e063d8c"
+  },
+  {
+   "path": "host/site/saves-page.js",
+   "size": 12834,
+   "sha256": "1c4f711f7494223b18c32a998ac7815fc39e5a3beebab2d6a97b2dd975029f09"
+  },
+  {
+   "path": "host/site/settings-ui.js",
+   "size": 14775,
+   "sha256": "dc57a97d782dc7b91d818380f59647832cfdd2b47cb926bc8da2775823a35842"
+  },
+  {
+   "path": "host/site/settings.js",
+   "size": 12519,
+   "sha256": "6ec2687d1e114680487f818becc5793242a28e14926000563ab8783f3e397bee"
+  },
+  {
+   "path": "host/site/shell.js",
+   "size": 5456,
+   "sha256": "5c639a3dea9ed85ce41dcb203ad37e0f52b4cceeff931955fe4833737c3b04d9"
+  },
+  {
+   "path": "host/site/site.css",
+   "size": 16550,
+   "sha256": "1cd2b621cc18523583765fc16aed62edd95831df9a9b7c3667822e17fc6bde32"
+  },
+  {
+   "path": "host/thread-worker.js",
+   "size": 4149,
+   "sha256": "f3300551562f4edd32a5578c50acbbeb58ebdf4955227db935af39a46631578f"
+  },
+  {
+   "path": "host/threads.js",
+   "size": 13958,
+   "sha256": "05581f48c655a70bf3a65870cfa7f93eab7c692f8c24fcb14d25a0604964ff05"
+  },
+  {
+   "path": "host/vfs.js",
+   "size": 13865,
+   "sha256": "0ab5e05e0104d738e6cc8b90d7b00e851637e2e6169ab8145d7a1971d18212a0"
+  },
+  {
+   "path": "host/wasi.js",
+   "size": 14820,
+   "sha256": "952f1c19a591266b6da2f4936bf7cd119be4d384d83fab56e5ff32274b1964d5"
+  },
+  {
+   "path": "host/wasm-load.js",
+   "size": 5509,
+   "sha256": "b1d19fff27518dad442c517d0e2d91ad4e1a64ab27a938498b1b1bb90eb3d73b"
+  },
+  {
+   "path": "host/zip.js",
+   "size": 6774,
+   "sha256": "cfb395414e306e26778e94d03854cd035b3d07cbb608939934bd7233ac74494e"
+  },
+  {
+   "path": "index.html",
+   "size": 289,
+   "sha256": "516798df14e255b3f1c76220cede2455a2f901516c523c3f760708179eed98b0"
+  }
+ ]
+}

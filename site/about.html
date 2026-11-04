@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About · ATV 2 Port</title>
+<meta name="description" content="What the ATV 2 PC and browser port is, how it was made, and its changelog.">
+<link rel="stylesheet" href="css/site.css">
+<script>try{var t=localStorage.getItem('atv2.site.theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="index.html" aria-label="ATV 2 port: home">
+    <span class="name"><b>ATV 2</b><small>PC &amp; browser port</small></span>
+  </a>
+  <nav class="nav" aria-label="Site">
+    <a href="index.html">Home</a><a href="configs.html">Configs</a><a href="stats.html">Stats</a><a href="setup.html">Setup</a><a href="about.html" aria-current="page">About</a>
+    <button id="theme-btn" class="theme-btn" type="button">Theme</button>
+  </nav>
+</header>
+<main id="main">
+  <h2>About</h2>
+  <div class="cards">
+    <section class="card wide" aria-labelledby="what-title">
+      <h3 id="what-title">What this is</h3>
+      <div class="prose">
+        <p>ATV Quad Power Racing 2 came out for the original Xbox in 2003. This project runs it on a PC, natively on Windows and in Edge or Chrome, by <strong>static recompilation</strong>: the game's x86 program is translated to C ahead of time and compiled for the target, and a runtime stands in for the console's kernel, graphics chip, sound chip and USB controllers. Nothing is interpreted instruction by instruction.</p>
+        <p>In the browser the C is compiled to WebAssembly. Each game thread gets its own worker, the console's GPU commands are recorded into frame packets and drawn with WebGPU (its vertex programs and pixel combiners become shaders), the sound runs through an AudioWorklet, and the game's files come from the browser's private storage.</p>
+        <p><strong>The game is not included.</strong> No game content is part of this project: you must supply the files from your own legally owned USA retail disc. The recompiled code is produced on each player's own computer from their own disc and is never published. This site holds only our own code, text and settings.</p>
+      </div>
+    </section>
+    <section class="card" aria-labelledby="ms-title">
+      <h3 id="ms-title">Milestones</h3>
+      <ol class="changelog" id="milestones"></ol>
+    </section>
+    <section class="card" aria-labelledby="credits-title">
+      <h3 id="credits-title">Built with</h3>
+      <ul class="small prose">
+        <li><strong>xboxrecomp</strong>, an open-source static recompiler and Xbox runtime, which this project extends.</li>
+        <li><strong>wasi-sdk</strong> for the WebAssembly build, and <strong>wgpu</strong> for the native WebGPU back end the shaders were first proven on.</li>
+        <li>The browser's own WebGPU, Web Workers, AudioWorklet, Gamepad API and private file storage.</li>
+        <li>Ideas from other browser ports of console games, notably the way their sites offer configs and stats. No code, text or art was taken from them.</li>
+      </ul>
+      <h3 style="margin-top:12px">Legal</h3>
+      <p class="small">An unofficial, non-commercial fan project. ATV Quad Power Racing 2 and its trademarks belong to their owners; this project is not affiliated with them. You need your own legally owned copy of the game.</p>
+      <h3 style="margin-top:12px">Licence</h3>
+      <p class="small">This project's own code, including this site and the builder, is under the MIT licence (Copyright (c) 2026 the ATV QPR2 recomp contributors). The bundled xboxrecomp recompiler is MIT; its sound and parts of its graphics code come from xemu and are LGPL-2.1-or-later. The full notices ship with the builder (<code>LICENSE</code>, <code>THIRD-PARTY.md</code>).</p>
+    </section>
+    <section class="card wide" aria-labelledby="cl-title">
+      <h3 id="cl-title">Changelog</h3>
+      <ol class="changelog" id="changelog" aria-live="polite"></ol>
+    </section>
+  </div>
+</main>
+<footer class="site">
+  <p>An unofficial fan project for people who own the game. No game content is hosted here.</p>
+</footer>
+<script type="module" src="js/about.js"></script>
+</body>
+</html>

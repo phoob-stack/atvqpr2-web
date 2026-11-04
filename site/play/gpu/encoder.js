@@ -1,0 +1,875 @@
+// The WebGPU drawing side: consumes the same frame packets (gpu_proto.h) as
+// src/gpu/gpu_d3d11.c, rule for rule, so the two pictures can be diffed.
+//
+//   const enc = new GpEncoder(device, features);
+//   enc.consume(frame);            // frame = parseCapture(...) or, in the
+//                                  // wasm build, views into wasm memory
+//   const px = await enc.readTarget(id);
+//
+// Drain the resource queue in order (render targets, depth, textures, WGSL
+// shaders), then draw the records in order. What differs from D3D11 and why:
+//   - constants: one uniform arena per frame, repacked to 256-byte slots and
+//     bound with dynamic offsets (D3D11 maps a cbuffer per draw);
+//   - a target or depth change, or a clear, starts a new render pass (clears
+//     are pass load ops; D3D11 clears views directly);
+//   - no BORDER address mode: GpWgslSmp at group 0 binding 3, see the WGSL;
+//   - no depth-clip-disable: not needed, z is saturated in the VS;
+//   - pipelines (blend/depth/stencil/write mask are baked) are cached by key;
+//     nfsu2-web additionally prewarms them with createRenderPipelineAsync.
+//
+// Display options (new GpEncoder(device, features, { sx, sy, msaa, window })),
+// as src/gpu/gpu_display.h natively: render targets, depth and render-target
+// tiles at sx x sy times the guest size (the vertex shaders map guest surface
+// pixels to clip space by the guest size, so only the viewport changes; guest
+// pixels going in are scaled up), and/or 4x multisampled targets resolved
+// wherever they are read (sampled, copied, shown). setScale() rebuilds every
+// target at a new scale before the next frame ("window"). Off (1x, no MSAA):
+// none of that code runs.
+import * as P from './proto.js';
+import { makeLayouts, UNIFORM_SLOTS, vertexLayout, cubeMaskOf, inputMaskOf, constRangeOf } from './layout.js';
+
+const BLEND_FACTOR = {
+  0x0000: ['zero', 'zero'], 0x0001: ['one', 'one'],
+  0x0300: ['src', 'src-alpha'], 0x0301: ['one-minus-src', 'one-minus-src-alpha'],
+  0x0302: ['src-alpha', 'src-alpha'], 0x0303: ['one-minus-src-alpha', 'one-minus-src-alpha'],
+  0x0304: ['dst-alpha', 'dst-alpha'], 0x0305: ['one-minus-dst-alpha', 'one-minus-dst-alpha'],
+  0x0306: ['dst', 'dst-alpha'], 0x0307: ['one-minus-dst', 'one-minus-dst-alpha'],
+  0x0308: ['src-alpha-saturated', 'src-alpha-saturated'],
+  0x8001: ['constant', 'constant'], 0x8003: ['constant', 'constant'],
+  0x8002: ['one-minus-constant', 'one-minus-constant'], 0x8004: ['one-minus-constant', 'one-minus-constant'],
+};
+const BLEND_OP = { 0x800A: 'subtract', 0x800B: 'reverse-subtract', 0x8007: 'min', 0x8008: 'max' };
+const CMP = { 0x200: 'never', 0x201: 'less', 0x202: 'equal', 0x203: 'less-equal',
+  0x204: 'greater', 0x205: 'not-equal', 0x206: 'greater-equal' };
+const STENCIL_OP = { 0x0000: 'zero', 0x1E01: 'replace', 0x1E02: 'increment-clamp',
+  0x1E03: 'decrement-clamp', 0x150A: 'invert', 0x8507: 'increment-wrap', 0x8508: 'decrement-wrap' };
+const ADDR = { 1: 'repeat', 2: 'mirror-repeat' };
+
+// GpDraw.rect (x0 | y0 << 16, x1 | y1 << 16) within the target: the window
+// clip of a draw, the area of a clear. Split screen draws each player's view
+// into its own part of one target. full: it covers the target.
+function rectOf(d, rt) {
+  const x0 = d.rect[0] & 0xFFFF, y0 = d.rect[0] >>> 16;
+  const x1 = Math.min(d.rect[1] & 0xFFFF, rt.w), y1 = Math.min(d.rect[1] >>> 16, rt.h);
+  if (!d.rect[1] || (x0 <= 0 && y0 <= 0 && x1 >= rt.w && y1 >= rt.h)) return { x: 0, y: 0, w: rt.sw ?? rt.w, h: rt.sh ?? rt.h, full: true };
+  if (rt.sw !== undefined) {
+    // Display options: the target is drawn at sw x sh; both edges scale.
+    const X = (v) => Math.floor(v * rt.sw / rt.w + 0.5), Y = (v) => Math.floor(v * rt.sh / rt.h + 0.5);
+    return { x: X(Math.min(x0, x1)), y: Y(Math.min(y0, y1)), w: Math.max(0, X(x1) - X(x0)), h: Math.max(0, Y(y1) - Y(y0)), full: false };
+  }
+  return { x: Math.min(x0, x1), y: Math.min(y0, y1), w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0), full: false };
+}
+
+// A clear of part of a target: a triangle over the target, cut to the rect by
+// the scissor, writing the clear colour and depth (one 256-byte uniform slot
+// per such clear in a frame).
+const CLEAR_WGSL = `struct C { col: vec4f, z: f32 };
+@group(0) @binding(0) var<uniform> c: C;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(p * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), c.z, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return c.col; }`;
+const CLEAR_SLOTS = 64;
+
+// A pipeline spec's key, and a shader's (FNV-1a over the WGSL text).
+const specKey = (sp) => [sp.vs, sp.ps, sp.kind, sp.cube, sp.stride, sp.inputs, sp.writeMask,
+  sp.blend ? sp.blend.join(',') : '-', sp.ds ? sp.ds.join(',') : '-', sp.sten ? sp.sten.join(',') : '-'].join('|');
+function codeHash(code) {
+  let a = 0x811c9dc5, b = 0x01000193 ^ code.length;
+  for (let i = 0; i < code.length; i++) {
+    const c = code.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193); b = Math.imul(b ^ c, 0x5bd1e995) ^ (b >>> 15);
+  }
+  return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0') + code.length.toString(16);
+}
+
+const unpack = (c) => [((c >>> 16) & 255) / 255, ((c >>> 8) & 255) / 255, (c & 255) / 255, (c >>> 24) / 255];
+
+// GpDraw / GpState field offsets in words.
+const DW = P.GpDraw.size / 4;
+const DO = Object.fromEntries(Object.entries(P.GpDraw.off).map(([k, v]) => [k, v / 4]));
+const SO = Object.fromEntries(Object.entries(P.GpState.off).map(([k, v]) => [k, DO.st + v / 4]));
+
+/** The draw records as objects (field names as in the C struct). `bytes`
+ * may be a view into the shared wasm memory: everything is read here. */
+function readDraws(bytes, n) {
+  const u = (bytes.byteOffset & 3) === 0
+    ? new Uint32Array(bytes.buffer, bytes.byteOffset, n * DW) : new Uint32Array(bytes.slice(0, n * DW * 4).buffer);
+  const out = new Array(n);
+  for (let i = 0, b = 0; i < n; i++, b += DW) {
+    const st = {
+      blend_en: u[b + SO.blend_en], blend_src: u[b + SO.blend_src], blend_dst: u[b + SO.blend_dst],
+      blend_eq: u[b + SO.blend_eq], blend_color: u[b + SO.blend_color], color_mask: u[b + SO.color_mask],
+      depth_test: u[b + SO.depth_test], depth_func: u[b + SO.depth_func], depth_write: u[b + SO.depth_write],
+      stencil_en: u[b + SO.stencil_en], stencil_func: u[b + SO.stencil_func], stencil_ref: u[b + SO.stencil_ref],
+      stencil_fmask: u[b + SO.stencil_fmask], stencil_wmask: u[b + SO.stencil_wmask],
+      stencil_fail: u[b + SO.stencil_fail], stencil_zfail: u[b + SO.stencil_zfail], stencil_zpass: u[b + SO.stencil_zpass],
+    };
+    const t = b + DO.tex, m = b + DO.smp, r = b + DO.border;
+    out[i] = { st, kind: u[b + DO.kind], target: u[b + DO.target], target_swz: u[b + DO.target_swz],
+      zeta: u[b + DO.zeta], zeta_format: u[b + DO.zeta_format], vs: u[b + DO.vs], ps: u[b + DO.ps],
+      tex: [u[t], u[t + 1], u[t + 2], u[t + 3]], smp: [u[m], u[m + 1], u[m + 2], u[m + 3]],
+      border: [u[r], u[r + 1], u[r + 2], u[r + 3]],
+      vtx_off: u[b + DO.vtx_off], vtx_count: u[b + DO.vtx_count], vtx_stride: u[b + DO.vtx_stride],
+      idx_off: u[b + DO.idx_off], idx_count: u[b + DO.idx_count], vsc_off: u[b + DO.vsc_off],
+      xfc_off: u[b + DO.xfc_off], psc_off: u[b + DO.psc_off],
+      clr_flags: u[b + DO.clr_flags], clr_argb: u[b + DO.clr_argb], clr_zs: u[b + DO.clr_zs],
+      rect: [u[b + DO.rect], u[b + DO.rect + 1]], slots: null };
+  }
+  return out;
+}
+
+const BLIT_WGSL = `
+struct B { ratio: vec2f, srcsize: vec2f, origin: vec2f, pad: vec2f };
+@group(0) @binding(0) var t: texture_2d<f32>;
+@group(0) @binding(1) var s: sampler;
+@group(0) @binding(2) var<uniform> u: B;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let q = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(q * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+  let d = p.xy - u.origin;
+  if (u.ratio.x <= 1.0 && u.ratio.y <= 1.0) { return textureSampleLevel(t, s, d * u.ratio / u.srcsize, 0.0); }
+  let nx = max(i32(ceil(u.ratio.x - 0.001)), 1);
+  let ny = max(i32(ceil(u.ratio.y - 0.001)), 1);
+  let p0 = floor(d) * u.ratio;
+  let st = u.ratio / vec2f(f32(nx), f32(ny));
+  var c = vec4f(0.0);
+  for (var y = 0; y < ny; y++) { for (var x = 0; x < nx; x++) {
+    c += textureSampleLevel(t, s, (p0 + (vec2f(f32(x), f32(y)) + 0.5) * st) / u.srcsize, 0.0); } }
+  return c / f32(nx * ny);
+}`;
+
+export class GpEncoder {
+  constructor(device, features = [], opts = {}) {
+    this.dev = device;
+    this.L = makeLayouts(device);
+    this.bc = features.includes('texture-compression-bc');
+    this.dsFormat = features.includes('depth32float-stencil8') ? 'depth32float-stencil8' : 'depth24plus-stencil8';
+    this.res = new Map();      // id -> { kind: 'rt'|'ds'|'tex', texture, view, ... }
+    this.vsMods = new Map();   // id -> { module }   (built-ins 1, 2 share ids with
+    this.psMods = new Map();   // id -> { module, cube }  PS 1: separate maps)
+    this.pipes = new Map();
+    // Pipelines by what they are made of (shader text hashes and state; ids
+    // differ from run to run): what this run used (exportPipelines) and what
+    // preloadPipelines() created ahead of time.
+    this.codes = new Map();    // code hash -> WGSL
+    this.specs = new Map();    // stable key -> spec
+    this.pre = new Map();      // stable key -> GPURenderPipeline (created ahead)
+    this.samplers = new Map();
+    this.bufs = {};
+    this.serial = 0;           // every resource gets a new one: the bind-group cache key
+    this.groups1 = new Map();  // cube|view serials|sampler keys -> group 1
+    this.arena = new Uint8Array(1 << 16);
+    this.noMips = false;     // true: level 0 only (RECOMP_GPU_NO_MIPS)
+    this.stats = { draws: 0, clears: 0, skipped: 0, passes: 0, pipelines: 0, noBC: 0, reasons: {},
+      // Time spent creating things (ms, running totals): textures (create +
+      // upload), shader modules, render pipelines.
+      texMs: 0, texN: 0, shMs: 0, shN: 0, pipeMs: 0,
+      // stage(): the vertex and index uploads, the constant repack, buffer growth.
+      vtxMs: 0, idxMs: 0, uniMs: 0, growMs: 0, grows: 0 };
+    const z = (cube) => device.createTexture({ size: [1, 1, cube ? 6 : 1], format: 'bgra8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING });     // zero-initialised: reads 0, as a NULL SRV
+    this.dummy2d = z(false).createView();
+    this.dummyCube = z(true).createView({ dimension: 'cube' });
+    // Display options. WebGPU has 1 and 4 samples (2x asks for 4).
+    this.msaa = opts.msaa > 1 ? 4 : 1;
+    this.sx = opts.sx ?? 1; this.sy = opts.sy ?? 1;
+    this.active = !!opts.window || this.sx !== 1 || this.sy !== 1 || this.msaa > 1;
+    this.want = null;
+    if (this.active) {
+      const module = device.createShaderModule({ label: 'blit', code: BLIT_WGSL });
+      this.blitPipes = new Map();
+      this.blitModule = module;
+      this.blitSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    }
+  }
+
+  // ---- display options -------------------------------------------------------
+
+  scaled(v, s) { return s === 1 ? v : Math.floor(v * s + 0.5); }
+
+  /** "window": the scale the next frame is drawn at. */
+  setScale(sx, sy) { if (sx !== this.sx || sy !== this.sy) this.want = [sx, sy]; }
+
+  blitPipe(format, samples) {
+    const key = `${format}/${samples}`;
+    let p = this.blitPipes.get(key);
+    if (!p) {
+      p = this.dev.createRenderPipeline({ label: `blit ${key}`, layout: 'auto',
+        vertex: { module: this.blitModule, entryPoint: 'vs' },
+        fragment: { module: this.blitModule, entryPoint: 'fs', targets: [{ format }] },
+        primitive: { topology: 'triangle-list' }, multisample: { count: samples } });
+      this.blitPipes.set(key, p);
+    }
+    return p;
+  }
+
+  /** src (sw x sh) scaled into x,y,w,h of dst, in encoder `e`: bilinear
+   * enlarging, a box filter reducing (blit() in gpu_d3d11.c). */
+  blit(e, srcView, sw, sh, dstView, samples, x, y, w, h, format = 'bgra8unorm', clear = false) {
+    const pipe = this.blitPipe(format, samples);
+    const ub = this.dev.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.dev.queue.writeBuffer(ub, 0, new Float32Array([sw / w, sh / h, sw, sh, x, y, 0, 0]));
+    const g = this.dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: srcView }, { binding: 1, resource: this.blitSampler }, { binding: 2, resource: { buffer: ub } }] });
+    const pass = e.beginRenderPass({ colorAttachments: [{ view: dstView, loadOp: clear ? 'clear' : 'load',
+      clearValue: [0, 0, 0, 1], storeOp: 'store' }] });
+    pass.setViewport(x, y, w, h, 0, 1);
+    pass.setPipeline(pipe); pass.setBindGroup(0, g); pass.draw(3);
+    pass.end();
+  }
+
+  /** A blit in its own command buffer, submitted now (queue order keeps it
+   * after the writes before it and before the frame's draws). */
+  blitNow(...args) {
+    const e = this.dev.createCommandEncoder();
+    this.blit(e, ...args);
+    this.dev.queue.submit([e.finish()]);
+  }
+
+  /** MSAA: the multisampled picture into r.texture, in encoder `e`. */
+  resolveIn(e, r) {
+    if (!r.ms || !r.msDirty) return;
+    e.beginRenderPass({ colorAttachments: [{ view: r.msView, resolveTarget: r.view, loadOp: 'load', storeOp: 'store' }] }).end();
+    r.msDirty = false;
+  }
+
+  /** In the frame's encoder, between passes. */
+  resolve(r) { if (r.ms && r.msDirty) { this.endPass(); this.resolveIn(this.enc, r); } }
+
+  makeRt(w, h, id) {
+    const sw = this.scaled(w, this.sx), sh = this.scaled(h, this.sy);
+    const texture = this.dev.createTexture({ label: `rt_${id}`, size: [sw, sh], format: 'bgra8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+           | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
+    const o = { texture, view: texture.createView(), sw, sh, ms: null, msView: null, msDirty: false };
+    if (this.msaa > 1) {
+      o.ms = this.dev.createTexture({ label: `rt_${id}_ms`, size: [sw, sh], format: 'bgra8unorm', sampleCount: this.msaa,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      o.msView = o.ms.createView();
+    }
+    return o;
+  }
+
+  /** "window": every target remade at the new scale, its picture scaled
+   * across (the title samples some of them frames later); depth and tiles
+   * remade (depth is cleared by the next frame, tiles copied before use). */
+  rescale(sx, sy) {
+    const e = this.dev.createCommandEncoder(), old = [];
+    this.sx = sx; this.sy = sy;
+    for (const [id, r] of this.res) {
+      if (r.kind === 'rt') {
+        this.resolveIn(e, r);
+        const o = this.makeRt(r.w, r.h, id);
+        this.blit(e, r.view, r.sw, r.sh, o.msView ?? o.view, o.ms ? this.msaa : 1, 0, 0, o.sw, o.sh);
+        old.push(r.texture, r.ms);
+        Object.assign(r, o, { serial: ++this.serial, msDirty: !!o.ms });
+      } else if (r.kind === 'ds') {
+        old.push(r.texture);
+        this.dsCreate({ id, b: r.w, c: r.h }, true);
+      } else if (r.kind === 'sub') {
+        old.push(r.texture);
+        this.subCreate({ id, a: r.src, b: r.w, c: r.h, d: r.x0 | (r.y0 << 16) }, true);
+      }
+    }
+    this.dev.queue.submit([e.finish()]);
+    for (const t of old) t?.destroy();
+    this.groups1.clear();
+  }
+
+  skip(why) { this.stats.skipped++; this.stats.reasons[why] = (this.stats.reasons[why] ?? 0) + 1; }
+
+  // ---- resource queue ------------------------------------------------------
+
+  drainQueue(q) {
+    const dv = new DataView(q.buffer, q.byteOffset, q.byteLength);
+    const dec = new TextDecoder();
+    for (let off = 0; off + P.GpCmd.size <= q.byteLength;) {
+      const u = (k) => dv.getUint32(off + P.GpCmd.off[k], true);
+      const c = { op: u('op'), id: u('id'), a: u('a'), b: u('b'), c: u('c'), d: u('d'), e: u('e'), bytes: u('bytes') };
+      const payload = q.subarray(off + P.GpCmd.size, off + P.GpCmd.size + c.bytes);
+      const t0 = performance.now();
+      switch (c.op) {
+        case P.GP_RT_CREATE: this.rtCreate(c, payload); break;
+        case P.GP_DS_CREATE: this.dsCreate(c); break;
+        case P.GP_SUB_CREATE: this.subCreate(c); break;
+        case P.GP_TEX_CREATE: this.texCreate(c, payload); break;
+        case P.GP_TEX_FREE: this.free(c.id); break;
+        case P.GP_SHADER_VS: case P.GP_SHADER_PS: {
+          const code = dec.decode(payload.slice(0, Math.max(0, c.bytes - 1)));   // slice: not shared
+          const module = this.dev.createShaderModule({ label: `${c.op === P.GP_SHADER_VS ? 'vs' : 'ps'}_${c.id}`, code });
+          const h = codeHash(code);
+          if (c.op === P.GP_SHADER_VS) this.vsMods.set(c.id, { module, inputs: inputMaskOf(code), crange: constRangeOf(code), h });
+          else this.psMods.set(c.id, { module, cube: cubeMaskOf(code), h });
+          this.codes.set(h, code);
+          this.stats.shMs += performance.now() - t0; this.stats.shN++;
+          break;
+        }
+        default: break;
+      }
+      if (c.op === P.GP_TEX_CREATE) { this.stats.texMs += performance.now() - t0; this.stats.texN++; }
+      off += P.GpCmd.size + ((c.bytes + 15) & ~15);
+    }
+  }
+
+  free(id) {
+    const r = this.res.get(id);
+    if (r?.texture) r.texture.destroy();
+    if (r?.ms) r.ms.destroy();
+    this.res.delete(id);
+  }
+
+  rtCreate(c, payload) {
+    this.free(c.id);
+    if (this.active) {
+      // Scaled and/or multisampled: the guest pixels go in through a
+      // guest-size texture, scaled up into the draw target.
+      const o = this.makeRt(c.b, c.c, c.id);
+      if (c.bytes) {
+        const tmp = this.dev.createTexture({ size: [c.b, c.c], format: 'bgra8unorm',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+        this.dev.queue.writeTexture({ texture: tmp }, payload, { bytesPerRow: c.b * 4 }, [c.b, c.c]);
+        this.blitNow(tmp.createView(), c.b, c.c, o.msView ?? o.view, o.ms ? this.msaa : 1, 0, 0, o.sw, o.sh);
+        tmp.destroy();                    // after the submit: the queue still runs it
+        o.msDirty = !!o.ms;
+      }
+      this.res.set(c.id, { kind: 'rt', serial: ++this.serial, ...o, w: c.b, h: c.c, va: c.a,
+        bpp: c.d & 255, fmt: (c.d >> 8) & 255, swz: (c.d >> 16) & 1, pitch: c.e, dirty: false });
+      return;
+    }
+    const texture = this.dev.createTexture({ label: `rt_${c.id}`, size: [c.b, c.c], format: 'bgra8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+           | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
+    if (c.bytes) this.dev.queue.writeTexture({ texture }, payload, { bytesPerRow: c.b * 4 }, [c.b, c.c]);
+    this.res.set(c.id, { kind: 'rt', serial: ++this.serial, texture, view: texture.createView(), w: c.b, h: c.c, va: c.a,
+      bpp: c.d & 255, fmt: (c.d >> 8) & 255, swz: (c.d >> 16) & 1, pitch: c.e, dirty: false });
+  }
+
+  dsCreate(c, keep = false) {
+    if (!keep) this.free(c.id);
+    const texture = this.active
+      ? this.dev.createTexture({ label: `ds_${c.id}`, size: [this.scaled(c.b, this.sx), this.scaled(c.c, this.sy)],
+        format: this.dsFormat, sampleCount: this.msaa, usage: GPUTextureUsage.RENDER_ATTACHMENT })
+      : this.dev.createTexture({ label: `ds_${c.id}`, size: [c.b, c.c], format: this.dsFormat,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    this.res.set(c.id, { kind: 'ds', serial: ++this.serial, texture, view: texture.createView(), w: c.b, h: c.c });
+  }
+
+  /** GP_TEX_CREATE: a = mip levels; payload per face its levels in order,
+   * each tightly packed (BC levels below 4x4 still take a whole block). */
+  texCreate(c, payload) {
+    this.free(c.id);
+    const faces = c.e || 1, w = c.b, h = c.c;
+    let format = 'bgra8unorm', bb = 0;
+    if (c.d !== P.GP_FMT_BGRA8) {
+      if (!this.bc) { this.stats.noBC++; return; }   // ponytail: CPU BC decode for adapters without BC
+      format = { [P.GP_FMT_BC1]: 'bc1-rgba-unorm', [P.GP_FMT_BC2]: 'bc2-rgba-unorm', [P.GP_FMT_BC3]: 'bc3-rgba-unorm' }[c.d];
+      bb = c.d === P.GP_FMT_BC1 ? 8 : 16;
+    }
+    const levels = Math.min(c.a || 1, Math.floor(Math.log2(Math.max(w, h))) + 1);
+    const texture = this.dev.createTexture({ label: `tex_${c.id}`, size: [w, h, faces], format,
+      mipLevelCount: levels, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    let at = 0;
+    for (let f = 0; f < faces; f++)
+      for (let l = 0; l < levels; l++) {
+        const lw = Math.max(1, w >> l), lh = Math.max(1, h >> l);
+        const bytesPerRow = bb ? ((lw + 3) >> 2) * bb : lw * 4, rows = bb ? (lh + 3) >> 2 : lh;
+        const n = bytesPerRow * rows;
+        if (at + n > payload.byteLength) break;
+        this.dev.queue.writeTexture({ texture, mipLevel: l, origin: [0, 0, f] }, payload.subarray(at, at + n),
+          { bytesPerRow, rowsPerImage: rows }, [bb ? (lw + 3) & ~3 : lw, bb ? (lh + 3) & ~3 : lh, 1]);
+        at += n;
+      }
+    this.res.set(c.id, { kind: 'tex', serial: ++this.serial, texture, cube: faces === 6, w, h,
+      view: texture.createView({ dimension: faces === 6 ? 'cube' : '2d' }) });
+  }
+
+  /** GP_SUB_CREATE: a tile of a render target, copied out of it before
+   * every draw that samples it. */
+  subCreate(c, keep = false) {
+    if (!keep) this.free(c.id);
+    const x0 = c.d & 0xFFFF, y0 = c.d >>> 16;
+    // Scaled: the tile's box in the scaled source, both edges scaled.
+    const bx = this.scaled(x0, this.sx), by = this.scaled(y0, this.sy);
+    const sw = this.scaled(x0 + c.b, this.sx) - bx, sh = this.scaled(y0 + c.c, this.sy) - by;
+    const texture = this.dev.createTexture({ label: `sub_${c.id}`, size: this.active ? [sw, sh] : [c.b, c.c], format: 'bgra8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.res.set(c.id, { kind: 'sub', serial: ++this.serial, texture, view: texture.createView(), w: c.b, h: c.c,
+      src: c.a, x0, y0, bx, by, sw, sh });
+  }
+
+  // ---- per-frame buffers ---------------------------------------------------
+
+  buffer(name, bytes, usage) {
+    let b = this.bufs[name];
+    if (!b || b.size < bytes) {
+      const t0 = performance.now();
+      b?.destroy();
+      b = this.bufs[name] = this.dev.createBuffer({ label: name, size: Math.max(1 << 16, bytes * 1.5 + 255 & ~255),
+        usage: usage | GPUBufferUsage.COPY_DST });
+      this.stats.growMs += performance.now() - t0; this.stats.grows++;
+      if (name === 'uniforms') this.group0 = null;
+    }
+    return b;
+  }
+
+  /** Repack the constant blocks the draws use into 256-aligned slots.
+   *
+   * Uploads were the 4-player bottleneck (4 KB of slots a draw, 3000-4000
+   * draws: 12-16 MB a frame through the GPU process), so blocks are shared:
+   *  - xf / ps: by arena offset (gpu_rec.c's put_consts hands consecutive
+   *    equal blocks the same offset), as the VS constant file already was;
+   *  - smp: with the previous draw when its sampler words match;
+   *  - vsc: only the rows the program reads (constRangeOf: [lo, hi]) are
+   *    written; the 3 KB binding window starts lo rows before them (256-
+   *    aligned), so windows overlap rows nobody reads. A relative-addressing
+   *    program gets the whole file. */
+  packUniforms(frame, draws) {
+    const slots = [];
+    let size = 3072;                       // offset 0: zeros, the "no block" slot for every binding
+    let end = 3072;                        // the highest window end (the buffer must hold it)
+    const vscSeen = new Map(), xfSeen = new Map(), psSeen = new Map();
+    const take = (stride) => { const at = size; size += stride; if (size > end) end = size; return at; };
+    let prevSmp = null;
+    for (const d of draws) {
+      if (d.kind !== P.GP_DRAW) continue;
+      const s = { xf: 0, vsc: 0, ps: 0, smp: 0, vlo: 0, vhi: 0, wxf: false, wps: false, wsmp: false, wvsc: false };
+      if (d.xfc_off !== 0xFFFFFFFF) {
+        const k = d.vs === P.GP_VS_TVERT ? -1 - d.xfc_off : d.xfc_off;
+        if (!xfSeen.has(k)) { xfSeen.set(k, take(UNIFORM_SLOTS[0].stride)); s.wxf = true; }
+        s.xf = xfSeen.get(k);
+      }
+      if (d.vsc_off !== 0xFFFFFFFF) {
+        const [lo, hi] = this.vsMods.get(d.vs)?.crange ?? [0, 191];
+        const e = vscSeen.get(d.vsc_off);
+        if (e && e.lo <= lo && e.hi >= hi) s.vsc = e.at;
+        else {
+          // Rows lo..hi land at or after `size`; the window starts lo rows earlier.
+          const at = Math.max(0, (size - lo * 16 + 255) & ~255);
+          size = at + (hi + 1) * 16;
+          if (at + UNIFORM_SLOTS[1].size > end) end = at + UNIFORM_SLOTS[1].size;
+          if (size > end) end = size;
+          vscSeen.set(d.vsc_off, { at, lo, hi });
+          s.vsc = at; s.vlo = lo; s.vhi = hi; s.wvsc = true;
+          size = (size + 255) & ~255;
+        }
+      }
+      if (d.psc_off !== 0xFFFFFFFF) {
+        if (!psSeen.has(d.psc_off)) { psSeen.set(d.psc_off, take(UNIFORM_SLOTS[2].stride)); s.wps = true; }
+        s.ps = psSeen.get(d.psc_off);
+      }
+      const p = prevSmp;
+      if (p && p.smp[0] === d.smp[0] && p.smp[1] === d.smp[1] && p.smp[2] === d.smp[2] && p.smp[3] === d.smp[3] &&
+          p.border[0] === d.border[0] && p.border[1] === d.border[1] && p.border[2] === d.border[2] && p.border[3] === d.border[3])
+        s.smp = p.slots.smp;
+      else { s.smp = take(UNIFORM_SLOTS[3].stride); s.wsmp = true; }
+      d.slots = s;
+      prevSmp = d;
+      slots.push(d);
+    }
+    size = Math.max(size, end);
+    // One arena, reused frame to frame (the slots below 3072 stay zero).
+    if (this.arena.byteLength < size) this.arena = new Uint8Array(Math.max(size, this.arena.byteLength * 2));
+    const arena = this.arena, af = new Float32Array(arena.buffer), au = new Uint32Array(arena.buffer);
+    const c = frame.consts;
+    for (const d of slots) {
+      const s = d.slots;
+      if (s.wxf) arena.set(c.subarray(d.xfc_off, d.xfc_off + (d.vs === P.GP_VS_TVERT ? P.GpTvConsts.size : P.GpXfConsts.size)), s.xf);
+      if (s.wps) arena.set(c.subarray(d.psc_off, d.psc_off + P.GpPsConsts.size), s.ps);
+      if (s.wvsc) arena.set(c.subarray(d.vsc_off + s.vlo * 16, d.vsc_off + (s.vhi + 1) * 16), s.vsc + s.vlo * 16);
+      if (!s.wsmp) continue;
+      // GpWgslSmp: border colours (16 floats), which axes are BORDER (4 u32),
+      // LOD bias (4 floats).
+      const w = s.smp >> 2;
+      for (let st = 0; st < 4; st++) {
+        const bc = d.border[st], k = d.smp[st];
+        af[w + st * 4] = ((bc >>> 16) & 255) / 255; af[w + st * 4 + 1] = ((bc >>> 8) & 255) / 255;
+        af[w + st * 4 + 2] = (bc & 255) / 255; af[w + st * 4 + 3] = (bc >>> 24) / 255;
+        au[w + 16 + st] = k & P.GP_SMP_BORDER ? (((k >> 4) & 15) === 4 ? 1 : 0) | (((k >> 8) & 15) === 4 ? 2 : 0) : 0;
+        af[w + 20 + st] = this.filtered(k) ? P.GP_SMP_BIAS_OF(k) / 256 : 0;
+      }
+    }
+    this.stats.uniBytes = (this.stats.uniBytes ?? 0) + size;
+    const buf = this.buffer('uniforms', size, GPUBufferUsage.UNIFORM);
+    this.dev.queue.writeBuffer(buf, 0, arena, 0, size);
+    if (!this.group0)
+      this.group0 = this.dev.createBindGroup({ layout: this.L.group0, entries: UNIFORM_SLOTS.map((u) =>
+        ({ binding: u.binding, resource: { buffer: buf, offset: 0, size: u.size } })) });
+  }
+
+  // ---- state ---------------------------------------------------------------
+
+  filtered(key) { return (key & P.GP_SMP_FILTER) !== 0 && !this.noMips; }
+
+  /** sampler() in gpu_d3d11.c. Without GP_SMP_FILTER: GP_SMP_LINEAR and level
+   * 0. With it: SET_TEXTURE_FILTER's MIN (1 BOX_LOD0, 2 TENT_LOD0,
+   * 3 BOX_NEARESTLOD, 4 TENT_NEARESTLOD, 5 BOX_TENT_LOD, 6 TENT_TENT_LOD) and
+   * MAG (2 TENT). The LOD bias goes through GpWgslSmp (no sampler field). */
+  sampler(key) {
+    key = this.filtered(key) ? key & 0x00FF3FFF : key & 0xFFF;
+    if (!this.samplers.has(key)) {
+      const d = { addressModeU: ADDR[(key >> 4) & 15] ?? 'clamp-to-edge',
+        addressModeV: ADDR[(key >> 8) & 15] ?? 'clamp-to-edge', addressModeW: 'clamp-to-edge' };
+      if (key & P.GP_SMP_FILTER) {
+        const mn = P.GP_SMP_MIN_OF(key), mg = P.GP_SMP_MAG_OF(key);
+        Object.assign(d, { minFilter: [2, 4, 6].includes(mn) ? 'linear' : 'nearest',
+          magFilter: mg === 2 ? 'linear' : 'nearest', mipmapFilter: mn === 5 || mn === 6 ? 'linear' : 'nearest',
+          lodMaxClamp: mn >= 3 && mn <= 6 ? 32 : 0 });
+      } else {
+        const lin = key & P.GP_SMP_LINEAR ? 'linear' : 'nearest';
+        Object.assign(d, { minFilter: lin, magFilter: lin, mipmapFilter: lin, lodMaxClamp: 0 });
+      }
+      this.samplers.set(key, this.dev.createSampler(d));
+    }
+    return this.samplers.get(key);
+  }
+
+  /** The render pipeline for a draw. Its key is what the pipeline is made
+   * of -- both shaders' WGSL (by hash) and the fixed-function state -- so a
+   * pipeline created ahead of time from an earlier run's list
+   * (preloadPipelines) is found under the same key. */
+  pipeline(d, kind, vs, ps, cube, hasDs) {
+    const st = d.st, m = st.color_mask;
+    const writeMask = (m & 0x00010000 ? 1 : 0) | (m & 0x00000100 ? 2 : 0) | (m & 0x00000001 ? 4 : 0) | (m & 0x01000000 ? 8 : 0);
+    const dt = hasDs && st.depth_test, dw = dt && st.depth_write, sten = hasDs && st.stencil_en;
+    const spec = { vs: vs.h, ps: ps.h, kind, cube, stride: d.vtx_stride, inputs: vs.inputs, writeMask,
+      blend: st.blend_en ? [st.blend_src, st.blend_dst, st.blend_eq] : null,
+      ds: hasDs ? [dt ? 1 : 0, dw ? 1 : 0, st.depth_func] : null,
+      sten: sten ? [st.stencil_func, st.stencil_fmask & 255, st.stencil_wmask & 255, st.stencil_fail, st.stencil_zfail, st.stencil_zpass] : null };
+    const key = specKey(spec);
+    let p = this.pipes.get(key);
+    if (p) return p;
+    p = this.pre.get(key);
+    if (p) this.stats.prePipes = (this.stats.prePipes ?? 0) + 1;
+    else {
+      const t0 = performance.now();
+      p = this.dev.createRenderPipeline(this.pipeDesc(spec, key, vs.module, ps.module));
+      this.stats.pipelines++;
+      this.stats.pipeMs += performance.now() - t0;
+    }
+    this.pipes.set(key, p);
+    this.specs.set(key, spec);
+    return p;
+  }
+
+  /** The descriptor for a spec (pipeline() above, preloadPipelines below). */
+  pipeDesc(spec, label, vsModule, psModule) {
+    let blend;
+    if (spec.blend) {
+      const [src, dst, eq] = spec.blend;
+      const op = BLEND_OP[eq] ?? 'add', minmax = op === 'min' || op === 'max';
+      const f = (x, a) => (minmax ? 'one' : (BLEND_FACTOR[x] ?? ['one', 'one'])[a]);
+      blend = { color: { operation: op, srcFactor: f(src, 0), dstFactor: f(dst, 0) },
+        alpha: { operation: op, srcFactor: f(src, 1), dstFactor: f(dst, 1) } };
+    }
+    const sn = spec.sten;
+    const face = sn ? { compare: CMP[sn[0]] ?? 'always', failOp: STENCIL_OP[sn[3]] ?? 'keep',
+      depthFailOp: STENCIL_OP[sn[4]] ?? 'keep', passOp: STENCIL_OP[sn[5]] ?? 'keep' } : {};
+    const ds = spec.ds;
+    return {
+      label,
+      layout: this.L.pipelineLayout(spec.cube),
+      vertex: { module: vsModule, entryPoint: 'main', buffers: vertexLayout(spec.kind, spec.inputs, spec.stride) },
+      fragment: { module: psModule, entryPoint: 'main', targets: [{ format: 'bgra8unorm', blend, writeMask: spec.writeMask }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample: { count: this.msaa },
+      depthStencil: ds ? { format: this.dsFormat, depthWriteEnabled: !!ds[1],
+        depthCompare: ds[0] ? CMP[ds[2]] ?? 'always' : 'always',
+        stencilFront: face, stencilBack: face,
+        stencilReadMask: sn ? sn[1] : 0xFF, stencilWriteMask: sn ? sn[2] : 0 } : undefined,
+    };
+  }
+
+  /** The pipelines this run created, with their shaders: what
+   * preloadPipelines() takes (web/tools/pipelines.mjs writes it to
+   * build-wasm/pipelines.json, beside the module it was recorded with). */
+  exportPipelines() {
+    const shaders = {};
+    for (const sp of this.specs.values()) for (const h of [sp.vs, sp.ps]) shaders[h] = this.codes.get(h);
+    return { version: 1, msaa: this.msaa, dsFormat: this.dsFormat, shaders, pipes: [...this.specs.values()] };
+  }
+
+  /** Create an earlier run's pipelines in the background
+   * (createRenderPipelineAsync), so the first draw that needs one finds it
+   * ready instead of waiting for the browser to compile it (a brand-new
+   * browser profile has no compiled shaders: 40-170 ms at the race start).
+   * A draw whose pipeline is not ready yet creates it as before; nothing is
+   * skipped or drawn differently. Returns a promise of { made, failed }. */
+  async preloadPipelines(list) {
+    if (!list || list.version !== 1 || list.msaa !== this.msaa || list.dsFormat !== this.dsFormat) return { made: 0, failed: 0, skipped: true };
+    const mods = new Map();
+    const mod = (h) => {
+      if (!mods.has(h)) mods.set(h, list.shaders[h] ? this.dev.createShaderModule({ label: `pre_${h}`, code: list.shaders[h] }) : null);
+      return mods.get(h);
+    };
+    let made = 0, failed = 0;
+    await Promise.all(list.pipes.map(async (spec) => {
+      const key = specKey(spec);
+      const vm = mod(spec.vs), pm = mod(spec.ps);
+      if (!vm || !pm || this.pipes.has(key) || this.pre.has(key)) return;
+      try {
+        const p = await this.dev.createRenderPipelineAsync(this.pipeDesc(spec, key, vm, pm));
+        if (!this.pre.has(key)) this.pre.set(key, p);
+        made++;
+      } catch { failed++; }
+    }));
+    return { made, failed };
+  }
+
+  // ---- passes --------------------------------------------------------------
+
+  endPass() { if (this.pass) { this.pass.end(); this.pass = null; } }
+
+  beginPass(rt, ds, clear = {}) {
+    this.endPass();
+    const desc = { colorAttachments: [{ view: rt.msView ?? rt.view, storeOp: 'store',
+      loadOp: clear.color ? 'clear' : 'load', clearValue: clear.color ?? [0, 0, 0, 0] }] };
+    if (ds) desc.depthStencilAttachment = { view: ds.view,
+      depthLoadOp: clear.depth !== undefined ? 'clear' : 'load', depthClearValue: clear.depth ?? 1, depthStoreOp: 'store',
+      stencilLoadOp: clear.stencil !== undefined ? 'clear' : 'load', stencilClearValue: clear.stencil ?? 0, stencilStoreOp: 'store' };
+    this.pass = this.enc.beginRenderPass(desc);
+    if (this.active) { this.pass.setViewport(0, 0, rt.sw, rt.sh, 0, 1); if (rt.ms) rt.msDirty = true; }
+    else this.pass.setViewport(0, 0, rt.w, rt.h, 0, 1);
+    // What this pass has bound: set again only when it changes.
+    this.bound = { pipe: null, g1: null, bc: -1, sref: -1, vb: -1, vbn: -1, ib: false, sc: 0 };
+    this.stats.passes++;
+  }
+
+  /** bind_target() in gpu_d3d11.c: same target and depth keep the pass. */
+  bindTarget(d) {
+    const rt = this.res.get(d.target);
+    if (!rt || rt.kind !== 'rt') return null;
+    rt.swz = d.target_swz;
+    let ds = d.zeta ? this.res.get(d.zeta) : null;
+    if (ds && ds.kind !== 'ds') ds = null;
+    if (ds && (ds.w !== rt.w || ds.h !== rt.h)) ds = null;  // WebGPU wants equal sizes: Z off
+    const zeta = ds ? d.zeta : 0;
+    if (!this.pass || this.curTarget !== d.target || this.curZeta !== zeta) {
+      this.beginPass(rt, ds);
+      this.curTarget = d.target; this.curZeta = zeta;
+    }
+    rt.dirty = true;
+    return { rt, ds };
+  }
+
+  /** A clear of part of the target, drawn inside the current pass. */
+  clearRect(d, rc) {
+    const t = this.bindTarget(d);
+    if (!t) return this.skip('clear: no target');
+    if (!this.clr) {
+      const dev = this.dev, module = dev.createShaderModule({ label: 'clear_rect', code: CLEAR_WGSL });
+      const bgl = dev.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform', hasDynamicOffset: true } }] });
+      const buf = dev.createBuffer({ label: 'clear_rect', size: CLEAR_SLOTS * 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      this.clr = { module, layout: dev.createPipelineLayout({ bindGroupLayouts: [bgl] }), buf,
+        group: dev.createBindGroup({ layout: bgl, entries: [{ binding: 0, resource: { buffer: buf, offset: 0, size: 32 } }] }),
+        data: new Float32Array(8) };
+    }
+    if (this.clrSlot >= CLEAR_SLOTS) return this.skip('clear: too many partial clears');
+    const f = d.clr_flags, hasDs = !!t.ds;
+    const writeMask = (f & 0x10 ? 1 : 0) | (f & 0x20 ? 2 : 0) | (f & 0x40 ? 4 : 0) | (f & 0x80 ? 8 : 0);
+    const dw = hasDs && (f & 1) !== 0, sten = hasDs && (f & 2) !== 0;
+    const key = `clear|${hasDs ? 1 : 0}|${writeMask}|${dw ? 1 : 0}|${sten ? 1 : 0}`;
+    let pipe = this.pipes.get(key);
+    if (!pipe) {
+      const face = sten ? { compare: 'always', failOp: 'keep', depthFailOp: 'keep', passOp: 'replace' } : {};
+      pipe = this.dev.createRenderPipeline({ label: key, layout: this.clr.layout,
+        vertex: { module: this.clr.module, entryPoint: 'vs' },
+        fragment: { module: this.clr.module, entryPoint: 'fs', targets: [{ format: 'bgra8unorm', writeMask }] },
+        primitive: { topology: 'triangle-list', cullMode: 'none' },
+        multisample: { count: this.msaa },
+        depthStencil: hasDs ? { format: this.dsFormat, depthWriteEnabled: dw, depthCompare: 'always',
+          stencilFront: face, stencilBack: face, stencilReadMask: 0xFF, stencilWriteMask: sten ? 0xFF : 0 } : undefined });
+      this.pipes.set(key, pipe);
+    }
+    const c = this.clr.data;
+    c.set(unpack(d.clr_argb));
+    c[4] = d.zeta_format === 1 ? (d.clr_zs & 0xFFFF) / 65535 : (d.clr_zs >>> 8) / 16777215;
+    const off = this.clrSlot++ * 256;
+    this.dev.queue.writeBuffer(this.clr.buf, off, c);
+    const pass = this.pass, b = this.bound;
+    pass.setPipeline(pipe); b.pipe = pipe;
+    pass.setBindGroup(0, this.clr.group, [off]);
+    b.g1 = null;
+    if (hasDs && sten) { b.sref = d.clr_zs & 0xFF; pass.setStencilReference(b.sref); }
+    this.scissor(rc);
+    pass.draw(3);
+    this.stats.clears++;
+  }
+
+  /** Scissor for the current pass (a pass starts with the whole target). */
+  scissor(rc) {
+    const k = rc.full ? 0 : rc.x + rc.y * 4096 + (rc.w + rc.h * 4096) * 16777216;
+    if (k === this.bound.sc) return;
+    this.pass.setScissorRect(rc.x, rc.y, rc.w, rc.h);
+    this.bound.sc = k;
+  }
+
+  doClear(d) {
+    const rt = this.res.get(d.target);
+    if (!rt || rt.kind !== 'rt') return this.skip('clear: no target');
+    const rc = rectOf(d, rt);
+    if (!rc.full) return this.clearRect(d, rc);
+    let ds = d.zeta ? this.res.get(d.zeta) : null;
+    if (ds && (ds.kind !== 'ds' || ds.w !== rt.w || ds.h !== rt.h)) ds = null;
+    const clear = {};
+    if (d.clr_flags & 0xF0) clear.color = unpack(d.clr_argb);
+    if (ds && (d.clr_flags & 1))
+      clear.depth = d.zeta_format === 1 ? (d.clr_zs & 0xFFFF) / 65535 : (d.clr_zs >>> 8) / 16777215;
+    if (ds && (d.clr_flags & 2)) clear.stencil = d.clr_zs & 0xFF;
+    this.beginPass(rt, ds, clear);
+    this.curTarget = d.target; this.curZeta = ds ? d.zeta : 0;
+    rt.dirty = true;
+    this.stats.clears++;
+  }
+
+  doDraw(d) {
+    let kind, vs, ps;
+    if (d.vs === P.GP_VS_TVERT) { kind = 'tvert'; vs = this.vsMods.get(P.GP_VS_TVERT); }
+    else if (d.vs === P.GP_VS_PASSTHRU) { kind = 'passthru'; vs = this.vsMods.get(P.GP_VS_PASSTHRU); }
+    else { kind = 'program'; vs = this.vsMods.get(d.vs); }
+    ps = this.psMods.get(d.ps === P.GP_PS_TVERT ? P.GP_PS_TVERT : d.ps);
+    if (!vs) return this.skip('no vs');
+    if (!ps) return this.skip('no ps');
+    if (!d.vtx_count) return this.skip('no vertices');
+    // Tiles of render targets are copied out first; a copy ends the pass.
+    for (const id of d.tex) {
+      if (this.active && id && (id & P.GP_TEX_RT)) {        // MSAA: sampled from texture
+        const rid = (id & ~P.GP_TEX_RT) >>> 0, r = rid !== d.target && this.res.get(rid);
+        if (r && r.kind === 'rt') this.resolve(r);
+        continue;
+      }
+      const r = id && !(id & P.GP_TEX_RT) && this.res.get(id);
+      if (!r || r.kind !== 'sub') continue;
+      const src = this.res.get(r.src);
+      if (!src || src.kind !== 'rt' || r.src === d.target || r.x0 + r.w > src.w || r.y0 + r.h > src.h) continue;
+      if (this.active) {
+        this.resolve(src);
+        this.endPass();
+        this.enc.copyTextureToTexture({ texture: src.texture, origin: [r.bx, r.by, 0] }, { texture: r.texture }, [r.sw, r.sh]);
+        continue;
+      }
+      this.endPass();
+      this.enc.copyTextureToTexture({ texture: src.texture, origin: [r.x0, r.y0, 0] }, { texture: r.texture }, [r.w, r.h]);
+    }
+    const t = this.bindTarget(d);
+    if (!t) return this.skip('no target');
+
+    // Group 1 (textures and samplers), cached by what it binds: resource
+    // serials are never reused, so a freed texture's groups just go unused.
+    const cube = ps.cube ?? 0, views = [null, null, null, null];
+    let key = `${cube}`;
+    for (let st = 0; st < 4; st++) {
+      let id = d.tex[st], view = null, smp = 0, serial = 0;
+      if (id) {
+        if (id & P.GP_TEX_RT) { id = (id & ~P.GP_TEX_RT) >>> 0; if (id === d.target) id = 0; }
+        const r = id && this.res.get(id);
+        const subOk = r && (r.kind !== 'sub' || (r.src !== d.target && this.res.get(r.src)?.kind === 'rt'));
+        if (r && subOk && r.kind !== 'ds' && !!r.cube === !!((cube >> st) & 1)) {
+          view = r.view; serial = r.serial;
+          smp = this.filtered(d.smp[st]) ? d.smp[st] & 0x00FF3FFF : d.smp[st] & 0xFFF;
+        }
+      }
+      views[st] = view;
+      key += `|${serial}:${smp}`;
+    }
+    let g1 = this.groups1.get(key);
+    if (!g1) {
+      const entries = [];
+      for (let st = 0; st < 4; st++) {
+        const view = views[st];
+        entries.push({ binding: st, resource: view ?? ((cube >> st) & 1 ? this.dummyCube : this.dummy2d) });
+        entries.push({ binding: 4 + st, resource: this.sampler(view ? d.smp[st] : 0) });
+      }
+      if (this.groups1.size > 8192) this.groups1.clear();
+      g1 = this.dev.createBindGroup({ layout: this.L.group1(cube), entries });
+      this.groups1.set(key, g1);
+    }
+    const pass = this.pass, b = this.bound;
+    this.scissor(rectOf(d, t.rt));
+    const pipe = this.pipeline(d, kind, vs, ps, cube, !!t.ds);
+    if (pipe !== b.pipe) { pass.setPipeline(pipe); b.pipe = pipe; }
+    pass.setBindGroup(0, this.group0, [d.slots.xf, d.slots.vsc, d.slots.ps, d.slots.smp]);
+    if (g1 !== b.g1) { pass.setBindGroup(1, g1); b.g1 = g1; }
+    const bcAlpha = d.st.blend_src === 0x8003 || d.st.blend_src === 0x8004 || d.st.blend_dst === 0x8003 || d.st.blend_dst === 0x8004;
+    const bcKey = bcAlpha ? -1 - (d.st.blend_color >>> 24) : d.st.blend_color;
+    if (bcKey !== b.bc) {
+      const bc = unpack(d.st.blend_color);
+      if (bcAlpha) bc.fill(bc[3], 0, 3);
+      pass.setBlendConstant(bc); b.bc = bcKey;
+    }
+    if (t.ds && (d.st.stencil_ref & 0xFF) !== b.sref) { b.sref = d.st.stencil_ref & 0xFF; pass.setStencilReference(b.sref); }
+    const vbn = d.vtx_count * d.vtx_stride;
+    if (d.vtx_off !== b.vb || vbn !== b.vbn) { pass.setVertexBuffer(0, this.bufs.vtx, d.vtx_off, vbn); b.vb = d.vtx_off; b.vbn = vbn; }
+    if (d.idx_count) {
+      if (!b.ib) { pass.setIndexBuffer(this.bufs.idx, 'uint32'); b.ib = true; }
+      pass.drawIndexed(d.idx_count, 1, d.idx_off);
+    } else {
+      pass.draw(d.vtx_count);
+    }
+    this.stats.draws++;
+  }
+
+  // ---- a frame -------------------------------------------------------------
+
+  consume(frame) { this.encode(this.stage(frame)); }
+
+  /** Everything that reads the frame's bytes: the queue, the records, and
+   * the vertex, index and constant uploads (writeBuffer copies at the call).
+   * The frame may be views straight into the shared wasm memory, which the
+   * recorder may reuse as soon as this returns. */
+  stage(frame) {
+    if (this.want) { const [sx, sy] = this.want; this.want = null; this.rescale(sx, sy); }
+    this.drainQueue(frame.queue);
+    const draws = readDraws(frame.draws, frame.drawCount);
+    const t0 = performance.now();
+    const vbuf = this.buffer('vtx', frame.vtx.byteLength + 4, GPUBufferUsage.VERTEX);
+    if (frame.vtx.byteLength) this.dev.queue.writeBuffer(vbuf, 0, frame.vtx);
+    const t1 = performance.now();
+    const ibuf = this.buffer('idx', frame.idx.byteLength + 4, GPUBufferUsage.INDEX);
+    if (frame.idx.byteLength) this.dev.queue.writeBuffer(ibuf, 0, frame.idx);
+    const t2 = performance.now();
+    this.packUniforms(frame, draws);
+    const st = this.stats;
+    st.vtxMs += t1 - t0; st.idxMs += t2 - t1; st.uniMs += performance.now() - t2;
+    return draws;
+  }
+
+  /** The command buffer for a staged frame. */
+  encode(draws) {
+    this.enc = this.dev.createCommandEncoder();
+    this.pass = null; this.curTarget = this.curZeta = -1; this.clrSlot = 0;
+    for (const d of draws) {
+      if (d.kind === P.GP_CLEAR) this.doClear(d);
+      else if (d.kind === P.GP_DRAW) this.doDraw(d);
+      else this.skip('kind');
+    }
+    this.endPass();
+    if (this.active)        // MSAA: what the page shows is resolved
+      for (const r of this.res.values()) if (r.kind === 'rt') this.resolveIn(this.enc, r);
+    this.dev.queue.submit([this.enc.finish()]);
+    this.enc = null;
+    // The writeback of linear dirty targets into guest memory goes here in
+    // the wasm build (copyTextureToBuffer + mapAsync, as readTarget below).
+  }
+
+  /** A render target's pixels, BGRA8, tightly packed. */
+  async readTarget(id) {
+    const r = this.res.get(id);
+    if (!r || r.kind !== 'rt') return null;
+    const w = r.sw ?? r.w, h = r.sh ?? r.h;          // scaled: the full-size picture
+    const bpr = (w * 4 + 255) & ~255;
+    const buf = this.dev.createBuffer({ size: bpr * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = this.dev.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: r.texture }, { buffer: buf, bytesPerRow: bpr }, [w, h]);
+    this.dev.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const src = new Uint8Array(buf.getMappedRange()), out = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) out.set(src.subarray(y * bpr, y * bpr + w * 4), y * w * 4);
+    buf.unmap(); buf.destroy();
+    return { w, h, px: out };
+  }
+}

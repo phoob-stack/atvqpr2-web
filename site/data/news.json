@@ -1,0 +1,38 @@
+[
+  {
+    "date": "2026-11-03",
+    "title": "Project site: configs, stats and a setup guide",
+    "body": [
+      "This site is up as a local preview. Build a config with every option the browser build has, take it to the game as a file or a launch link, and open your save backup on the Stats page to see your profiles, records, medals and unlocks. Your files never leave your browser.",
+      "The builder that turns your own disc into the local game is being written now; the setup guide describes how it will work."
+    ]
+  },
+  {
+    "date": "2026-11-03",
+    "title": "Four players, 60 fps",
+    "body": [
+      "Split screen for up to four players runs at 60 fps on Windows, and a single race holds 60 fps in Edge. A stall in the browser build between the intro and the title screen is fixed."
+    ]
+  },
+  {
+    "date": "2026-11-03",
+    "title": "Free Ride, saves and higher resolutions",
+    "body": [
+      "Free Ride drops you straight into an endless freestyle session in the stadium. Saves now stay in the browser and can be exported as a zip that the Windows build also reads. The game can render at up to 8x its original resolution, with MSAA and a 16:9 mode."
+    ]
+  },
+  {
+    "date": "2026-11-02",
+    "title": "Drawn on the GPU",
+    "body": [
+      "The game's graphics no longer go through a software rasteriser: its draw calls are recorded as frame packets and drawn on the GPU, which took races from a few frames per second to a steady 60."
+    ]
+  },
+  {
+    "date": "2026-11-01",
+    "title": "It boots",
+    "body": [
+      "The retail Xbox game, recompiled to C, reached its menus and its first race on Windows."
+    ]
+  }
+]

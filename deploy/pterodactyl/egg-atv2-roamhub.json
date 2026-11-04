@@ -1,0 +1,92 @@
+{
+    "_comment": "Pterodactyl egg for the ATV 2 free-roam hub (atvrecomp web/tools/roamhub.mjs). Our own code only: the hub relays player names, rider choices and poses between players and holds nothing from the game.",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-11-04T00:00:00+00:00",
+    "name": "ATV 2 Free Roam Hub",
+    "author": "admin@atvqpr2.com",
+    "description": "WebSocket hub for ATV Quad Power Racing 2 free roam (Free Ride, Stadium). Players connect through https://atvqpr2.com via wss://hub.atvqpr2.com (Cloudflare proxy). Single Node.js file, no npm packages, no game data.",
+    "features": null,
+    "docker_images": {
+        "Node.js 22": "ghcr.io/parkervcp/yolks:nodejs_22"
+    },
+    "file_denylist": [],
+    "startup": "node web/tools/roamhub.mjs--port {{SERVER_PORT}} --bind 0.0.0.0 --trust-proxy cf --origins {{ALLOWED_ORIGINS}} --max-players {{MAX_PLAYERS}} --max-rooms {{MAX_ROOMS}} --max-conns-per-ip {{MAX_CONNS_PER_IP}} --idle-timeout {{IDLE_TIMEOUT}} --allow-no-origin {{ALLOW_NO_ORIGIN}}",
+    "config": {
+        "files": "{}",
+        "startup": "{\r\n    \"done\": \"roamhub on \"\r\n}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/bash\n# ATV 2 free-roam hub: nothing to install (one Node.js file, built-in modules only).\n# Upload atv2-roamhub.zip into the server's root with the panel's File Manager (or SFTP) and Unarchive it:\n# it holds web/tools/roamhub.mjs and web/roamhub-worker/protocol.mjs.\n# Nothing is downloaded here, and nothing from the game is ever needed.\nmkdir -p /mnt/server\ncd /mnt/server\nif [ ! -f web/tools/roamhub.mjs ]; then\n  echo 'Upload atv2-roamhub.zip here (File Manager or SFTP), Unarchive it, then start the server.' > UPLOAD-atv2-roamhub.txt\nfi\necho 'install done'\n",
+            "container": "ghcr.io/parkervcp/installers:debian",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Allowed origins",
+            "description": "Comma-separated web origins whose pages may connect (the browser's Origin header). Others are refused.",
+            "env_variable": "ALLOWED_ORIGINS",
+            "default_value": "https://atvqpr2.com,https://www.atvqpr2.com",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:512|regex:/^https:\\/\\/[A-Za-z0-9.-]+(,https:\\/\\/[A-Za-z0-9.-]+)*$/",
+            "field_type": "text"
+        },
+        {
+            "name": "Max players",
+            "description": "Players connected at once, all rooms together.",
+            "env_variable": "MAX_PLAYERS",
+            "default_value": "32",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:1,256",
+            "field_type": "text"
+        },
+        {
+            "name": "Max rooms",
+            "description": "Rooms (sessions) at once. Each room holds up to 8 riders (the game's limit).",
+            "env_variable": "MAX_ROOMS",
+            "default_value": "8",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:1,64",
+            "field_type": "text"
+        },
+        {
+            "name": "Max connections per IP",
+            "description": "Connections from one address at once (read from Cloudflare's CF-Connecting-IP header).",
+            "env_variable": "MAX_CONNS_PER_IP",
+            "default_value": "4",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:1,32",
+            "field_type": "text"
+        },
+        {
+            "name": "Idle timeout (seconds)",
+            "description": "A connection that sends nothing for this long is closed.",
+            "env_variable": "IDLE_TIMEOUT",
+            "default_value": "120",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:10,3600",
+            "field_type": "text"
+        },
+        {
+            "name": "Allow the Windows game (no Origin header)",
+            "description": "1 lets the native Windows build connect (it sends no Origin header); 0 allows browsers from the allowed origins only.",
+            "env_variable": "ALLOW_NO_ORIGIN",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|in:0,1",
+            "field_type": "text"
+        }
+    ]
+}

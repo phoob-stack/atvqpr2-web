@@ -1,0 +1,51 @@
+# One Caddyfile for both front doors (docker-compose.yml):
+#   profile caddy:  SITE_ADDRESS=<your domain>  -> automatic HTTPS (Let's Encrypt)
+#   profile tunnel: SITE_ADDRESS=:80            -> plain HTTP, reached only via cloudflared
+#
+#   /            the project site (out/site, its own _headers via out/site.caddy)
+#   /demo/       the delivery test title's launcher + /demo/assets/ (asset server)
+#   /hub/        the free-roam hub (WebSocket)
+{
+	email {$ACME_EMAIL}
+	servers {
+		# cloudflared (tunnel profile) is on the private container network; its
+		# X-Forwarded-For is kept and Caddy appends it. Direct clients are never
+		# trusted, so they cannot spoof the address the rate limit uses.
+		trusted_proxies static private_ranges
+	}
+}
+
+{$SITE_ADDRESS} {
+	# the free-roam hub
+	handle /hub/* {
+		reverse_proxy hub:8854
+	}
+
+	# the launcher and the asset backend; it sets its own headers (COOP/COEP/CORP,
+	# CSP, Cache-Control, ETag) and does its own compression and Range handling
+	redir /demo /demo/ 308
+	handle_path /demo/* {
+		reverse_proxy assets:8853 {
+			flush_interval -1
+		}
+	}
+
+	# the project site, exactly as committed, with its own headers
+	handle {
+		@private path /_headers /.assetsignore /.gitattributes
+		respond @private 404
+		import /etc/caddy/site.caddy
+		root * /srv/site
+		encode zstd gzip
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	log {
+		output stdout
+		format json
+	}
+}

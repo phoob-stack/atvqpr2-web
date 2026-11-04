@@ -1,0 +1,50 @@
+{
+  "changelog": [
+    { "date": "2026-11-03", "title": "Project site", "items": [
+      "Configs, Stats, Setup and About pages; a launch link and a config file for the local game.",
+      "Save backups are read in the browser; nothing is uploaded." ] },
+    { "date": "2026-11-03", "title": "Free Ride", "items": [
+      "Starts an endless freestyle session in the stadium arena, with the intro movies skipped.",
+      "Optionally stops at the rider and ATV choice on the way in." ] },
+    { "date": "2026-11-03", "title": "Local start page", "items": [
+      "A start page for the local game with Play and Free Ride, settings (display, movies, volume, controls, settings as text), saves, game data and a changelog.",
+      "A menu over the game on F1 or Esc: FPS counter, fullscreen, screenshot, settings, log download, quit.",
+      "Keyboard keys and gamepad buttons can be rebound." ] },
+    { "date": "2026-11-03", "title": "Your own game folder", "items": [
+      "The local page asks for the folder of your own USA copy, checks default.xbe, and copies the files into the browser's private storage once.",
+      "An interrupted copy resumes. Removing the game files keeps the saves.",
+      "The local server sends no game data of its own." ] },
+    { "date": "2026-11-03", "title": "Saves", "items": [
+      "Saves persist in the browser and export to a zip in the Windows build's folder layout; the Windows save folder can be imported back.",
+      "Imports are checked first and the previous saves are kept as a backup." ] },
+    { "date": "2026-11-03", "title": "Display options", "items": [
+      "Internal resolution 1x to 8x or matched to the window, MSAA, and the game's own 16:9 mode.",
+      "Split-screen views are scaled with the resolution." ] },
+    { "date": "2026-11-03", "title": "Split screen", "items": [
+      "Two to four players, each on their own gamepad, on Windows and in the browser.",
+      "Four-player Windows runs went from about 35 to 60 fps after the GPU command walk and vertex handling were fixed." ] },
+    { "date": "2026-11-03", "title": "A race at 60 fps in Edge", "items": [
+      "Races hold 60 fps in the browser; without the frame cap about 116.",
+      "Keyboard and gamepad drive player 1." ] },
+    { "date": "2026-11-03", "title": "Sound and movie skip", "items": [
+      "Sound plays in the browser through an AudioWorklet after the first click or key.",
+      "Skipping the movies reaches the title screen in under 15 seconds.",
+      "A mixing bug that made the left channel louder and clip is fixed." ] },
+    { "date": "2026-11-03", "title": "WebGPU", "items": [
+      "The GPU work is recorded as frame packets and drawn with WebGPU; the console's vertex programs and pixel combiners become WGSL shaders.",
+      "Guest memory and hardware registers work without page faults, which WebAssembly does not have." ] },
+    { "date": "2026-11-02", "title": "GPU renderer", "items": [
+      "First GPU-drawn frames, then vertex programs and combiners on the GPU, then a full race at full speed.",
+      "Mipmaps, tyres and a black-square texture bug fixed." ] },
+    { "date": "2026-11-01", "title": "Static recompile", "items": [
+      "The retail Xbox game translated to C with an open-source static recompiler and running on Windows: menus, races and movies." ] }
+  ],
+  "milestones": [
+    { "title": "Boots on Windows", "text": "The recompiled game reaches its intro movies, title screen, menus and a race. Two runtime fixes were needed: the USB controller setup was never called, and a watchdog timer killed healthy runs." },
+    { "title": "Frame packets on the GPU", "text": "Instead of drawing pixels on the CPU, the console's GPU commands are recorded as packets and replayed on a real GPU, with shaders generated from the console's vertex programs and pixel combiners." },
+    { "title": "A full race at 60 fps", "text": "A software interrupt and a faster command kick-off let the game and the GPU run side by side; the first complete race at full speed followed." },
+    { "title": "WebAssembly and WebGPU", "text": "The same C builds for WebAssembly. One web worker per game thread, the game's files from the browser's private storage, sound through an AudioWorklet, graphics through WebGPU." },
+    { "title": "Play from your own disc", "text": "The browser page asks for the player's own game folder, verifies it, and keeps a private copy. The local server never serves game data." },
+    { "title": "Polish", "text": "Saves, display options, split screen, Free Ride, a start page, smoother race starts and cleaner sound." }
+  ]
+}

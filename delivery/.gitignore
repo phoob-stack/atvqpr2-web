@@ -1,0 +1,30 @@
+# Test runs, browser profiles, screenshots and build output: never committed.
+.test/
+out/
+# deploy settings with real values (deploy/.env.example is the template)
+.env
+deploy/.env
+# Nothing made from any game may land here (pipeline/verify-package.mjs is the
+# real gate; these keep git from picking anything up by accident).
+*.xbe
+*.iso
+*.xiso
+*.bah
+*.bad
+*.xpr
+*.xmv
+*.wav
+*.wma
+*.wasm
+*.br
+*.obj
+*.o
+*.a
+*.lib
+*.exe
+*.dll
+*.pdb
+src/recomp/gen/
+build-wasm/
+node_modules/
+*.log

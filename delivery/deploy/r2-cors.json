@@ -1,0 +1,14 @@
+{
+  "rules": [
+    {
+      "id": "atvqpr2-site-read",
+      "allowed": {
+        "origins": ["https://atvqpr2.com", "https://www.atvqpr2.com"],
+        "methods": ["GET", "HEAD"],
+        "headers": ["Range", "If-None-Match", "If-Range"]
+      },
+      "exposeHeaders": ["Content-Range", "Content-Length", "ETag", "Accept-Ranges"],
+      "maxAgeSeconds": 86400
+    }
+  ]
+}

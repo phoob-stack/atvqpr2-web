@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup · ATV 2 Port</title>
+<meta name="description" content="What you need to play the ATV 2 port: your own disc's files, the builder, and Edge or Chrome with WebGPU. The game runs on this site from files on your own computer.">
+<link rel="stylesheet" href="css/site.css">
+<script>try{var t=localStorage.getItem('atv2.site.theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="index.html" aria-label="ATV 2 port: home">
+    <span class="name"><b>ATV 2</b><small>PC &amp; browser port</small></span>
+  </a>
+  <nav class="nav" aria-label="Site">
+    <a href="index.html">Home</a><a href="configs.html">Configs</a><a href="stats.html">Stats</a><a href="setup.html" aria-current="page">Setup</a><a href="about.html">About</a>
+    <button id="theme-btn" class="theme-btn" type="button">Theme</button>
+  </nav>
+</header>
+<main id="main">
+  <h2>Setup and play</h2>
+  <p class="lead">The game is built on your own computer from your own disc, and played in this site's game page from the files the builder made. This site never has the game: it sends only its own page code; your files go from your disk into your browser's own storage.</p>
+
+  <div class="cards">
+    <section class="card" aria-labelledby="need-title">
+      <h3 id="need-title">What you need</h3>
+      <ul class="small prose">
+        <li><strong>Your own copy</strong> of ATV Quad Power Racing 2 for the original Xbox, <strong>USA retail release</strong>, legally owned, with its files copied to a folder on your computer (the folder with <code>default.xbe</code> in it).</li>
+        <li><strong>The builder</strong> (coming): a small package of this project's own code that turns those files into the game for your computer.</li>
+        <li><strong>Edge or Chrome</strong> on a desktop computer, with WebGPU.</li>
+        <li>A gamepad is optional: the keyboard works, and any standard-layout pad drives player 1.</li>
+        <li>About 1 GB of free disk space for the build, and the same again in the browser's storage for the game files.</li>
+      </ul>
+    </section>
+    <section class="card" aria-labelledby="browser-title">
+      <h3 id="browser-title">This browser</h3>
+      <div id="browser-check" class="small" aria-live="polite">Checking…</div>
+      <p class="small muted">The game page also needs cross-origin isolation (for shared memory between its threads). This site turns it on for its pages (and the PC launcher for its own); nothing to set by hand.</p>
+    </section>
+    <div class="playbox" id="playbox" aria-label="Play"></div>
+  </div>
+
+  <section class="card wide" id="builder" aria-labelledby="flow-title">
+    <h3 id="flow-title">How it goes</h3>
+    <ol class="steps prose">
+      <li><strong>Copy your disc's files</strong> to a folder. The folder should hold <code>default.xbe</code> and the game's data files and folders next to it.</li>
+      <li><strong>Get the builder</strong> <span class="tag">coming</span>. It will be linked here when it is ready. It contains only this project's code and the open-source recompiler; no game code.</li>
+      <li><strong>Run it and pick the game folder.</strong> The builder checks <code>default.xbe</code> (its size and SHA-256 must match the USA retail release; other releases and modified copies are refused).</li>
+      <li><strong>It compiles locally.</strong> The recompiler translates the game's program to C and compiles it to WebAssembly (<code>atv2.wasm</code>) on your computer. Nothing is downloaded from this site, and the result stays on your computer.</li>
+      <li><strong>It writes your play folder</strong>, <code>atv2-play</code> (by default in <code>%LOCALAPPDATA%\atv2-builder</code>; the builder prints where): your game files (as links, so no extra space on the same drive), <code>atv2.wasm</code> and <code>atv2-build.json</code> (the builder version and the build's SHA-256).</li>
+      <li><strong>Play here.</strong> On the <a href="index.html">Home</a> page, Play &rarr; <strong>Select local game files</strong> and choose that folder (you can paste its path into the folder window's address bar). The page checks <code>default.xbe</code>, and checks that <code>atv2.wasm</code> is exactly the build this site's game page was made for; then it copies the files into your browser's private storage (about 0.7 GB, less without the movies). After that, Play starts straight away, with no folder to pick.</li>
+      <li><strong>Settings:</strong> what you set on the <a href="configs.html">Configs</a> page is what the game here uses.</li>
+      <li><strong>Or play from the PC launcher:</strong> the builder also starts a local server at <code>http://127.0.0.1:8460</code> and opens it (it answers only this computer); the Configs page's launch link opens it with your settings.</li>
+    </ol>
+    <p class="small"><strong>"atv2.wasm does not match this site"</strong>: the site's game page and your build must come from the same builder version. Run the builder version the message names (it rebuilds in a few minutes) and select its folder again. <strong>"No atv2.wasm"</strong>: you picked the game folder itself; pick the builder's <code>atv2-play</code> folder instead.</p>
+  </section>
+
+  <div class="cards">
+    <section class="card" aria-labelledby="keys-title">
+      <h3 id="keys-title">Default keys</h3>
+      <ul class="small prose">
+        <li><kbd>Enter</kbd> Start, <kbd>Backspace</kbd> Back</li>
+        <li><kbd>Z</kbd> A (accelerate), <kbd>X</kbd> B (brake)</li>
+        <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> left stick (steer and lean)</li>
+        <li>Arrow keys: d-pad (menus)</li>
+        <li><kbd>F1</kbd> or <kbd>Esc</kbd>: the game page's own menu</li>
+      </ul>
+      <p class="small"><a href="configs.html#controls">Change them</a></p>
+    </section>
+    <section class="card" aria-labelledby="trouble-title">
+      <h3 id="trouble-title">If something is wrong</h3>
+      <ul class="small prose">
+        <li><strong>"WebGPU is not available"</strong>: update Edge or Chrome, and check that hardware acceleration is on in the browser's settings.</li>
+        <li><strong>No sound</strong>: click the page or press a key once; browsers start sound only after that.</li>
+        <li><strong>The pad does nothing</strong>: press a button on it while the game page has focus.</li>
+        <li><strong>The folder is refused</strong>: only the USA retail release is supported, and the folder must be the builder's <code>atv2-play</code> (game files and <code>atv2.wasm</code>).</li>
+        <li><strong>Start over</strong>: Home &rarr; Play &rarr; Forget game files removes the copy from this browser; your saves stay.</li>
+        <li><strong>Saves</strong>: kept in this browser for this site (the PC launcher's are separate, for <code>127.0.0.1:8460</code>). Back them up from the game page's Saves tab; the zip also opens on the <a href="stats.html">Stats</a> page.</li>
+      </ul>
+    </section>
+    <section class="card" aria-labelledby="windows-title">
+      <h3 id="windows-title">Windows build</h3>
+      <p class="small">The same recompiled game also runs as a Windows program, with Direct3D 11. Its saves use the same folder layout as the browser's save backups, so they move between the two.</p>
+    </section>
+  </div>
+</main>
+<footer class="site">
+  <p>An unofficial fan project for people who own the game. No game content is hosted here.</p>
+</footer>
+<script type="module" src="js/setup.js"></script>
+</body>
+</html>

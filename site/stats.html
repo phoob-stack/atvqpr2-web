@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stats · ATV 2 Port</title>
+<meta name="description" content="Open your own ATV 2 save backup and see your profiles, records, medals and unlocks. Read in your browser; nothing is uploaded.">
+<link rel="stylesheet" href="css/site.css">
+<script>try{var t=localStorage.getItem('atv2.site.theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="index.html" aria-label="ATV 2 port: home">
+    <span class="name"><b>ATV 2</b><small>PC &amp; browser port</small></span>
+  </a>
+  <nav class="nav" aria-label="Site">
+    <a href="index.html">Home</a><a href="configs.html">Configs</a><a href="stats.html" aria-current="page">Stats</a><a href="setup.html">Setup</a><a href="about.html">About</a>
+    <button id="theme-btn" class="theme-btn" type="button">Theme</button>
+  </nav>
+</header>
+<main id="main">
+  <h2>Stats</h2>
+  <p class="lead">Open your own saves to see your profiles, records, medals and unlocks. The files are read by this page in your browser; nothing is uploaded or kept.</p>
+  <noscript><p class="notice warn">This page needs JavaScript.</p></noscript>
+
+  <section class="drop" id="drop" aria-labelledby="open-title">
+    <h3 id="open-title">Open your saves</h3>
+    <ul class="small">
+      <li>A save backup <strong>.zip</strong> from the local game (Saves &rarr; Download backup), or a zip of the Windows build's save folder.</li>
+      <li>Or the Windows build's <strong>save folder</strong> itself (usually <code>%LOCALAPPDATA%\xboxrecomp</code>, or the folder you set with <code>RECOMP_SAVE_DIR</code>). Only the small save files in it are read, never the large disk images next to them.</li>
+      <li>Or drop the files or folder on this box.</li>
+    </ul>
+    <div class="row">
+      <label class="btn" for="stats-file">Choose a backup .zip or save files</label>
+      <input type="file" id="stats-file" class="sr-only" multiple accept=".zip,application/zip,.xbx,*">
+      <button class="btn ghost" type="button" id="stats-folder">Choose the save folder</button>
+      <input type="file" id="stats-dir" class="sr-only" webkitdirectory multiple aria-label="Save folder">
+      <button class="btn ghost" type="button" id="stats-example">Show a made-up example</button>
+    </div>
+    <div id="stats-msg" class="msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <div id="stats-out" aria-live="polite"></div>
+
+  <p class="small muted" style="margin-top:18px">How the save files are read: <a href="docs/SAVE-FORMAT.md">the save format notes</a>. Values we have not confirmed are marked <span class="tag unconfirmed">unconfirmed</span>; fields we cannot name yet are listed as <span class="tag unknown">unknown</span> in each file's details.</p>
+</main>
+<footer class="site">
+  <p>Your saves are read in this browser tab and dropped when you leave the page. Nothing is uploaded.</p>
+</footer>
+<script type="module" src="js/stats.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "comment": "The atv2.wasm this builder version makes: its size and SHA-256 only, never the file. Builds are reproducible (wasi-sdk 34, -ffile-prefix-map for the work folder), so every player's build of the USA retail game is byte-identical to this one. builder.mjs compares its build with it, and the project site's game page accepts exactly this build (the site's tools/sync-play.mjs copies these numbers into play/host/deploy.js). Measured 2026-11-04 from a clean builder 0.4.0 build (work\builderclean4).",
+  "builder": "0.4.0",
+  "atvrecomp": "0923f0fe51d94a057e8ee28590b022262cfb4609",
+  "xboxrecomp": "975ef5ff918399e6d07c95dc4358a5f416481be5",
+  "wasiSdk": "34.0",
+  "wasm": {
+    "name": "atv2.wasm",
+    "size": 22125567,
+    "sha256": "89698d4dd38158e43efbd900e10e21400de75045b6584b32161d52306c52508e"
+  }
+}

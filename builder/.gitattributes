@@ -1,0 +1,6 @@
+# One line-ending rule for every checkout and every `git archive` of this
+# package, whatever core.autocrlf says on the machine: LF everywhere (bash
+# scripts break with CRLF), CRLF only for Windows batch files.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf

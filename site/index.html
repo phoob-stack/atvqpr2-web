@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATV 2 PC &amp; Browser Port</title>
+<meta name="description" content="An unofficial static recompilation of ATV Quad Power Racing 2 for Windows and the browser. Bring your own legally owned disc.">
+<link rel="stylesheet" href="css/site.css">
+<script>try{var t=localStorage.getItem('atv2.site.theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="index.html" aria-label="ATV 2 port: home">
+    <span class="name"><b>ATV 2</b><small>PC &amp; browser port</small></span>
+  </a>
+  <nav class="nav" aria-label="Site">
+    <a href="index.html" aria-current="page">Home</a><a href="configs.html">Configs</a><a href="stats.html">Stats</a><a href="setup.html">Setup</a><a href="about.html">About</a>
+    <button id="theme-btn" class="theme-btn" type="button">Theme</button>
+  </nav>
+</header>
+<main id="main">
+  <section class="hero" aria-labelledby="hero-title">
+    <h1 id="hero-title">ATV Quad Power Racing 2 on PC and in the browser</h1>
+    <p>An unofficial static recompilation of the 2003 Xbox game. It runs from your own copy of the game, at 60 fps.</p>
+    <p class="small muted" id="hub-status" aria-live="polite">Free roam server: checking…</p>
+  </section>
+
+  <div class="playbox" id="playbox" aria-label="Play"></div>
+
+  <section aria-labelledby="need-title">
+    <h2 id="need-title">You need</h2>
+    <ul class="prose">
+      <li>The files from your own USA retail disc. The game is not included.</li>
+      <li>Edge or Chrome with WebGPU. A gamepad is optional.</li>
+      <li>The builder, run once on your PC. See <a href="setup.html">Setup</a>.</li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="news-title">
+    <h2 id="news-title">News</h2>
+    <ol class="news" id="news" aria-live="polite"><li class="muted small">Loading the news…</li></ol>
+  </section>
+</main>
+<footer class="site">
+  <p>Unofficial fan project. ATV Quad Power Racing 2 belongs to its owners; no game content is hosted here.</p>
+</footer>
+<script type="module" src="js/home.js"></script>
+</body>
+</html>
