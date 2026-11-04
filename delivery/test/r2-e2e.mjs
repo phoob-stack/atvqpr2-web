@@ -11,11 +11,16 @@
 // progress), group (on-demand sand group), relaunch (0 downloads), offline
 // (both servers stopped), resume (a cut connection, within a page and across
 // page loads), transfer (corrupted bodies), cache (a corrupted stored file),
-// parts (.part and other leftovers cleaned at start), full (?verify=full).
+// parts (.part and other leftovers cleaned at start), full (?verify=full),
+// orbit (the second title: games/orbit/, first start, its group, relaunch),
+// transition (Box Quad at the bucket root only: the profile's fallback; then
+// under games/boxquad/: same version, no download), rollback (a second
+// release, then upload-r2.mjs --rollback --title boxquad; the client follows).
 // Edge is stopped by its profile path at the end (its children outlive the
 // launcher on Windows).
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, existsSync, cpSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launch } from './cdp.mjs';
@@ -52,7 +57,8 @@ function stray() {
 let bucket = null, site = null, browser = null;
 const startBucket = async () => { bucket = await createAssetServer({ port: ASSET_PORT, bucketDir: join(OUT, 'r2'), testHooks: true, rateRps: 0, bucketCorsOrigins: [SITE_URL] }, {}); };
 const startSiteSrv = async () => { site = await startSite({ root: SITE, port: SITE_PORT, connectExtra: [ASSETS] }); };
-const hook = async (path) => (await fetch(`${ASSETS}/__test/${path}`)).json();
+// (a stand-in restarted under the same port leaves undici a pooled socket that resets: one retry)
+const hook = async (path) => { try { return await (await fetch(`${ASSETS}/__test/${path}`)).json(); } catch { await sleep(100); return (await fetch(`${ASSETS}/__test/${path}`)).json(); } };
 const statsReset = () => hook('stats?reset=1');
 async function stats() {
   const s = await hook('stats');
@@ -89,8 +95,8 @@ try {
   const csp = async () => (await tab.eval('window.__csp ?? []').catch(() => [])) ?? [];
   const opfsBlobs = () => tab.eval(`(async () => { try { const d = await (await (await (await navigator.storage.getDirectory()).getDirectoryHandle('delivery')).getDirectoryHandle('boxquad')).getDirectoryHandle('blobs');
     const out = {}; for await (const [n, h] of d.entries()) out[n] = (await h.getFile()).size; return out; } catch { return {}; } })()`);
-  const entry = (path) => tab.eval(`(async () => { const r = await fetch('${ASSETS}/latest.json', { cache: 'no-store' }).then((r) => r.json());
-    const m = await fetch('${ASSETS}/' + r.manifest).then((r) => r.json()); return m.files.find((f) => f.path === ${JSON.stringify(path)}); })()`);
+  const entry = (path) => tab.eval(`(async () => { const r = await fetch('${ASSETS}/games/boxquad/latest.json', { cache: 'no-store' }).then((r) => r.json());
+    const m = await fetch('${ASSETS}/games/boxquad/' + r.manifest).then((r) => r.json()); return m.files.find((f) => f.path === ${JSON.stringify(path)}); })()`);
 
   // ---- the panel ----------------------------------------------------------------------------
   if (want('panel')) {
@@ -184,7 +190,7 @@ try {
   // A fresh namespace in a page of the site, with the site's copy of the client.
   const fresh = (ns, path, { setup = '', retries = 6, keep = false } = {}) => tab.eval(`(async () => {
     const { AssetManager, HttpBackend } = await import('/test-title/lib/assets.js');
-    const m = new AssetManager({ ns: '${ns}', backend: new HttpBackend({ base: '${ASSETS}', retries: ${retries} }) });
+    const m = new AssetManager({ ns: '${ns}', backend: new HttpBackend({ base: '${ASSETS}/games/boxquad/', retries: ${retries} }) });
     ${keep ? '' : 'await m.forget();'} await m.open(); await m.verifyStore(); ${setup}
     const t = performance.now();
     try { await m.get('${path}'); } catch (e) { m.close(); return { error: { code: e.code, message: e.message }, stats: m.stats }; }
@@ -281,8 +287,8 @@ try {
       const d = await (await (await (await navigator.storage.getDirectory()).getDirectoryHandle('delivery')).getDirectoryHandle('boxquad')).getDirectoryHandle('blobs');
       const put = async (n, bytes) => { const w = await (await d.getFileHandle(n, { create: true })).createWritable(); await w.write(bytes); await w.close(); };
       for (const s of ['${dirt.sha256}', '${grass.sha256}']) { await d.removeEntry(s); await d.removeEntry(s + '.ok'); }
-      const ptr = await fetch('${ASSETS}/latest.json', { cache: 'no-store' }).then((r) => r.json());
-      const first = async (p) => new Uint8Array(await (await fetch('${ASSETS}/' + ptr.manifest.replace('manifest.json', p), { headers: { range: 'bytes=0-1048575' } })).arrayBuffer());
+      const ptr = await fetch('${ASSETS}/games/boxquad/latest.json', { cache: 'no-store' }).then((r) => r.json());
+      const first = async (p) => new Uint8Array(await (await fetch('${ASSETS}/games/boxquad/' + ptr.manifest.replace('manifest.json', p), { headers: { range: 'bytes=0-1048575' } })).arrayBuffer());
       // grass: a good first chunk, a bad second one, 100 more bytes: cut back to 1 MiB, then resumed
       await put('${grass.sha256}.part', new Blob([await first('textures/grass.rgba'), new Uint8Array(1048576).fill(9), new Uint8Array(100)]));
       // dirt: a good first chunk + 8 junk bytes of the unfinished second: kept, caught when the chunk completes, fetched again
@@ -319,8 +325,104 @@ try {
     check(v.ok === 7 && !v.bad.length && v.hashedBytes > 7000000 && s.objects.bytes === 0, '?verify=full: every stored file hashed again (streaming), all good, nothing fetched', v);
     await tab.screenshot(join(SHOTS, '4-running.png'));
   }
+
+  // ---- a second title (Orbit): added with a profile and its build only ------------------------------------------
+  if (want('orbit')) {
+    await statsReset();
+    const t = Date.now();
+    await tab.navigate(RUNNER('&game=orbit'));
+    await running();
+    const wall = Date.now() - t;
+    const d = await tab.eval(`(() => { const a = delivery.launcher.assets; return { game: delivery.game, titleBase: delivery.titleBase, version: a.catalog.version,
+      fetched: a.stats.fetched.map((f) => f.path), netBytes: a.stats.netBytes, required: a.required(), name: document.getElementById('tt-name').textContent }; })()`);
+    const s1 = await stats();
+    check(d.game === 'orbit' && d.titleBase === `${ASSETS}/games/orbit/` && d.fetched.length === 3 && d.required.every((p) => d.fetched.includes(p)) && !d.fetched.includes('sky/stars.bin'),
+      'orbit: first start from games/orbit/ (its profile: 3 required files, the sky group not yet)', `${d.name} ${d.version}: ${d.fetched.join(', ')}; ${d.netBytes} bytes, running after ${wall} ms`);
+    await tab.waitFor("window.delivery.app.state().sky.state === 'ready'", { timeout: 15000 });
+    const g = await tab.eval('delivery.groups');
+    check(g?.[0]?.name === 'sky' && g[0].fetched === 1, 'orbit: its on-demand group (sky) is fetched on first use', g);
+    await statsReset();
+    const t2 = Date.now();
+    await tab.navigate(RUNNER('&game=orbit'));
+    await running();
+    const s2 = await stats();
+    const f2 = await tab.eval('delivery.launcher.assets.stats.fetched.length');
+    check(f2 === 0 && s2.objects.requests === 0 && s2.manifest.requests === 0, 'orbit: relaunch downloads nothing (latest.json only)', `${s2.totalBodyBytes} bytes, running after ${Date.now() - t2} ms`);
+    results.orbit = { first: { wallMs: wall, ...d, server: s1.objects }, relaunch: { bytes: s2.totalBodyBytes } };
+    await tab.screenshot(join(SHOTS, '5-orbit.png'));
+  }
+
+  // ---- the move to games/boxquad/: the old root layout first (fallback), then the prefix --------------------------
+  if (want('transition')) {
+    // a bucket with Box Quad at the root only (as before the move)
+    const OUTR = join(ROOT, '.test', 'r2e2e-root');
+    rmSync(OUTR, { recursive: true, force: true });
+    cpSync(join(OUT, 'r2', 'games', 'boxquad'), join(OUTR, 'r2'), { recursive: true });
+    const plan = JSON.parse(readFileSync(join(OUT, 'r2-upload-plan.json'), 'utf8'));
+    plan.objects = plan.objects.filter((o) => o.title === 'boxquad').map((o) => ({ ...o, key: o.key.slice('games/boxquad/'.length), file: `r2/${o.key.slice('games/boxquad/'.length)}` }));
+    writeFileSync(join(OUTR, 'r2-upload-plan.json'), JSON.stringify(plan));
+    await bucket.close();
+    bucket = await createAssetServer({ port: ASSET_PORT, bucketDir: join(OUTR, 'r2'), testHooks: true, rateRps: 0, bucketCorsOrigins: [SITE_URL] }, {});
+    await tab.navigate(`${SITE_URL}/index.html`);
+    await tab.eval(`(async () => { await (await (await navigator.storage.getDirectory()).getDirectoryHandle('delivery')).removeEntry('boxquad', { recursive: true }).catch(() => {}); return 1; })()`);
+    await statsReset();
+    await tab.navigate(RUNNER()); await running();
+    const a = await tab.eval('({ fallback: delivery.launcher.assets.backend.usedFallback, version: delivery.launcher.assets.catalog.version, fetched: delivery.launcher.assets.stats.fetched.length })');
+    const sa = await stats();
+    check(a.fallback && a.fetched === 6 && sa.missing?.requests !== 0, 'transition: games/boxquad/latest.json not there yet -> the profile\'s fallback reads the root\'s latest.json', a);
+    // the prefixed bucket (the same version, re-published under games/boxquad/): the next start moves over with no file download
+    await bucket.close();
+    await startBucket();
+    await statsReset();
+    await tab.navigate(RUNNER()); await running();
+    const b = await tab.eval('({ fallback: delivery.launcher.assets.backend.usedFallback, version: delivery.launcher.assets.catalog.version, fetched: delivery.launcher.assets.stats.fetched.length })');
+    const sb = await stats();
+    const base = await tab.eval("delivery.launcher.assets.catalog.base");
+    check(!b.fallback && b.version === a.version && b.fetched === 0 && sb.objects.requests === 0 && base === `${ASSETS}/games/boxquad/v/${b.version}/manifest.json`,
+      'transition: once games/boxquad/ is there, the same version is read from it (its manifest; the HTTP cache may answer, it is immutable): 0 file downloads',
+      { ...b, base, manifestRequests: sb.manifest.requests, bytes: sb.totalBodyBytes });
+    results.transition = { root: a, prefixed: b };
+  }
+
+  // ---- two versions, then a rollback (upload-r2.mjs --rollback --title boxquad --dry-run writes the pointer) ------
+  if (want('rollback')) {
+    const OUT2 = join(ROOT, '.test', 'r2e2e-out2'), OUTM = join(ROOT, '.test', 'r2e2e-merged');
+    log(`pipeline (variant 1): ${execFileSync(process.execPath, [join(ROOT, 'pipeline', 'build.mjs'), '--out', OUT2, '--no-site', '--variant', '1'], { encoding: 'utf8' }).trim().split('\n').at(-2)}`);
+    const p1 = JSON.parse(readFileSync(join(OUT, 'r2-upload-plan.json'), 'utf8')), p2 = JSON.parse(readFileSync(join(OUT2, 'r2-upload-plan.json'), 'utf8'));
+    const v1 = p1.titles.find((t) => t.id === 'boxquad').version, v2 = p2.titles.find((t) => t.id === 'boxquad').version;
+    // the bucket after a second release: both versions kept, latest.json -> v2
+    rmSync(OUTM, { recursive: true, force: true });
+    cpSync(join(OUT, 'r2'), join(OUTM, 'r2'), { recursive: true });
+    cpSync(join(OUT2, 'r2', 'games', 'boxquad', 'v', v2), join(OUTM, 'r2', 'games', 'boxquad', 'v', v2), { recursive: true });
+    cpSync(join(OUT2, 'r2', 'games', 'boxquad', 'latest.json'), join(OUTM, 'r2', 'games', 'boxquad', 'latest.json'));
+    const objs = [...p1.objects.filter((o) => o.key !== 'games/boxquad/latest.json'), ...p2.objects.filter((o) => o.title === 'boxquad')];
+    const writePlan = () => writeFileSync(join(OUTM, 'r2-upload-plan.json'), JSON.stringify({ ...p1, objects: objs }));
+    writePlan();
+    await bucket.close();
+    bucket = await createAssetServer({ port: ASSET_PORT, bucketDir: join(OUTM, 'r2'), testHooks: true, rateRps: 0, bucketCorsOrigins: [SITE_URL] }, {});
+    await statsReset();
+    await tab.navigate(RUNNER()); await running();
+    const a = await tab.eval('({ version: delivery.launcher.assets.catalog.version, fetched: delivery.launcher.assets.stats.fetched.map((f) => f.path) })');
+    check(a.version === v2 && a.fetched.length === 1 && a.fetched[0] === 'textures/dirt.rgba', `rollback: a second release (${v2}) is picked up: only its one changed file is downloaded`, a);
+    // roll back: the pointer upload-r2.mjs would put, then the client follows it
+    const rb = execFileSync(process.execPath, [join(ROOT, 'pipeline', 'upload-r2.mjs'), '--out', OUTM, '--rollback', v1, '--title', 'boxquad', '--from', join(OUTM, 'r2'), '--dry-run'], { encoding: 'utf8' });
+    const ptr = readFileSync(join(OUTM, 'rollback', 'boxquad', 'latest.json'));
+    writeFileSync(join(OUTM, 'r2', 'games', 'boxquad', 'latest.json'), ptr);
+    const lo = objs.find((o) => o.key === 'games/boxquad/latest.json');
+    Object.assign(lo, { size: ptr.length, sha256: createHash('sha256').update(ptr).digest('hex') });
+    writePlan();
+    await statsReset();
+    await tab.navigate(RUNNER()); await running();
+    const b = await tab.eval('({ version: delivery.launcher.assets.catalog.version, fetched: delivery.launcher.assets.stats.fetched.map((f) => f.path) })');
+    const s = await stats();
+    check(b.version === v1 && s.pointer.requests === 1 && b.fetched.length <= 1, `rollback: upload-r2.mjs --rollback ${v1} --title boxquad puts games/boxquad/latest.json back; the client follows it`,
+      { ...b, command: rb.trim().split('\n').at(-1).slice(0, 110), bytes: s.totalBodyBytes });
+    results.rollback = { v1, v2, release: a, rolledBack: b };
+    await bucket.close();
+    await startBucket();
+  }
 } catch (e) {
-  check(false, `stopped: ${e.stack ?? e.message}`);
+  check(false, `stopped: ${e.stack ?? e.message}${e.cause ? ` (cause: ${e.cause.code ?? ""} ${e.cause.message ?? e.cause})` : ""}`);
 } finally {
   if (browser) await browser.close().catch(() => {});
   stray();

@@ -1,0 +1,32 @@
+{
+ "format": "game-profile/1",
+ "id": "atv2",
+ "title": "ATV Quad Power Racing 2 (USA)",
+ "comment": "The game page's profile (web/host/assetsource.js reads it). ATV 2's module and files are built from the player's own retail disc, so derivedFromRetail is true and the only source is the player's own files: delivery's profile.js refuses any remote source, R2 prefix or manifest for such a profile.",
+ "derivedFromRetail": true,
+ "sources": ["local"],
+ "entry": "build/atv2.wasm",
+ "mounts": [{ "at": "/game", "from": "game/" }],
+ "required": ["build/atv2.wasm", "game/default.xbe", "game/ATV.bah", "game/ATV.bad"],
+ "groups": {},
+ "local": {
+  "root": "default.xbe",
+  "skipFolders": ["udata", "tdata", "cache", "titlecache"],
+  "layout": { "build/": ["atv2.wasm", "atv2-build.json", "atv2-play.txt"], "game/": "*" },
+  "build": { "module": "atv2.wasm", "record": "atv2-build.json" },
+  "optional": { "skipMovies": "^Movies/[^/]+\\.xmv$" },
+  "legacy": { "game": "atv2-game", "build": "atv2-build" },
+  "checks": [
+   { "path": "default.xbe", "size": 1904640, "sha256": "1e3c2fcebf62709f2f867da846942470ef3455da6c46a0f3eb2f18aec93bd22f",
+     "missing": "noXbe", "wrongSize": "xbeSize", "wrongHash": "xbeHash" },
+   { "anyOf": ["ATV.bah", "ATV.bad"], "nonEmpty": true, "message": "noArchives" }
+  ],
+  "messages": {
+   "noXbe": "There is no default.xbe in that folder. Choose the folder that contains default.xbe (the top folder of your ATV Quad Power Racing 2 disc copy).",
+   "xbeSize": "This doesn't look like ATV Quad Power Racing 2 (USA). Its default.xbe is {size} bytes; the retail USA release's is {want} bytes. Only that release is supported.",
+   "xbeHash": "This doesn't look like ATV Quad Power Racing 2 (USA). Its default.xbe has the right size but different contents (SHA-256 {sha}…), so it is another release or a modified copy. Only the retail USA release is supported.",
+   "noArchives": "default.xbe is the right one, but {missing} {verb} missing or empty. Copy the whole disc folder and choose it again.",
+   "checked": "default.xbe is the retail USA build"
+  }
+ }
+}

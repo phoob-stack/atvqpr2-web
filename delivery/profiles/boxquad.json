@@ -1,0 +1,15 @@
+{
+ "format": "game-profile/1",
+ "id": "boxquad",
+ "title": "Box Quad (delivery test title)",
+ "comment": "Our own placeholder title (title/src/quad.c + procedural assets). Remote under games/boxquad/; fallbackPrefix '' reads the bucket root's latest.json while games/boxquad/ has none (the move from the root; remove it once the root objects are gone).",
+ "derivedFromRetail": false,
+ "sources": ["remote", "local"],
+ "remote": { "prefix": "games/boxquad/", "fallbackPrefix": "" },
+ "entry": "title.wasm",
+ "app": "title",
+ "titleVersion": "1.1.0",
+ "required": ["title.wasm", "config/title.json", "meshes/track.bin", "meshes/quad.bin", "textures/grass.rgba", "textures/dirt.rgba"],
+ "groups": { "sand": ["textures/sand.rgba"] },
+ "build": { "dir": "title" }
+}

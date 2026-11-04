@@ -17,7 +17,8 @@
 // 1. Asset-server layout (writeLayout; what server/asset-server.mjs serves at /assets/):
 //      manifest.json                 the catalog (no-cache)
 //      objects/<aa>/<sha256>         every file by content (immutable)
-// 2. Versioned bucket layout (writeVersionedTree; what goes to R2):
+// 2. Versioned bucket layout (writeVersionedTree; what goes to R2), one per
+//    title under its profile's prefix games/<id>/ (client/profile.js):
 //      latest.json                   { format: 'delivery-latest/1', title, version,
 //                                      manifest: 'v/<version>/manifest.json', sha256, size }   (no-cache)
 //      v/<version>/manifest.json     the catalog of that version (immutable)
@@ -55,9 +56,9 @@ export function buildManifest(files, delivery, { chunkSize = DEFAULT_CHUNK } = {
     for (const p of paths) { if (groupOf.has(p)) throw new Error(`${p} is in two groups`); groupOf.set(p, g); }
   }
   const known = new Set(files.map((f) => f.path));
-  for (const p of [...required, ...groupOf.keys(), delivery.entry].filter(Boolean)) if (!known.has(p)) throw new Error(`title/delivery.json names ${p}, which the build did not make`);
+  for (const p of [...required, ...groupOf.keys(), delivery.entry].filter(Boolean)) if (!known.has(p)) throw new Error(`the profile names ${p}, which the build did not make`);
   for (const p of required) if (groupOf.has(p)) throw new Error(`${p} is required and in a group`);
-  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(delivery.titleVersion ?? '')) throw new Error('title/delivery.json: titleVersion must be N.N.N');
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(delivery.titleVersion ?? '')) throw new Error('the profile: titleVersion must be N.N.N');
   const entries = [];
   const bodies = new Map();
   for (const f of [...files].sort((a, b) => (a.path < b.path ? -1 : 1))) {
@@ -106,27 +107,29 @@ export function writeLayout(outDir, built, opts = {}) {
   return manifest;
 }
 
-/** Layout 2 (versioned bucket): latest.json + v/<version>/manifest.json + v/<version>/<path>. Returns { manifest, latest, keys }. */
-export function writeVersionedTree(outDir, built) {
+/** Layout 2 (versioned bucket): <prefix>latest.json + <prefix>v/<version>/manifest.json + <prefix>v/<version>/<path>.
+ *  prefix: 'games/<id>/' (a title's profile), or '' (the old single-title root). Returns { manifest, latest, keys }. */
+export function writeVersionedTree(outDir, built, { prefix = '' } = {}) {
+  if (prefix && !/^games\/[a-z0-9][a-z0-9-]{0,31}\/$/.test(prefix)) throw new Error(`bad bucket prefix ${prefix}`);
   const v = built.manifest.version;
   if (!VERSION_RE.test(v)) throw new Error(`bad version ${v}`);
   const files = built.manifest.files.map((e) => ({ ...e, url: e.path }));
   const keys = [];
   for (const e of files) {
-    const key = `v/${v}/${e.path}`;
+    const key = `${prefix}v/${v}/${e.path}`;
     mkdirSync(dirname(join(outDir, key)), { recursive: true });
     writeFileSync(join(outDir, key), built.bodies.get(e.path));
     keys.push({ key, path: e.path, size: e.size, sha256: e.sha256, type: e.type });
   }
   const manifest = { ...built.manifest, files };
   const mbody = Buffer.from(json(manifest));
-  const mkey = `v/${v}/manifest.json`;
+  const mkey = `${prefix}v/${v}/manifest.json`;
   writeFileSync(join(outDir, mkey), mbody);
   keys.push({ key: mkey, size: mbody.length, sha256: sha(mbody), type: 'application/json' });
   const latest = latestFor(built.manifest.title, v, mbody);
   const lbody = Buffer.from(json(latest));
-  writeFileSync(join(outDir, 'latest.json'), lbody);
-  keys.push({ key: 'latest.json', size: lbody.length, sha256: sha(lbody), type: 'application/json' });
+  writeFileSync(join(outDir, `${prefix}latest.json`), lbody);
+  keys.push({ key: `${prefix}latest.json`, size: lbody.length, sha256: sha(lbody), type: 'application/json' });
   return { manifest, latest, keys };
 }
 

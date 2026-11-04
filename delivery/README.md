@@ -28,10 +28,14 @@ No npm packages (the one outside tool is Cloudflare's `wrangler`, which `pipelin
 | `client/assets.js` | the asset manager and its two content sources (`HttpBackend`: asset server or versioned bucket; `LocalFilesBackend`) |
 | `client/asset-worker.js` | downloads (Range resume, retries with backoff), streaming SHA-256 checks, atomic OPFS writes (`.part` + `createWritable`, verify, rename, mark), start-up verify and clean-up, in a worker |
 | `client/sha256.js` | a small incremental SHA-256 (WebCrypto cannot hash a stream) |
-| `client/launcher.js` | the small API the Play button calls |
+| `client/launcher.js` | the small API the Play button calls (`useProfile(profile, assetsBase)`) |
+| `client/profile.js` | game profiles (`game-profile/1`): id, title, sources, `games/<id>/` prefix, entry, mounts, required files, groups; a retail-derived profile can never have a remote source |
+| `profiles/` | one profile per title of ours: `boxquad.json`, `orbit.json`; the pipeline builds every profile with a remote source |
+| `titles/orbit/` | the second test title (Orbit): `src/orbit.c`, `build.mjs` (added with a profile and its build only) |
+| `docs/` | delivery docs: R2 structure and manifest, ATV 2's local source, wasm and assets into the VFS, ours vs derived, adding a game, deploy/update/rollback |
 | `client/sw.js` | the shell's service worker (page and code offline; assets stay in OPFS) |
 | `web/` | the launcher page (`index.html`, `page.js`) and the test title's page code (`app/title.js`, `app/hub.js`) |
-| `title/` | the test title: `src/quad.c` (physics, laps, mesh transform), `gen-assets.mjs` (procedural textures, track, mesh), `build.mjs`, `delivery.json` (required files, on-demand groups, title version) |
+| `title/` | Box Quad: `src/quad.c` (physics, laps, mesh transform), `gen-assets.mjs` (procedural textures, track, mesh), `build.mjs` (its required files, groups and version are in `profiles/boxquad.json`) |
 | `hub/hub.mjs` | the free-roam hub: a copy of atvrecomp's `web/tools/roamhub.mjs` (same protocol) with proxy settings |
 | `pipeline/build.mjs` | the one-command pipeline |
 | `pipeline/manifest.mjs` | manifest (format 2) + the asset server's layout + the versioned bucket tree (R2) |
@@ -85,15 +89,16 @@ await assets.status();                                 // { stored, missing, off
   kept in OPFS in its own namespace, so later visits need no pick.
 
 A backend is `{ kind, catalog(store) -> { catalog, offline }, fetch(entry, ctx) }`,
-so other sources plug in the same way. **ATV 2's existing flow** (`site/play/host/loader.js`
-+ `gamebuild.js`, "Select local game files") maps onto `LocalFilesBackend`
-without changing what it accepts: its `default.xbe` retail check and
-`checkBuild()` become the `validate` hook, its 8 MiB-chunk OPFS import becomes
-`fetch` (large files might use a size/mtime key instead of hashing every
-byte), and its stored-import check becomes
-`catalog()` with no files. That port is for the site's owners to do in
-atvrecomp/site; this repository does not modify either, and mode 1 is only
-ever used with our own test title.
+so other sources plug in the same way. **ATV 2's game page uses this client
+for its local source** (atvrecomp `web/host/assetsource.js`, with an
+allow-listed copy of `client/assets.js`, `asset-worker.js`, `sha256.js`,
+`profile.js` in `web/host/delivery/`): the play folder is checked first (the
+profile's `default.xbe` rules and the page's accepted builds, through the
+`precheck` order), then stored with `hashIn: 'worker'` (hashed while written,
+one pass) and a resume index, in the namespace `delivery/atv2/`; the I/O
+worker reads the blobs through the catalog. ATV 2's profile says
+`derivedFromRetail`, so it has no remote source: mode 1 is only ever used
+with our own test titles. See `docs/02-atv2-local-source.md`.
 
 Errors are `DeliveryError`s with a `code` the page can act on: `offline`
 (first visit without a connection), `manifest`, `missing`, `hash` (failed its
@@ -130,7 +135,7 @@ l.prefetchRest();                             // the rest in the background (off
   No clock or commit goes in: the same inputs give the same version and the
   same bytes (the pipeline is reproducible; `test/r2.test.mjs` builds twice
   and compares), any change gives a new version.
-- `required` and `group` come from `title/delivery.json`; files that are
+- `required` and `group` come from the title's profile (`profiles/<id>.json`); files that are
   neither are fetched in the background after start.
 - `chunks`: SHA-256 per 1 MiB chunk (files over 1 MiB), so a bad chunk is
   caught and fetched again as it arrives. `artifact` (compiled modules):
@@ -139,12 +144,18 @@ l.prefetchRest();                             // the rest in the background (off
 Two layouts of the same manifest:
 
 ```
-out/assets/  (the asset server, VPS)              out/r2/  (the R2 bucket, assets.atvqpr2.com)
-manifest.json            no-cache                  latest.json                  no-cache   { format: 'delivery-latest/1', title, version,
-objects/<aa>/<sha256>    immutable                                                           manifest: 'v/<version>/manifest.json', sha256, size }
-  (url = objects/aa/<sha256>)                      v/<version>/manifest.json    immutable
-                                                   v/<version>/<path>           immutable  (url = <path>)
+out/assets/  (the asset server, VPS; --vps-title)  out/r2/  (the R2 bucket, assets.atvqpr2.com; one tree per title)
+manifest.json            no-cache                  games/<id>/latest.json                no-cache   { format: 'delivery-latest/1', title, version,
+objects/<aa>/<sha256>    immutable                                                                    manifest: 'v/<version>/manifest.json', sha256, size }
+  (url = objects/aa/<sha256>)                      games/<id>/v/<version>/manifest.json  immutable
+                                                   games/<id>/v/<version>/<path>         immutable  (url = <path>)
 ```
+
+The prefix is the profile's `remote.prefix` (always `games/<id>/`). Box Quad
+1.1.0 first lived at the bucket root; the pipeline now makes the same version
+byte for byte under `games/boxquad/`, and Box Quad's profile reads the root's
+`latest.json` while `games/boxquad/latest.json` does not exist
+(`remote.fallbackPrefix: ""`). See `docs/06-deploy-update-rollback.md`.
 
 The bucket keeps every version (immutable trees); `latest.json` is the only
 object that changes. A release uploads `v/<version>/` first and
@@ -220,12 +231,15 @@ binds 127.0.0.1:8853 by default (anything else needs `ASSET_ALLOW_PUBLIC=1`),
 
 `node pipeline/build.mjs [--out out] [--hub-url ws://127.0.0.1:8854/ | /hub/] [--site ../site] [--no-site] [--variant N]`
 
-1. scans its inputs (`title client web server hub pipeline deploy test`) with
+1. scans its inputs (`profiles title titles client web server hub pipeline deploy test`) with
    the delivery rules; any problem stops the build before anything is read;
-2. builds the test title: `title.wasm` with wasi-sdk 34 (`--target=wasm32
-   -nostdlib`, reproducible paths) and the procedural assets; records the
-   artifact (sources with hashes, toolchain, command) in `artifacts.json`;
-3. writes the manifest (`title/delivery.json`: required files, groups,
+2. builds every title whose profile (`profiles/<id>.json`, checked by
+   `client/profile.js`; never retail-derived, never an ATV 2 id) has a remote
+   source, with its `build.dir/build.mjs`: wasm with wasi-sdk 34
+   (`--target=wasm32 -nostdlib`, reproducible paths) and procedural assets;
+   records each artifact (sources with hashes, toolchain, command) in
+   `artifacts.json` as `<id>/<file>`;
+3. writes the manifest (the profile: required files, groups,
    title version), the asset server's layout (`out/assets`), the versioned
    R2 tree (`out/r2`) and its upload plan (`out/r2-upload-plan.json`);
 4. the web shell (`out/web`: launcher, client, title page code, `sw.js` with
@@ -301,44 +315,10 @@ The site (`../site`) has one Play panel with two content sources:
   (default `https://assets.atvqpr2.com`); on a local copy only (localhost,
   127.0.0.1, [::1]) `?assets=<url>` overrides it for tests.
 
-Why a separate runner page and not the ATV 2 game page (design B, not A):
-`play/host` boots only modules built against the ATV host ABI (WASI threads
-on a shared memory, the `env.web_host_ready` host block, the GpFrame GPU
-queue, the I/O worker's VFS over `atv2-game/`), and before that it requires
-a retail `default.xbe` and an `atv2.wasm` whose size and SHA-256 are on its
-build list. Rebuilding the test title against that ABI means writing a
-second Xbox-shaped program (host block, GPU command stream, boot stages), and
-then teaching the page to accept it; that is not moderate. Design B keeps one
-asset system (the delivery client and its OPFS layout) and one Play panel,
-and leaves `play/` and atvrecomp untouched.
-
-What running a remote build through `play/host` would still need (runtime
-integration only; whether anything of ATV 2 may ever be distributed is a
-separate question this repository does not answer, and nothing here does it):
-
-1. A source for the module: `main.js`/`gamebuild.js` read `atv2.wasm` from
-   `atv2-build/` in OPFS (site mode) or `/wasm/` (dev). A third mode would
-   get it from the delivery client (`AssetManager.get()` -> `File`) and
-   compile it the same way (`loadStoredWasm` shape: `{ module, limits,
-   info }`; the memory limits from the module bytes or a manifest field).
-2. Accepted builds: `gamebuild.js` accepts only builds listed in
-   `deploy.js` (written by `tools/sync-play.mjs` from the builder's
-   `build-expected.json`). A remote module would need its own list entry
-   (size, SHA-256, the atvrecomp/xboxrecomp commits it shares the ABI with),
-   checked against the manifest's `artifact` record.
-3. Game files: `vfs.js` mounts `atv2-game/` (paths as on the disc, an
-   `.import.json` record, 8 MiB chunked import). Serving files to the I/O
-   worker from the delivery client's content-addressed `blobs/` would need a
-   path -> blob map in `vfs.js` (or an import step that copies/links blobs
-   into `atv2-game/`), plus on-demand reads for groups (movies, music).
-4. The retail check: `loader.js` validates `default.xbe` before anything
-   else; a remote source would need its own validation path.
-5. Headers: `play/host` needs COOP/COEP (already on the site); CORS-mode
-   fetches from the bucket work under COEP (see `deploy/R2.md`).
-6. Tests: `work/siteplay/test-play-live.mjs` style boots for the new mode.
-
-These are changes in atvrecomp (`web/host`) and the builder, then a
-`tools/sync-play.mjs` run; none of them is made here.
+The test titles run on their own page (`site/test-title/`, `?game=<id>`):
+their page code is canvas 2D, not the ATV host ABI, and `play/host` only
+ever runs ATV 2 from the player's own files (its profile allows the local
+source only). Both use the same delivery client and OPFS store format.
 
 ## Tests
 
@@ -346,11 +326,12 @@ All local: servers on 127.0.0.1 ports 8853-8859, Edge headless via CDP with
 the profile in `.test/edge-profile`, output under `.test/` (git-ignored).
 
 ```
-node --test test/*.test.mjs     # server (15), gate (22), deploy (2), r2 (5)
+node --test test/*.test.mjs     # server, gate, deploy, r2 + profiles (45)
 node test/e2e.mjs [--profile <dir>]          # the VPS path in Edge; .test/e2e/results.json + shots/
 node test/r2-e2e.mjs [--site ../site] [--profile <dir>] [--results <dir>]   # the site's test title from the R2 stand-in
 node deploy/check.mjs --out out --dry-run
-node pipeline/upload-r2.mjs --dry-run         # the upload commands, after every check
+node pipeline/upload-r2.mjs --dry-run [--title <id>]           # the upload commands, after every check
+node pipeline/upload-r2.mjs --rollback <version> --title <id> --dry-run
 ```
 
 `test/r2-e2e.mjs` serves the site folder with its own `_headers`

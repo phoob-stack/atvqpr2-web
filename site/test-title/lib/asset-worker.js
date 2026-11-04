@@ -18,7 +18,8 @@
 //   { op:'ensure', ns, url, entry, retries }   -> progress* then done | error
 //   { op:'verify', ns, entries, full }         -> done { results: [{ sha256, status }] }
 //   { op:'scrub', ns, keep: [entry] }          -> done { removed, kept, truncated }
-//   { op:'store', ns, entry, file }            -> done | error   (local files)
+//   { op:'store', ns, entry, file, adopt? }    -> progress* then done { sha256, size } | error   (local files;
+//                                              entry.sha256 may be unknown: it is computed while storing)
 //   { op:'gc', ns, keep:[sha256] }             -> done { removed }
 //   { op:'forget', ns }                        -> done
 // entry: { path, size, sha256, chunkSize?, chunks? } (the manifest's record).
@@ -47,6 +48,17 @@ const backoff = (n) => Math.min(8000, 200 * 2 ** n) * (0.75 + Math.random() * 0.
 const SHA = /^[0-9a-f]{64}$/;
 const READ_SLICE = 4 << 20;                // bytes read from disk at a time when re-hashing
 const CHECKPOINT_MIN = 4 << 20;            // commit the .part at least every 4 MiB (then every half of what is there)
+// Files up to this size are hashed whole by WebCrypto (native, several times
+// faster than the incremental JS hash) when they are already on this machine
+// (a picked local file, a stored blob); bigger ones, and downloads, stream
+// through sha256.js so that they are never held in memory whole.
+const NATIVE_MAX = 128 << 20;
+
+/** SHA-256 of a File: WebCrypto for files up to NATIVE_MAX, else the incremental hash a slice at a time. */
+async function hashFileOf(file) {
+  if (file.size <= NATIVE_MAX) return digest(await file.arrayBuffer());
+  return (await hashRange(file, 0, file.size, new Sha256())).digestHex();
+}
 
 class Fail extends Error { constructor(code, message, extra = {}) { super(message); this.code = code; Object.assign(this, extra); } }
 
@@ -83,7 +95,7 @@ async function checkStored(dir, entry, { full = false } = {}) {
   if (f.size !== entry.size) { await remove(dir, entry.sha256); await remove(dir, `${entry.sha256}.ok`); return { status: 'bad', why: 'size' }; }
   const mark = await readJson(dir, `${entry.sha256}.ok`);
   if (!full && mark && mark.size === f.size && mark.lastModified === f.lastModified) return { status: 'ok', hashed: 0 };
-  const got = (await hashRange(f, 0, f.size, new Sha256())).digestHex();
+  const got = await hashFileOf(f);
   if (got !== entry.sha256) {
     await remove(dir, entry.sha256); await remove(dir, `${entry.sha256}.ok`);
     return { status: 'bad', why: 'sha256', hashed: f.size };
@@ -286,13 +298,22 @@ async function download(dir, msg, post, cachedBad) {
 async function verify(msg) {
   const t0 = performance.now();
   const dir = await blobsDir(msg.ns);
-  const results = [];
-  let hashedBytes = 0;
-  for (const e of msg.entries) {
-    const r = await checkStored(dir, e, { full: !!msg.full });
-    hashedBytes += r.hashed ?? 0;
-    results.push({ sha256: e.sha256, path: e.path, status: r.status, why: r.why, rehashed: !!r.rehashed });
-  }
+  const results = new Array(msg.entries.length);
+  let hashedBytes = 0, next = 0;
+  // a few at a time: most checks are two small reads (the blob's size and lastModified, its mark)
+  const bySha = new Map();          // one check per blob (files with the same contents share it)
+  const one = async () => {
+    while (next < msg.entries.length) {
+      const i = next++, e = msg.entries[i];
+      let p = bySha.get(e.sha256);
+      const first = !p;
+      if (first) { p = checkStored(dir, e, { full: !!msg.full }); bySha.set(e.sha256, p); }
+      const r = await p;
+      if (first) hashedBytes += r.hashed ?? 0;
+      results[i] = { sha256: e.sha256, path: e.path, status: r.status, why: r.why, rehashed: !!r.rehashed };
+    }
+  };
+  await Promise.all(Array.from({ length: msg.full ? 1 : 8 }, one));
   return { results, hashedBytes, ms: Math.round(performance.now() - t0) };
 }
 
@@ -356,31 +377,72 @@ async function scrub(msg) {
   return out;
 }
 
-/** A picked local file: streamed through the hash into <sha>.part, checked, renamed, marked. */
-async function storeFile(msg) {
-  const { ns, entry, file } = msg;
+/**
+ * A picked local file: read a slice at a time through the hash into <sha>.part
+ * (or a temporary name when its SHA-256 is not known yet), checked, renamed,
+ * marked. adopt: a FileSystemFileHandle already in OPFS (e.g. an older layout
+ * of the same title): it is hashed where it is and then moved into blobs/
+ * (no second copy); without move() support it is copied.
+ */
+async function storeFile(msg, post = () => {}) {
+  const { ns, entry, file, adopt = null } = msg;
   const dir = await blobsDir(ns);
   if (entry.sha256 && (await checkStored(dir, { ...entry, size: file.size })).status === 'ok') return { sha256: entry.sha256, size: file.size, already: true };
-  const tmp = `${entry.sha256 && SHA.test(entry.sha256) ? entry.sha256 : `local-${Date.now()}`}.part`;
+  const known = SHA.test(entry.sha256 ?? '');
+  const tmp = `${known ? entry.sha256 : `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}.part`;
   const h = new Sha256();
-  const w = await (await dir.getFileHandle(tmp, { create: true })).createWritable();
-  try {
-    const r = file.stream().getReader();
-    for (;;) { const { done, value } = await r.read(); if (done) break; h.update(value); await w.write(value); }
-    await w.close();
-  } catch (e) { await w.abort().catch(() => {}); await remove(dir, tmp); throw opfsFail(e, entry.path); }
-  const sha = h.digestHex();
-  if (entry.sha256 && sha !== entry.sha256) {
-    await remove(dir, tmp);
+  let last = 0, nativeSha = null;
+  const progress = (n) => { const t = performance.now(); if (t - last > 50 || n === file.size) { last = t; post({ type: 'progress', stored: n, total: file.size, net: 0 }); } };
+  if (file.size <= NATIVE_MAX) {
+    // One read, hashed natively while its copy is written (the two overlap), or only hashed (adopt).
+    const buf = new Uint8Array(await file.arrayBuffer());
+    if (buf.length !== file.size) throw new Fail('invalid', `${entry.path} changed while it was read`);
+    const hp = digest(buf);
+    if (!adopt) {
+      const w = await (await dir.getFileHandle(tmp, { create: true })).createWritable();
+      try {
+        for (let o = 0; o < buf.length; o += READ_SLICE) { await w.write(buf.subarray(o, Math.min(buf.length, o + READ_SLICE))); progress(Math.min(buf.length, o + READ_SLICE)); }
+        await w.close();
+      } catch (e) { await w.abort().catch(() => {}); await remove(dir, tmp); throw opfsFail(e, entry.path); }
+    }
+    nativeSha = await hp;
+    progress(file.size);
+  } else if (adopt) {
+    for (let o = 0; o < file.size; o += READ_SLICE) { h.update(new Uint8Array(await file.slice(o, Math.min(file.size, o + READ_SLICE)).arrayBuffer())); progress(Math.min(file.size, o + READ_SLICE)); }
+  } else {
+    const w = await (await dir.getFileHandle(tmp, { create: true })).createWritable();
+    try {
+      for (let o = 0; o < file.size; o += READ_SLICE) {
+        const piece = new Uint8Array(await file.slice(o, Math.min(file.size, o + READ_SLICE)).arrayBuffer());
+        if (o + piece.length > file.size || (piece.length === 0 && o < file.size)) throw new Error(`${entry.path} changed while it was read`);
+        h.update(piece); await w.write(piece);
+        progress(o + piece.length);
+      }
+      await w.close();
+    } catch (e) { await w.abort().catch(() => {}); await remove(dir, tmp); throw opfsFail(e, entry.path); }
+  }
+  const sha = nativeSha ?? h.digestHex();
+  if (known && sha !== entry.sha256) {
+    if (!adopt) await remove(dir, tmp);
     throw new Fail('hash', `${entry.path}: the picked file does not match its expected SHA-256 (expected ${entry.sha256.slice(0, 12)}…, got ${sha.slice(0, 12)}…).`);
   }
-  if (tmp !== `${sha}.part`) {
+  if (adopt) {
+    let moved = false;
+    await remove(dir, `${sha}.part`);
+    if (typeof adopt.move === 'function') { try { await adopt.move(dir, `${sha}.part`); moved = true; } catch { /* copy below */ } }
+    if (!moved) {
+      const w2 = await (await dir.getFileHandle(`${sha}.part`, { create: true })).createWritable();
+      try { await (await adopt.getFile()).stream().pipeTo(w2); } catch (e) { await w2.abort().catch(() => {}); await remove(dir, `${sha}.part`); throw opfsFail(e, entry.path); }
+    }
+  } else if (tmp !== `${sha}.part`) {
+    await remove(dir, `${sha}.part`);
     const th = await dir.getFileHandle(tmp);
-    if (typeof th.move === 'function') await th.move(dir, `${sha}.part`);
-    else { const src = await th.getFile(); const w2 = await (await dir.getFileHandle(`${sha}.part`, { create: true })).createWritable(); await src.stream().pipeTo(w2); await remove(dir, tmp); }
+    let moved = false;
+    if (typeof th.move === 'function') { try { await th.move(dir, `${sha}.part`); moved = true; } catch { /* copy below */ } }
+    if (!moved) { const src = await th.getFile(); const w2 = await (await dir.getFileHandle(`${sha}.part`, { create: true })).createWritable(); await src.stream().pipeTo(w2); await remove(dir, tmp); }
   }
   await promote(dir, sha);
-  return { sha256: sha, size: file.size };
+  return { sha256: sha, size: file.size, moved: !!adopt };
 }
 
 async function gc(msg) {
@@ -413,7 +475,7 @@ self.onmessage = async ({ data: msg }) => {
       r = await p;
     } else if (msg.op === 'verify') r = await verify(msg);
     else if (msg.op === 'scrub') r = await scrub(msg);
-    else if (msg.op === 'store') r = await storeFile(msg);
+    else if (msg.op === 'store') r = await storeFile(msg, post);
     else if (msg.op === 'gc') r = await gc(msg);
     else if (msg.op === 'forget') r = await forget(msg);
     else throw new Fail('bad-op', `unknown op ${msg.op}`);

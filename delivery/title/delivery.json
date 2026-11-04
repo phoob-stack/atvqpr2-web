@@ -1,9 +1,0 @@
-{
- "comment": "How the test title is delivered: the files it needs before its first frame (required), and on-demand groups fetched when first used. Everything else is fetched in the background after start. Read by pipeline/build.mjs into the manifest.",
- "title": "boxquad",
- "name": "Box Quad (delivery test title)",
- "titleVersion": "1.1.0",
- "entry": "title.wasm",
- "required": ["title.wasm", "config/title.json", "meshes/track.bin", "meshes/quad.bin", "textures/grass.rgba", "textures/dirt.rgba"],
- "groups": { "sand": ["textures/sand.rgba"] }
-}

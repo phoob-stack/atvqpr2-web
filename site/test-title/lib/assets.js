@@ -66,6 +66,14 @@ export class OpfsStore {
   async loadCatalog() {
     try { return JSON.parse(await (await (await (await this.dir(false)).getFileHandle('catalog.json')).getFile()).text()); } catch { return null; }
   }
+  /** A small JSON file of this namespace (e.g. a local backend's resume index), or null. */
+  async loadJson(name) {
+    try { return JSON.parse(await (await (await (await this.dir(false)).getFileHandle(name)).getFile()).text()); } catch { return null; }
+  }
+  async saveJson(name, obj) {
+    const w = await (await (await this.dir()).getFileHandle(name, { create: true })).createWritable();
+    try { await w.write(JSON.stringify(obj)); await w.close(); } catch (e) { await w.abort().catch(() => {}); throw e; }
+  }
   /** The stored blob (a File), or null. Trust it only after the worker verified it (AssetManager does). */
   async blob(sha256) {
     try { return await (await (await (await this.dir(false)).getDirectoryHandle('blobs')).getFileHandle(sha256)).getFile(); } catch { return null; }
@@ -112,17 +120,28 @@ export class HttpBackend {
    * base: a versioned bucket's base URL (<base>/latest.json -> <base>/v/<version>/manifest.json).
    * retries: attempts per file before 'network'.
    */
-  constructor({ manifestUrl = null, base = null, pointer = 'latest.json', retries = 6 }) {
+  constructor({ manifestUrl = null, base = null, fallback = null, pointer = 'latest.json', retries = 6 }) {
     if (!manifestUrl === !base) throw new Error('HttpBackend: pass manifestUrl or base');
     this.kind = 'http';
-    this.base = base ? new URL(base.endsWith('/') ? base : `${base}/`, location.href).href : null;
+    const abs = (b) => new URL(b.endsWith('/') ? b : `${b}/`, location.href).href;
+    this.base = base ? abs(base) : null;
+    this.pointer = pointer;
     this.pointerUrl = this.base ? new URL(pointer, this.base).href : null;
+    // fallback: a second bucket base whose latest.json is read when base has none (HTTP 404/403),
+    // e.g. the bucket root while a title moves to its games/<id>/ prefix.
+    this.fallback = fallback ? abs(fallback) : null;
+    this.usedFallback = false;
     this.manifestUrl = manifestUrl ? new URL(manifestUrl, location.href).href : null;
     this.retries = retries;
     this.requests = { pointer: 0, manifest: 0 };
   }
   async catalog(store) {
-    return this.base ? this.versioned(store) : this.direct(store);
+    if (!this.base) return this.direct(store);
+    try { return await this.versioned(store); } catch (e) {
+      if (!this.fallback || !(e instanceof DeliveryError) || !e.status || ![403, 404].includes(e.status)) throw e;
+      this.base = this.fallback; this.pointerUrl = new URL(this.pointer, this.base).href; this.fallback = null; this.usedFallback = true;
+      return this.versioned(store);
+    }
   }
   async storedOr(store, err, offlineOk) {
     const stored = await store.loadCatalog();
@@ -147,7 +166,7 @@ export class HttpBackend {
     catch (e) {
       return this.storedOr(store, new DeliveryError('offline', `Cannot reach ${this.pointerUrl} (${e.message}) and nothing is stored yet: the first visit needs a connection.`), true);
     }
-    if (!res.ok) return this.storedOr(store, new DeliveryError('manifest', `${this.pointerUrl} answered HTTP ${res.status}.`), res.status >= 500);
+    if (!res.ok) return this.storedOr(store, new DeliveryError('manifest', `${this.pointerUrl} answered HTTP ${res.status}.`, { status: res.status }), res.status >= 500);
     let ptr;
     try { ptr = await res.json(); } catch (e) { throw new DeliveryError('manifest', `${this.pointerUrl} is not valid JSON (${e.message}).`); }
     if (!VERSION.test(ptr?.version ?? '') || typeof ptr.manifest !== 'string' || !HEX64.test(ptr.sha256 ?? ''))
@@ -192,61 +211,147 @@ async function hashFile(file) {
 
 /**
  * files: a FileList from <input type=file webkitdirectory>, an array of File,
- * or of { path, file }; omitted = use what an earlier pick stored.
- * validate(entries) (optional, title-specific): throw to refuse the folder
- * (e.g. ATV 2's default.xbe and build checks); may return extra catalog fields.
+ * or of { path, file, adopt? }; omitted = use what an earlier pick stored.
+ * adopt (hashIn 'worker'): the file's FileSystemFileHandle when it is already
+ * in OPFS (an older layout of the same title): moved into the store, not copied.
+ * precheck(entries) (optional, title-specific): runs before anything is
+ * hashed or stored, on { path, size, file() }; throw to refuse the folder at
+ * once (e.g. a game's retail-file check); may return extra catalog fields.
+ * validate(entries) (optional): the same after hashing (entries carry sha256).
  * If the folder holds a delivery manifest.json, every file it lists must be
- * there with that size and SHA-256. Files are hashed a slice at a time.
+ * there with that size and SHA-256.
+ * strip: 'auto' drops the picked folder's own name from the paths (one top
+ * folder), false keeps the paths as given.
+ * hashIn: 'page' hashes here, a slice at a time, and the files are stored when
+ * fetched; 'worker' stores each file while the asset worker hashes it (one
+ * pass over the bytes, for large folders). reuse (with 'worker'): files whose
+ * path, size and lastModified match an earlier store of this namespace, and
+ * whose blob is still good, are not read again (an interrupted import resumes;
+ * the same folder picked again is not copied again).
+ * extra: fields added to the catalog. onProgress({ file, files, path, done,
+ * total, copied, mbps }) while storing ('worker').
  */
+const REUSE_INDEX = 'local-index.json';
 export class LocalFilesBackend {
-  constructor({ files = null, validate = null, title = 'local', entry = null } = {}) {
+  constructor({ files = null, validate = null, precheck = null, title = 'local', entry = null, strip = 'auto', hashIn = 'page',
+    reuse = false, extra = null, concurrency = 2, onProgress = null } = {}) {
     this.kind = 'local';
-    this.files = files; this.validate = validate; this.title = title; this.entryName = entry;
+    this.files = files; this.validate = validate; this.precheck = precheck; this.title = title; this.entryName = entry;
+    this.strip = strip; this.hashIn = hashIn; this.reuse = reuse; this.extra = extra; this.concurrency = concurrency; this.onProgress = onProgress;
     this.byPath = new Map();
+    this.result = null;
   }
-  static entriesOf(files) {
+  static entriesOf(files, { strip = 'auto' } = {}) {
     const list = [...files].map((f) => (f instanceof File ? { path: (f.webkitRelativePath || f.name).replace(/\\/g, '/'), file: f } : f));
     // strip the picked folder's own name (webkitRelativePath = '<picked>/<path>')
     const tops = new Set(list.map((e) => e.path.split('/')[0]));
-    const strip = tops.size === 1 && list.every((e) => e.path.includes('/'));
-    return list.map((e) => ({ path: strip ? e.path.slice(e.path.indexOf('/') + 1) : e.path, file: e.file }))
+    const cut = strip === 'auto' && tops.size === 1 && list.every((e) => e.path.includes('/'));
+    return list.map((e) => ({ path: cut ? e.path.slice(e.path.indexOf('/') + 1) : e.path, file: e.file, ...(e.adopt ? { adopt: e.adopt } : {}) }))
       .filter((e) => !e.path.split('/').some((s) => s.startsWith('.') || /^(thumbs\.db|desktop\.ini)$/i.test(s)));
   }
-  async catalog(store) {
+  /** A title's refusal as a DeliveryError ('invalid'), keeping its kind and link for the page. */
+  static refusal(e) {
+    if (e instanceof DeliveryError) return e;
+    return new DeliveryError('invalid', e.message, { kind: e.kind, link: e.link, cause: e });
+  }
+  async catalog(store, ctx = {}) {
     if (!this.files) {
       const stored = await store.loadCatalog();
-      if (stored?.source === 'local') return { catalog: stored, offline: false };
+      if (stored?.source === 'local') return { catalog: stored, offline: false, unchanged: true };
       throw new DeliveryError('pick-needed', 'Pick the folder with the files first.');
     }
-    const picked = LocalFilesBackend.entriesOf(this.files);
+    const picked = LocalFilesBackend.entriesOf(this.files, { strip: this.strip });
     if (!picked.length) throw new DeliveryError('invalid', 'The picked folder is empty.');
+    const extra = { ...(this.extra ?? {}) };
+    if (this.precheck) {
+      try { Object.assign(extra, (await this.precheck(picked.map((p) => ({ path: p.path, size: p.file.size, file: async () => p.file })))) ?? {}); }
+      catch (e) { throw LocalFilesBackend.refusal(e); }
+    }
     const manifestFile = picked.find((e) => e.path === 'manifest.json');
     let expect = null;
     if (manifestFile) {
       try { expect = checkCatalog(JSON.parse(await manifestFile.file.text()), 'manifest.json in the picked folder'); }
       catch (e) { throw e instanceof DeliveryError ? e : new DeliveryError('invalid', `manifest.json in the picked folder: ${e.message}`); }
     }
-    const files = [];
+    const todo = [];
     for (const p of picked) {
       if (p.path === 'manifest.json') continue;
       const want = expect?.files.find((e) => e.path === p.path);
       if (expect && !want) continue;                                 // not part of the title
       if (want && want.size !== p.file.size) throw new DeliveryError('invalid', `${p.path}: ${p.file.size} bytes, expected ${want.size}.`);
-      const sha256 = await hashFile(p.file);
-      if (want && sha256 !== want.sha256) throw new DeliveryError('invalid', `${p.path}: SHA-256 differs from manifest.json (a changed or damaged file).`);
-      files.push({ path: p.path, size: p.file.size, sha256, ...(want?.required !== undefined ? { required: want.required } : {}), ...(want?.group ? { group: want.group } : {}) });
+      todo.push({ p, want });
+    }
+    const files = this.hashIn === 'worker' && ctx.worker ? await this.storeAll(todo, store, ctx) : await this.hashAll(todo);
+    for (const [i, { p, want }] of todo.entries()) {
+      if (want && files[i].sha256 !== want.sha256) throw new DeliveryError('invalid', `${p.path}: SHA-256 differs from manifest.json (a changed or damaged file).`);
       this.byPath.set(p.path, p.file);
     }
     if (expect) for (const e of expect.files) if (!this.byPath.has(e.path)) throw new DeliveryError('invalid', `${e.path} is missing from the picked folder.`);
-    let extra = {};
     if (this.validate) {
-      try { extra = (await this.validate(files.map((f) => ({ ...f, file: () => this.byPath.get(f.path) })))) ?? {}; }
-      catch (e) { throw new DeliveryError('invalid', e.message); }
+      try { Object.assign(extra, (await this.validate(files.map((f) => ({ ...f, file: () => this.byPath.get(f.path) })))) ?? {}); }
+      catch (e) { throw LocalFilesBackend.refusal(e); }
     }
     const catalog = { format: 'delivery-manifest/2', title: expect?.title ?? this.title, entry: expect?.entry ?? this.entryName,
       version: hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(files.map((f) => `${f.path}\0${f.sha256}\n`).sort().join('')))).slice(0, 16),
       files, ...extra, source: 'local' };
     return { catalog, offline: false };
+  }
+  entryOf({ p, want }, sha256) {
+    return { path: p.path, size: p.file.size, sha256, ...(want?.required !== undefined ? { required: want.required } : {}), ...(want?.group ? { group: want.group } : {}) };
+  }
+  async hashAll(todo) {
+    const out = [];
+    for (const t of todo) out.push(this.entryOf(t, await hashFile(t.p.file)));
+    return out;
+  }
+  /** Store every file through the worker (it hashes while it writes); resume from the index. */
+  async storeAll(todo, store, { worker, ns }) {
+    const t0 = performance.now();
+    const total = todo.reduce((a, t) => a + t.p.file.size, 0);
+    const key = (f, path) => `${path}\0${f.size}\0${f.lastModified}`;
+    const index = (this.reuse && await store.loadJson(REUSE_INDEX)) || {};
+    const shas = new Array(todo.length);
+    // what an earlier store of the same files left: reused if the blob is still good
+    if (this.reuse) {
+      const cand = todo.map((t, i) => ({ i, sha256: index[key(t.p.file, t.p.path)], size: t.p.file.size, path: t.p.path })).filter((c) => HEX64.test(c.sha256 ?? ''));
+      if (cand.length) {
+        const v = await worker.call({ op: 'verify', ns, entries: cand.map(({ path, sha256, size }) => ({ path, sha256, size })) });
+        v.results.forEach((r, k) => { if (r.status === 'ok') shas[cand[k].i] = cand[k].sha256; });
+      }
+    }
+    let done = 0, copied = 0, skipped = 0, filesDone = 0, last = 0;
+    const live = new Map();
+    const inFlight = () => [...live.values()].reduce((a, n) => a + n, 0);
+    const report = (path, force) => {
+      const now = performance.now();
+      if (!force && now - last < 100) return;
+      last = now;
+      const c = copied + inFlight();
+      this.onProgress?.({ file: filesDone, files: todo.length, path, done: done + inFlight(), total, copied: c,
+        mbps: c / 1048576 / Math.max(0.001, (now - t0) / 1000) });
+    };
+    let next = 0, saving = Promise.resolve();
+    const saveIndex = () => (saving = saving.then(() => store.saveJson(REUSE_INDEX, index)).catch(() => {}));
+    const run = async () => {
+      while (next < todo.length) {
+        const i = next++, { p } = todo[i];
+        if (shas[i]) { done += p.file.size; skipped++; filesDone++; report(p.path); continue; }
+        live.set(i, 0);
+        const r = await worker.call({ op: 'store', ns, entry: { path: p.path, size: p.file.size }, file: p.file, adopt: p.adopt ?? null },
+          (m) => { live.set(i, m.stored); report(p.path); });
+        live.delete(i);
+        if (r.size !== p.file.size) throw new DeliveryError('invalid', `${p.path} changed while it was copied; pick the folder again.`);
+        shas[i] = r.sha256; done += p.file.size; copied += p.file.size; filesDone++;
+        index[key(p.file, p.path)] = r.sha256;
+        saveIndex();
+        report(p.path, true);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(this.concurrency, todo.length)) }, run));
+    await saveIndex();
+    const secs = (performance.now() - t0) / 1000;
+    this.result = { files: todo.length, bytes: total, copied, skipped, secs, mbps: copied / 1048576 / Math.max(0.001, secs) };
+    return todo.map((t, i) => this.entryOf(t, shas[i]));
   }
   async fetch(entry, { worker, ns }) {
     const file = this.byPath.get(entry.path);
@@ -277,7 +382,7 @@ export class AssetManager extends EventTarget {
   async open() {
     if (!await OpfsStore.available()) throw new DeliveryError('opfs', 'This browser has no Origin Private File System (OPFS) here (a private window, or storage blocked for this site), so files cannot be kept.');
     this.worker ??= new WorkerClient(this.workerUrl);
-    const { catalog, offline, unchanged } = await this.backend.catalog(this.store);
+    const { catalog, offline, unchanged } = await this.backend.catalog(this.store, { worker: this.worker, ns: this.ns });
     this.catalog = catalog; this.offline = offline; this.unchanged = !!unchanged;
     this.files = new Map(catalog.files.map((e) => [e.path, e]));
     if (!offline && !unchanged) await this.store.saveCatalog(catalog).catch((e) => { throw new DeliveryError('opfs', `Cannot write to this browser's storage (${e.message}); is it full?`); });

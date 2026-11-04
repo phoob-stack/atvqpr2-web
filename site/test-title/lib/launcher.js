@@ -2,7 +2,8 @@
 //
 //   import { Launcher } from './client/launcher.js';
 //   const l = new Launcher({ ns: 'boxquad' });
-//   l.useRemote('https://assets.example');       // a versioned bucket (latest.json), or
+//   l.useProfile(profile, 'https://assets.example');   // a game profile's remote source (games/<id>/latest.json), or
+//   l.useRemote('https://assets.example/games/boxquad/');   // a versioned bucket (latest.json), or
 //   l.useServer('/assets/manifest.json');        // the asset server's manifest, or
 //   l.useLocalFiles(fileList);                   // mode 2
 //   l.addEventListener('state', (e) => ...);     // { phase, message }
@@ -17,6 +18,7 @@
 // name others: a list, or async (assets) => list); groups are fetched by the
 // title on first use (assets.loadGroup(name)).
 import { AssetManager, HttpBackend, LocalFilesBackend, DeliveryError } from './assets.js';
+import { remoteBase, remoteFallback } from './profile.js';
 
 export { DeliveryError };
 
@@ -30,6 +32,13 @@ export class Launcher extends EventTarget {
     this.dispatchEvent(new CustomEvent('state', { detail: { phase, message, ...extra } }));
   }
   useRemote(base, opts = {}) { this.setBackend(new HttpBackend({ base, ...opts }), this.ns); return this; }
+  /** A game profile's remote source (client/profile.js): <assetsBase>/games/<id>/, with its transition fallback. */
+  useProfile(profile, assetsBase, opts = {}) {
+    this.profile = profile;
+    this.ns = profile.id;
+    this.setBackend(new HttpBackend({ base: remoteBase(profile, assetsBase), fallback: remoteFallback(profile, assetsBase), ...opts }), this.ns);
+    return this;
+  }
   useServer(manifestUrl, opts = {}) { this.setBackend(new HttpBackend({ manifestUrl, ...opts }), this.ns); return this; }
   useLocalFiles(files, opts = {}) { this.setBackend(new LocalFilesBackend({ files, ...opts }), `${this.ns}-local`); return this; }
   setBackend(backend, ns) {

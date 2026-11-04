@@ -20,8 +20,8 @@
   </nav>
 </header>
 <main id="main" class="tt">
-  <h1>Test title: Box Quad</h1>
-  <p class="small">Our own small placeholder title, made for testing how files are delivered: a box quad on a flat track. It is <strong>not ATV 2</strong> and holds nothing from the game.
+  <h1>Test title: <span id="tt-name">Box Quad</span></h1>
+  <p class="small">Our own small placeholder title, made for testing how files are delivered. It is <strong>not ATV 2</strong> and holds nothing from the game.
     Its files stream from <code id="tt-host">the asset server</code>, are checked (SHA-256) and kept in this browser, so later starts download nothing and also work offline.</p>
 
   <div class="playbox" id="tt-box">
@@ -40,9 +40,10 @@
   <section id="tt-game" hidden aria-label="Test title">
     <canvas id="tt-view" width="960" height="600"></canvas>
     <pre id="tt-hud" class="small"></pre>
-    <p class="small muted">Arrow keys or WASD to drive. North of the start the ground turns to sand: its texture is fetched the first time you get near.</p>
+    <p class="small muted" id="tt-help"></p>
   </section>
   <p class="small muted" id="tt-foot"></p>
+  <p class="small muted" id="tt-others"></p>
 </main>
 <footer class="site">
   <p>Unofficial fan project. ATV Quad Power Racing 2 belongs to its owners; no game content is hosted here.</p>

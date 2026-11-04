@@ -11,6 +11,9 @@
 <link rel="modulepreload" href="./compat.js">
 <link rel="modulepreload" href="./wasm-load.js">
 <link rel="modulepreload" href="./loader.js">
+<link rel="modulepreload" href="./assetsource.js">
+<link rel="modulepreload" href="./delivery/assets.js">
+<link rel="modulepreload" href="./delivery/profile.js">
 <link rel="modulepreload" href="./abi.js">
 <link rel="modulepreload" href="./present.js">
 <link rel="modulepreload" href="./input.js">
@@ -23,7 +26,7 @@
   The browser build's host page. Serve it with web/host/serve.mjs, which
   binds 127.0.0.1 only. The page contains no game data: the player chooses the
   folder of their own copy of the game, which is checked and copied into this
-  browser's private storage (OPFS) by loader.js. serve.mjs --game <folder>
+  browser's private storage (OPFS) by loader.js and assetsource.js. serve.mjs --game <folder>
   serves a folder at /data/ instead (developer option).
   Keys: Enter = START, Z = A, X = B, C = X, V = Y, arrows = d-pad,
   W/A/S/D = left stick, Backspace = BACK. A gamepad works too.

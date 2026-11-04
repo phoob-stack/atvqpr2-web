@@ -12,7 +12,7 @@
 //   GET  <prefix>files/<path>        the same file by its logical path (no-cache)
 //   GET  /healthz                    "ok"
 //   R2 stand-in (ASSET_BUCKET_DIR): GET/HEAD/OPTIONS /<key> for the keys of
-//   the upload plan only (latest.json, v/<version>/...), with the plan's
+//   the upload plan only (games/<id>/latest.json, games/<id>/v/<version>/...), with the plan's
 //   Cache-Control and Content-Type, an MD5 ETag as R2 gives, Range/If-Range,
 //   no compression, and CORS (preflights too) from deploy/r2-cors.json.
 //   GET  /<anything else>            WEB_DIR (static), if configured
@@ -379,6 +379,8 @@ export async function createAssetServer(overrides = {}, env = process.env) {
   }
 
   // ---- R2 stand-in ------------------------------------------------------------------
+  // keys: games/<id>/latest.json + games/<id>/v/<version>/... per title (and, during the move, the root's latest.json + v/)
+  const POINTER_KEY = /^(games\/[^/]+\/)?latest\.json$/;
   let bk = null;
   function bucketState() {
     const planFile = cfg.bucketPlan ?? join(cfg.bucketDir, '..', 'r2-upload-plan.json');
@@ -393,7 +395,7 @@ export async function createAssetServer(overrides = {}, env = process.env) {
         if (!inside(cfg.bucketDir, abs)) continue;
         const body = readFileSync(abs);
         byKey.set(o.key, { ...o, abs, md5: createHash('md5').update(body).digest('hex'),
-          logPath: o.key === 'latest.json' ? 'latest.json' : o.key.replace(/^v\/[^/]+\//, '') });
+          logPath: POINTER_KEY.test(o.key) ? 'latest.json' : o.key.replace(/^(games\/[^/]+\/)?v\/[^/]+\//, '') });
       }
       bk = { mtimeMs: st.mtimeMs, plan, rules, byKey };
     }
@@ -429,7 +431,7 @@ export async function createAssetServer(overrides = {}, env = process.env) {
     let st;
     try { st = lstatSync(o.abs); } catch { return fail(res, 404, 'not found'); }
     if (!st.isFile() || st.size !== o.size) return fail(res, 500, `object ${o.key} does not match the plan`);
-    const kind = o.key === 'latest.json' ? 'pointer' : o.key.endsWith('/manifest.json') ? 'manifest' : 'object';
+    const kind = POINTER_KEY.test(o.key) ? 'pointer' : o.key.endsWith('/manifest.json') ? 'manifest' : 'object';
     return sendBody(req, res, { kind, logPath: o.logPath, abs: o.abs, size: o.size, etag: `"${o.md5}"`, type: o.contentType, cache: o.cacheControl,
       compress: false, sha: o.sha256, base });
   }

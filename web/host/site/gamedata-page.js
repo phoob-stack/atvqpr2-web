@@ -5,7 +5,7 @@ import { siteLog } from './logs.js';
 import { SITE } from '../deploy.js';
 import { storedBuild, BUILD_DIR } from '../gamebuild.js';
 
-const NAMES = { [GAME_DIR]: 'Game files (your import)', [CACHE_DIR]: 'Developer server cache', [BUILD_DIR]: 'Your game build (atv2.wasm)',
+const NAMES = { delivery: 'Your game import and build (and the test title, on the site)', [GAME_DIR]: 'Game files (an earlier version of this page)', [CACHE_DIR]: 'Developer server cache', [BUILD_DIR]: 'Your game build (atv2.wasm)',
   'atv2-saves': 'Saves', 'atv2-saves-backups': 'Save backups', 'atv2-saves-incoming': 'Save import in progress' };
 
 export async function renderData(root, { onChange = () => {} } = {}) {
@@ -41,14 +41,14 @@ export async function renderData(root, { onChange = () => {} } = {}) {
     check.disabled = true; bar.hidden = false;
     try {
       const r = await checkGame((p) => { bar.max = p.total; bar.value = p.done; say(`Reading ${p.path}… ${MB(p.done)} / ${MB(p.total)}`); });
-      say(r.ok ? `All ${r.files} files are there and complete (${MB(r.bytes)} read in ${r.secs.toFixed(1)} s; default.xbe checks out).`
+      say(r.ok ? `All ${r.files} files are there and complete (${MB(r.bytes)} read and checked by SHA-256 in ${r.secs.toFixed(1)} s).`
         : `Problems: ${r.problems.join('; ')}. Forget the game files and import the folder again.`, r.ok ? 'ok' : 'warn');
       siteLog(`game files check: ${r.ok ? 'ok' : r.problems.join('; ')}`);
     } catch (e) { say(e.message, 'warn'); }
     check.disabled = false; bar.hidden = true;
   } }, 'Check and preload');
   let armed = 0;
-  const forget = h('button', { class: 'btn danger', disabled: !m && !rep.dirs[GAME_DIR] && !rep.dirs[CACHE_DIR], onclick: async () => {
+  const forget = h('button', { class: 'btn danger', disabled: !m && !rep.dirs.delivery && !rep.dirs[GAME_DIR] && !rep.dirs[CACHE_DIR], onclick: async () => {
     if (Date.now() - armed > 4000) { armed = Date.now(); forget.textContent = 'Click again to delete the game files from this browser'; return; }
     forget.disabled = true;
     try {

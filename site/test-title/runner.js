@@ -1,37 +1,62 @@
-// The test title's runner page: Box Quad (our own placeholder, not ATV 2),
+// The test titles' runner page: our own placeholder titles (not ATV 2),
 // streamed from the asset server (R2) through the shared delivery client
 // (test-title/lib/, copied from the delivery repository by tools/sync-delivery.mjs).
+// Which title is data: ?game=<id> (default boxquad) names a game profile,
+// test-title/profiles/<id>.json (delivery's profiles/, game-profile/1): its
+// bucket prefix (games/<id>/), its entry module, its required files and
+// groups, and its page code (app/<app>.js). Nothing here knows a title.
 //
-// Start: latest.json -> the version's manifest -> check what OPFS holds
+// Start: games/<id>/latest.json -> the version's manifest -> check what OPFS holds
 // (leftovers cleaned, bad files dropped) -> the required files (progress per
 // file and in total, Range resume, SHA-256 as they arrive) -> compile ->
-// run. The sand texture's group is fetched when the car first nears it. A
-// later start downloads nothing; offline, this page comes from its service
-// worker (sw.js) and the files from OPFS.
+// run. On-demand groups are fetched by the title on first use. A later start
+// downloads nothing; offline, this page comes from its service worker (sw.js)
+// and the files from OPFS. During a title's move to its prefix, a profile's
+// remote.fallbackPrefix "" reads the bucket root's latest.json while
+// games/<id>/ has none.
 //
 // Address: ?autoplay=1 (press Play), ?concurrency=N (parallel downloads, 3),
 // ?verify=full (hash every stored file again), and on a local copy of the
 // site only, ?assets=<base URL> (config-model.js resolveAssetBase).
 // Everything the tests read is on window.delivery.
 import { Launcher, registerShell } from './lib/launcher.js';
+import { loadProfile, remoteBase } from './lib/profile.js';
 import { loadConfig, resolveAssetBase } from '../js/config-model.js';
-import { $, initChrome, TEST_TITLE_NS } from '../js/common.js';
-import * as title from './app/title.js';
+import { $, initChrome } from '../js/common.js';
 
 initChrome();
 const qs = new URLSearchParams(location.search);
 const MB = (n) => (n / 1048576).toFixed(2);
 const size = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${MB(n)} MB`);
-const NS = TEST_TITLE_NS;
 const src = resolveAssetBase(loadConfig().values, location.href);
-const delivery = (window.delivery = { phase: 'idle', events: [], errors: [], timing: {}, base: src.base, baseFrom: src.from, progress: [] });
+const GAME = /^[a-z0-9][a-z0-9-]{0,31}$/.test(qs.get('game') ?? '') ? qs.get('game') : 'boxquad';
+const profile = await loadProfile(`./profiles/${GAME}.json`);
+const title = await import(`./app/${profile.app}.js`);
+const NS = profile.id;
+const delivery = (window.delivery = { phase: 'idle', events: [], errors: [], timing: {}, base: src.base, baseFrom: src.from, progress: [],
+  game: profile.id, titleBase: remoteBase(profile, src.base) });
+$('tt-name').textContent = profile.title.replace(/\s*\(.*\)$/, '');
+document.title = `Test title: ${$('tt-name').textContent} · ATV 2 Port`;
+$('tt-help').textContent = title.help ?? '';
+// the other test titles (profiles/index.json, written by tools/sync-delivery.mjs)
+fetch('./profiles/index.json').then((r) => r.json()).then((ix) => {
+  const others = ix.titles.filter((t) => t.id !== profile.id);
+  if (!others.length) return;
+  const keep = new URLSearchParams(location.search); keep.delete('game'); keep.delete('autoplay');
+  $('tt-others').replaceChildren('Other test titles: ', ...others.flatMap((t, i) => {
+    const a = document.createElement('a');
+    const q = new URLSearchParams(keep); q.set('game', t.id);
+    a.href = `?${q}`; a.textContent = t.title.replace(/\s*\(.*\)$/, '');
+    return i ? [', ', a] : [a];
+  }));
+}).catch(() => {});
 let resolveReady;
 window.ready = new Promise((r) => { resolveReady = r; });
 $('tt-host').textContent = new URL(src.base).host;
 
 const t0 = performance.now();
 const sw = registerShell('./sw.js');
-const launcher = new Launcher({ ns: NS, concurrency: Math.max(1, Math.min(8, Number(qs.get('concurrency') ?? 3) || 3)) }).useRemote(src.base);
+const launcher = new Launcher({ ns: NS, concurrency: Math.max(1, Math.min(8, Number(qs.get('concurrency') ?? 3) || 3)) }).useProfile(profile, src.base);
 delivery.launcher = launcher;
 
 const set = (state, text) => { $('tt-state').dataset.state = state; $('tt-state').textContent = text; };
@@ -103,7 +128,8 @@ async function footer() {
   const s = await launcher.status().catch(() => null);
   if (!s) return;
   delivery.status = s;
-  $('tt-foot').textContent = `Version ${s.version}, from ${new URL(src.base).host}: ${s.stored} files kept in this browser (${MB(s.storedBytes)} MB)` +
+  delivery.usedFallback = launcher.assets.backend.usedFallback;
+  $('tt-foot').textContent = `Version ${s.version}, from ${new URL(src.base).host}/${launcher.assets.backend.usedFallback ? '' : profile.remote.prefix}: ${s.stored} files kept in this browser (${MB(s.storedBytes)} MB)` +
     `${s.missing ? `; ${s.missing} more when first needed (${MB(s.missingBytes)} MB).` : '; everything is here, it also starts offline.'}`;
 }
 

@@ -1,5 +1,6 @@
 // The I/O worker: owns the filesystem (vfs.js: /game from the player's import
-// in OPFS, or from the dev server via the OPFS block cache; /save in memory) and the process's one fd table, and
+// in the shared OPFS store (assetsource.js), or from the dev server via the
+// OPFS block cache; /save in memory) and the process's one fd table, and
 // answers every guest thread's WASI file and stdio calls (io.js). stdout and
 // stderr lines go to the page as {type:'log', fd, text}.
 //
@@ -7,7 +8,8 @@
 // every change is posted to the page as {type:'saves', ops} (saves.js).
 //
 // init: { type:'init', memory, io, game, traceWasi, saves }
-//   game: { source:'opfs', dir:'atv2-game' } or { source:'server', base:'/data' } -> {type:'ready', ...}
+//   game: the asset source's ioGame(): { source:'store', ns:'atv2', mounts:[{ at:'/game', from:'game/' }] }
+//         or { source:'server', base:'/data' } -> {type:'ready', ...}
 //   saves: 'opfs' (default) or 'off' (in memory only, starting empty)
 import { Vfs } from './vfs.js';
 import { Wasi } from './wasi.js';
@@ -21,7 +23,7 @@ self.onmessage = async ({ data }) => {
   const { memory, io, game, traceWasi, saves = 'opfs' } = data;
   try {
     const vfs = new Vfs();
-    const g = game.source === 'opfs' ? await vfs.mountOpfsGame(game.dir) : await vfs.mountGame(game.base);
+    const g = game.source === 'store' ? await vfs.mountStore(game) : await vfs.mountGame(game.base);
     const save = vfs.mountMem('save');
     let sync = null, saveNote = 'saves: off (in memory only)';
     if (saves === 'off') ensureRoots(save);
@@ -39,7 +41,7 @@ self.onmessage = async ({ data }) => {
     const wasi = new Wasi({ vfs, onLog });
     wasi.memory = memory;
     wasi.trace = !!traceWasi;
-    post({ type: 'ready', note: `game folder (${game.source === 'opfs' ? 'imported, OPFS' : `dev server ${game.base}`}): ${g.files} files, ${(g.bytes / 1048576).toFixed(0)} MiB; ${g.note}; ${saveNote}` });
+    post({ type: 'ready', note: `game folder (${game.source === 'store' ? 'imported, OPFS' : `dev server ${game.base}`}): ${g.files} files, ${(g.bytes / 1048576).toFixed(0)} MiB; ${g.note}; ${saveNote}` });
     const calls = wasi.imports();
     if (sync) for (const [name, fn] of Object.entries(calls)) calls[name] = (...a) => { const r = fn(...a); sync.poke(name); return r; };
     ioServe(io, calls, (e) => post({ type: 'log', fd: 2, text: `[io] ${e.stack ?? e}` }));

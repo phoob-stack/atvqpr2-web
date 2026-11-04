@@ -25,6 +25,9 @@ function parseMesh(buf) {
   return { nv, verts, faces };
 }
 
+/** Shown under the canvas by the runner. */
+export const help = 'Arrow keys or WASD to drive. North of the start the ground turns to sand: its texture is fetched the first time you get near.';
+
 export async function start({ assets, module, canvas, hud, hubUrl, name = 'PLAYER' }) {
   const t0 = performance.now();
   const { exports: ex } = await WebAssembly.instantiate(module, {});

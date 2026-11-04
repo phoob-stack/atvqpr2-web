@@ -4,15 +4,20 @@
 //   node pipeline/build.mjs [--out out] [--site ../site] [--site-ref HEAD] [--no-site]
 //        [--manifest-url ./assets/manifest.json] [--hub-url ws://127.0.0.1:8854/]
 //        [--variant N] [--chunk-size bytes] [--wasi-sdk dir] [--root <repo>]
-//        [--bucket atvqpr2-assets] [--public-base https://assets.atvqpr2.com]
+//        [--bucket atvqpr2-assets] [--public-base https://assets.atvqpr2.com] [--vps-title boxquad]
 //
-// It builds OUR artifacts only and lays them out:
+// It builds OUR artifacts only and lays them out. The titles are the game
+// profiles in profiles/ with a remote source (client/profile.js; each names
+// its build folder, whose build.mjs exports buildTitle(outDir)): adding a
+// title is a profile and its build, nothing here.
 //   out/assets/       manifest.json + objects/<aa>/<sha256>: the asset server's
-//                     folder (VPS / CDN-behind-the-server layout)
-//   out/r2/           the versioned bucket tree for R2: latest.json +
-//                     v/<version>/manifest.json + v/<version>/<path>
-//   out/r2-upload-plan.json  every object key of out/r2 with its file, size,
-//                     SHA-256, Content-Type and Cache-Control, latest.json last
+//                     folder (VPS / CDN-behind-the-server layout), for --vps-title
+//   out/r2/           the versioned bucket tree for R2, per title:
+//                     games/<id>/latest.json + games/<id>/v/<version>/manifest.json
+//                     + games/<id>/v/<version>/<path>
+//   out/r2-upload-plan.json  every object key of out/r2 with its title, file,
+//                     size, SHA-256, Content-Type and Cache-Control; per title
+//                     the files, the manifest, then its latest.json
 //                     (pipeline/upload-r2.mjs runs it; it never runs here)
 //   out/web/          the launcher page, the client library, the test title's
 //                     page code, sw.js (shell list stamped in), config.json
@@ -36,7 +41,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve, relative, sep, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { verifyPackage } from './verify-package.mjs';
+import { verifyPackage, NEVER_TITLE } from './verify-package.mjs';
 import { buildManifest, writeLayout, writeVersionedTree, DEFAULT_CHUNK, CACHE_IMMUTABLE, CACHE_POINTER } from './manifest.mjs';
 import { walk } from './lib/util.mjs';
 import { headersToCaddy } from './caddy-headers.mjs';
@@ -65,6 +70,7 @@ const HUB_URL = opt('--hub-url', 'ws://127.0.0.1:8854/');
 const WASI_SDK = opt('--wasi-sdk');
 const BUCKET = opt('--bucket', 'atvqpr2-assets');
 const PUBLIC_BASE = opt('--public-base', 'https://assets.atvqpr2.com');
+const VPS_TITLE = opt('--vps-title', 'boxquad');
 if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(BUCKET)) { console.error(`build: --bucket ${BUCKET} is not an R2 bucket name`); process.exit(2); }
 if (!/^https:\/\/[\w.-]+(:\d+)?$/.test(PUBLIC_BASE)) { console.error(`build: --public-base must be https://host (got ${PUBLIC_BASE})`); process.exit(2); }
 
@@ -157,7 +163,7 @@ rmSync(STAGE, { recursive: true, force: true });
 mkdirSync(STAGE, { recursive: true });
 
 // 1. The inputs, before anything is read from them.
-const INPUT_DIRS = ['title', 'client', 'web', 'server', 'hub', 'pipeline', 'deploy', 'test'].filter((d) => existsSync(join(ROOT, d)));
+const INPUT_DIRS = ['profiles', 'title', 'titles', 'client', 'web', 'server', 'hub', 'pipeline', 'deploy', 'test'].filter((d) => existsSync(join(ROOT, d)));
 {
   const problems = [];
   for (const d of INPUT_DIRS) {
@@ -172,56 +178,85 @@ try {
   report.inputs.commit = (() => { try { return git(ROOT, ['rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch { return null; } })();
 } catch { /* not a repo */ }
 
-// 2. The test title (our wasm and our procedural assets).
-const titleDir = join(STAGE, '.title');
-let artifacts;
+// 2. The titles: every profile in profiles/ with a remote source (our own titles only:
+//    checkProfile refuses a remote source for a retail-derived profile, and an ATV 2
+//    id is refused here and by the gate). Each is built by its profile's build.dir/build.mjs.
+const titles = [];
+let artifacts = {};
 try {
-  const { buildTitle } = await import(new URL(`file:///${join(ROOT, 'title', 'build.mjs').replace(/\\/g, '/')}`).href);
-  const r = buildTitle(titleDir, { variant: VARIANT, wasiSdk: WASI_SDK });
-  artifacts = r.artifacts;
-  for (const [name, a] of Object.entries(artifacts)) {
-    const got = sha(readFileSync(join(titleDir, name)));
-    if (got !== a.sha256) throw new Error(`${name}: built file and its record differ`);
+  const { checkProfile } = await import(new URL(`file:///${join(ROOT, 'client', 'profile.js').replace(/\\/g, '/')}`).href);
+  const dir = join(ROOT, 'profiles');
+  for (const f of readdirSync(dir).filter((n) => n.endsWith('.json')).sort()) {
+    const p = checkProfile(JSON.parse(readFileSync(join(dir, f), 'utf8')), `profiles/${f}`);
+    if (f !== `${p.id}.json`) throw new Error(`profiles/${f}: the file must be named after its id (${p.id}.json)`);
+    if (NEVER_TITLE.test(p.id)) throw new Error(`profiles/${f}: ${p.id} is an ATV 2 name; ATV 2 is never built, packaged or served here`);
+    if (!p.sources.includes('remote')) { log(`profile ${p.id}: no remote source, not built`); continue; }
+    if (!p.build?.dir) throw new Error(`profiles/${f}: a remote title needs build.dir (its build.mjs)`);
+    guardPath(join(ROOT, p.build.dir), `profile ${p.id} build.dir`);
+    titles.push({ ...p });
   }
-  log(`title built: title.wasm ${artifacts['title.wasm'].size} bytes (${artifacts['title.wasm'].toolchain.split(' (')[0]})`);
-} catch (e) { fail(`title build: ${e.message}`); }
-const extraDir = join(ROOT, 'title', 'static');
-if (existsSync(extraDir)) cpSync(extraDir, titleDir, { recursive: true });
+  if (!titles.length) throw new Error('no profile with a remote source in profiles/');
+  for (const p of titles) {
+    const out = join(STAGE, '.titles', p.id);
+    const { buildTitle } = await import(new URL(`file:///${join(ROOT, p.build.dir, 'build.mjs').replace(/\\/g, '/')}`).href);
+    const r = buildTitle(out, { variant: VARIANT, wasiSdk: WASI_SDK });
+    for (const [name, a] of Object.entries(r.artifacts)) {
+      const got = sha(readFileSync(join(out, name)));
+      if (got !== a.sha256) throw new Error(`${p.id}/${name}: built file and its record differ`);
+      artifacts[`${p.id}/${name}`] = a;
+    }
+    const extraDir = join(ROOT, p.build.dir, 'static');
+    if (existsSync(extraDir)) cpSync(extraDir, out, { recursive: true });
+    p.out = out; p.artifacts = r.artifacts;
+    log(`title ${p.id} built: ${Object.entries(r.artifacts).map(([n, a]) => `${n} ${a.size} bytes`).join(', ')} (${Object.values(r.artifacts)[0]?.toolchain.split(' (')[0]})`);
+  }
+} catch (e) { fail(`titles: ${e.message}`); }
 
-// 3. Assets: the manifest (required files, groups), the asset server's layout,
-//    the versioned R2 tree and its upload plan.
+// 3. Assets: per title the manifest (required files, groups: the profile), the versioned
+//    R2 tree under its prefix games/<id>/, and one upload plan for all of them; the asset
+//    server's layout (VPS) for --vps-title.
 let r2plan;
 try {
-  const delivery = JSON.parse(readFileSync(join(ROOT, 'title', 'delivery.json'), 'utf8'));
-  const files = walk(titleDir).map((f) => ({ path: f.rel, abs: join(titleDir, f.rel), artifact: artifacts[f.rel] }));
-  const built = buildManifest(files, delivery, { chunkSize: CHUNK });
-  const m = writeLayout(join(STAGE, 'assets'), built);
-  const tree = writeVersionedTree(join(STAGE, 'r2'), built);
-  const objects = tree.keys.map((k) => ({ key: k.key, file: `r2/${k.key}`, size: k.size, sha256: k.sha256, contentType: k.type,
-    cacheControl: k.key === 'latest.json' ? CACHE_POINTER : CACHE_IMMUTABLE }));
-  // upload order: the version's files, then its manifest, then the pointer (so latest.json never names a half-uploaded version)
-  const rank = (o) => (o.key === 'latest.json' ? 2 : o.key.endsWith('/manifest.json') ? 1 : 0);
-  objects.sort((a, b) => rank(a) - rank(b) || (a.key < b.key ? -1 : 1));
-  r2plan = { format: 'delivery-upload-plan/1', comment: 'Written by pipeline/build.mjs. Run with pipeline/upload-r2.mjs (it re-checks every file and runs the gate first).',
-    bucket: BUCKET, publicBase: PUBLIC_BASE, title: built.manifest.title, version: built.manifest.version,
+  const objects = [];
+  report.outputs.titles = {};
+  for (const p of titles) {
+    const files = walk(p.out).map((f) => ({ path: f.rel, abs: join(p.out, f.rel), artifact: p.artifacts[f.rel] }));
+    const built = buildManifest(files, { title: p.id, name: p.title, titleVersion: p.titleVersion, entry: p.entry, required: p.required ?? [], groups: p.groups ?? {} }, { chunkSize: CHUNK });
+    if (p.id === VPS_TITLE) {
+      const m = writeLayout(join(STAGE, 'assets'), built);
+      report.outputs.assets = { title: p.id, version: m.version, files: m.files.length, bytes: m.files.reduce((n, e) => n + e.size, 0) };
+    }
+    const tree = writeVersionedTree(join(STAGE, 'r2'), built, { prefix: p.remote.prefix });
+    const mine = tree.keys.map((k) => ({ key: k.key, title: p.id, file: `r2/${k.key}`, size: k.size, sha256: k.sha256, contentType: k.type,
+      cacheControl: k.key.endsWith('/latest.json') ? CACHE_POINTER : CACHE_IMMUTABLE }));
+    // upload order per title: the version's files, then its manifest, then its pointer (latest.json never names a half-uploaded version)
+    const rank = (o) => (o.key.endsWith('/latest.json') ? 2 : o.key.endsWith('/manifest.json') ? 1 : 0);
+    mine.sort((a, b) => rank(a) - rank(b) || (a.key < b.key ? -1 : 1));
+    objects.push(...mine);
+    const m = built.manifest;
+    const bytes = m.files.reduce((n, e) => n + e.size, 0);
+    report.outputs.titles[p.id] = { version: m.version, prefix: p.remote.prefix, files: m.files.length, bytes, required: m.files.filter((e) => e.required).map((e) => e.path),
+      groups: Object.fromEntries([...new Set(m.files.filter((e) => e.group).map((e) => e.group))].map((g) => [g, m.files.filter((e) => e.group === g).map((e) => e.path)])) };
+    log(`${p.id}: ${m.files.length} files, ${(bytes / 1048576).toFixed(2)} MB, version ${m.version} -> ${p.remote.prefix} (required ${report.outputs.titles[p.id].required.length}, groups ${Object.keys(report.outputs.titles[p.id].groups).join(', ') || '-'})`);
+  }
+  if (!report.outputs.assets) throw new Error(`--vps-title ${VPS_TITLE} is not a remote title of profiles/`);
+  r2plan = { format: 'delivery-upload-plan/2', comment: 'Written by pipeline/build.mjs. Run with pipeline/upload-r2.mjs (it re-checks every file and runs the gate first).',
+    bucket: BUCKET, publicBase: PUBLIC_BASE,
+    titles: titles.map((p) => ({ id: p.id, prefix: p.remote.prefix, version: report.outputs.titles[p.id].version })),
     source: { commit: report.inputs.commit ?? null }, objects };
   writeFileSync(join(STAGE, 'r2-upload-plan.json'), JSON.stringify(r2plan, null, 1) + '\n');
-  const bytes = m.files.reduce((n, e) => n + e.size, 0);
-  report.outputs.assets = { version: m.version, files: m.files.length, bytes, required: m.files.filter((e) => e.required).map((e) => e.path),
-    groups: Object.fromEntries([...new Set(m.files.filter((e) => e.group).map((e) => e.group))].map((g) => [g, m.files.filter((e) => e.group === g).map((e) => e.path)])) };
-  report.outputs.r2 = { bucket: BUCKET, publicBase: PUBLIC_BASE, version: tree.latest.version, objects: objects.length, bytes: objects.reduce((n, o) => n + o.size, 0) };
-  log(`assets: ${m.files.length} files, ${(bytes / 1048576).toFixed(2)} MB, version ${m.version} (required ${report.outputs.assets.required.length}, groups ${Object.keys(report.outputs.assets.groups).join(', ') || '-'})`);
-  log(`r2 tree: ${objects.length} objects for ${BUCKET} (v/${tree.latest.version}/ + latest.json)`);
+  report.outputs.r2 = { bucket: BUCKET, publicBase: PUBLIC_BASE, titles: r2plan.titles, objects: objects.length, bytes: objects.reduce((n, o) => n + o.size, 0) };
+  log(`r2 tree: ${objects.length} objects for ${BUCKET} (${r2plan.titles.map((t) => `${t.prefix}v/${t.version}/`).join(', ')}, each with its latest.json)`);
 } catch (e) { fail(`assets: ${e.message}`); }
-rmSync(titleDir, { recursive: true, force: true });
-writeFileSync(join(STAGE, 'artifacts.json'), JSON.stringify({ comment: 'Every compiled artifact of this build: what the gate accepts as a wasm module, nothing else.', artifacts }, null, 1) + '\n');
+rmSync(join(STAGE, '.titles'), { recursive: true, force: true });
+writeFileSync(join(STAGE, 'artifacts.json'), JSON.stringify({ comment: 'Every compiled artifact of this build (<title>/<file>): what the gate accepts as a wasm module, nothing else.', artifacts }, null, 1) + '\n');
 
 // 4. Web shell: launcher page, client library, title page code, sw.js, config.json.
 try {
   const web = join(STAGE, 'web');
   cpSync(join(ROOT, 'web'), web, { recursive: true });
   mkdirSync(join(web, 'client'), { recursive: true });
-  for (const f of ['assets.js', 'asset-worker.js', 'launcher.js', 'sha256.js']) cpSync(join(ROOT, 'client', f), join(web, 'client', f));
+  for (const f of ['assets.js', 'asset-worker.js', 'launcher.js', 'sha256.js', 'profile.js']) cpSync(join(ROOT, 'client', f), join(web, 'client', f));
   writeFileSync(join(web, 'config.json'), JSON.stringify({ ns: 'boxquad', manifest: MANIFEST_URL, hub: HUB_URL || null, background: true }, null, 1) + '\n');
   const shell = walk(web).map((f) => f.rel).sort();
   const version = sha(shell.map((p) => `${p}\0${sha(readFileSync(join(web, p)))}\n`).join('')).slice(0, 16);
@@ -279,10 +314,10 @@ try {
     problems.push(...site.problems.map((p) => ({ where: 'out/site', ...p })));
   }
   // every wasm in the output is one we just built
-  const built = new Set(Object.values(artifacts).map((a) => a.sha256));
+  const builtWasm = new Set(Object.values(artifacts).map((a) => a.sha256));
   for (const f of walk(STAGE)) {
     const abs = join(STAGE, f.rel);
-    if (f.size >= 4 && readFileSync(abs).subarray(0, 4).equals(Buffer.from([0, 0x61, 0x73, 0x6d])) && !built.has(sha(readFileSync(abs))))
+    if (f.size >= 4 && readFileSync(abs).subarray(0, 4).equals(Buffer.from([0, 0x61, 0x73, 0x6d])) && !builtWasm.has(sha(readFileSync(abs))))
       problems.push({ where: 'out', file: f.rel, why: 'wasm module not built by this run' });
   }
   report.gate.output = { files: all.files, bytes: all.bytes, problems: problems.length, r2: { files: r2.files, bytes: r2.bytes } };

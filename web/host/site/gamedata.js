@@ -1,7 +1,10 @@
 // "Game data": the player's imported game files in this browser's storage
-// (OPFS, loader.js), how much space this site uses, whether the browser keeps
-// it (persist()), checking/preloading the files, and "Forget game files".
+// (OPFS, the shared delivery store: assetsource.js), how much space this site
+// uses, whether the browser keeps it (persist()), checking/preloading the
+// files, and "Forget game files".
 import { importedGame, forgetGame, hasGameData, GAME_DIR, CACHE_DIR } from '../loader.js';
+import { localSource } from '../assetsource.js';
+import { AssetManager, LocalFilesBackend } from '../delivery/assets.js';
 
 const MB = (n) => `${(n / 1048576).toFixed(n < 10 * 1048576 ? 1 : 0)} MB`;
 
@@ -38,43 +41,34 @@ export async function requestPersist() {
 }
 
 /**
- * Read every imported file once (warms the disk cache, finds missing or
- * short files) and re-hash default.xbe. onProgress({ done, total, path }).
+ * Read every stored file once and hash it again against the catalog's
+ * SHA-256 (the delivery client's full verify: warms the disk cache, finds
+ * missing or damaged files, and deletes damaged ones so that the next import
+ * replaces them). onProgress({ done, total, path }).
  * Returns { ok, files, bytes, secs, problems: [] }.
  */
 export async function checkGame(onProgress = () => {}) {
   const m = await importedGame();
   if (!m) return { ok: false, problems: ['No imported game in this browser.'] };
-  const top = await (await navigator.storage.getDirectory()).getDirectoryHandle(GAME_DIR);
-  const total = m.files.reduce((a, f) => a + f.size, 0);
+  const src = await localSource();
+  const cat = await src.catalog();
+  const am = new AssetManager({ ns: src.ns, backend: new LocalFilesBackend({ files: null }) });
+  const total = cat.files.reduce((a, f) => a + f.size, 0);
   const problems = [];
   let done = 0;
   const t0 = performance.now();
-  for (const f of m.files) {
-    let file;
-    try {
-      let d = top;
-      const parts = f.path.split('/');
-      for (const p of parts.slice(0, -1)) d = await d.getDirectoryHandle(p);
-      file = await (await d.getFileHandle(parts.at(-1))).getFile();
-    } catch { problems.push(`${f.path} is missing`); done += f.size; continue; }
-    if (file.size !== f.size) problems.push(`${f.path} is ${file.size} bytes, expected ${f.size}`);
-    if (f.path.toLowerCase() === 'default.xbe') {
-      const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))]
-        .map((b) => b.toString(16).padStart(2, '0')).join('');
-      if (m.xbeSha256 && sha !== m.xbeSha256) problems.push('default.xbe has changed since the import');
+  try {
+    await am.open();
+    for (const f of cat.files) {
+      onProgress({ done, total, path: f.path });
+      const v = await am.verifyStore({ paths: [f.path], full: true });
+      if (v.missing.length) problems.push(`${f.path} is missing`);
+      if (v.bad.length) problems.push(`${f.path} is damaged (its SHA-256 no longer matches)`);
       done += f.size;
-    } else {
-      // Stream through it in 8 MiB pieces.
-      for (let at = 0; at < file.size; at += 8 << 20) {
-        const n = (await file.slice(at, Math.min(file.size, at + (8 << 20))).arrayBuffer()).byteLength;
-        done += n;
-        onProgress({ done, total, path: f.path });
-      }
+      onProgress({ done, total, path: f.path });
     }
-    onProgress({ done, total, path: f.path });
-  }
-  return { ok: !problems.length, files: m.files.length, bytes: total, secs: (performance.now() - t0) / 1000, problems };
+  } finally { am.close(); src.statusP = null; }
+  return { ok: !problems.length, files: cat.files.length, bytes: total, secs: (performance.now() - t0) / 1000, problems };
 }
 
 export { importedGame, forgetGame, hasGameData, GAME_DIR, CACHE_DIR, MB };

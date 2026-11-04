@@ -39,10 +39,11 @@ const b = await launch(`http://127.0.0.1:${port}/host/index.html?${qs}`, { profi
 const t0 = Date.now();
 const el = () => `${((Date.now() - t0) / 1000).toFixed(1).padStart(6)}s`;
 const loader = () => b.eval('JSON.parse(JSON.stringify(atv.loader))');
-const opfsList = () => b.eval(`(async () => { const r = await navigator.storage.getDirectory(); const out = [];
-  const walk = async (d, p) => { for await (const h of d.values()) { if (h.kind === 'directory') await walk(h, p + h.name + '/');
-    else out.push([p + h.name, (await h.getFile()).size]); } };
-  try { await walk(await r.getDirectoryHandle('atv2-game'), ''); } catch { return null; } return out; })()`);
+// The import's game files: the catalog of the shared store (delivery/atv2, assetsource.js), [path, size] under /game.
+const opfsList = () => b.eval(`(async () => { try {
+  const d = await (await (await navigator.storage.getDirectory()).getDirectoryHandle('delivery')).getDirectoryHandle('atv2');
+  const c = JSON.parse(await (await (await d.getFileHandle('catalog.json')).getFile()).text());
+  return c.files.filter((f) => f.path.startsWith('game/')).map((f) => [f.path.slice(5), f.size]); } catch { return null; } })()`);
 let code = 1;
 try {
   let st;
@@ -70,7 +71,7 @@ try {
       if (st.phase === 'error') {
         console.log(`${el()} REJECTED: ${st.error}`);
         const files = await opfsList();
-        console.log(`${el()} OPFS atv2-game: ${files === null ? 'absent' : `${files.length} files`}`);
+        console.log(`${el()} OPFS delivery/atv2 (game files): ${files === null ? 'absent' : `${files.length} files`}`);
         code = argv.includes('--expect-error') && (files === null || files.length === 0) ? 0 : 1;
         break;
       }
@@ -85,7 +86,7 @@ try {
   } else if (st.phase === 'ready') code = argv.includes('--expect-error') ? 1 : 0;
   if (code === 0 && !argv.includes('--expect-error') && !opt('--stop-after')) {
     const files = await opfsList();
-    console.log(`${el()} OPFS atv2-game: ${files.length} files, ${(files.reduce((a, f) => a + f[1], 0) / 1048576).toFixed(0)} MB`);
+    console.log(`${el()} OPFS delivery/atv2 (game files): ${files.length} files, ${(files.reduce((a, f) => a + f[1], 0) / 1048576).toFixed(0)} MB`);
     // The page goes on to boot from OPFS; wait for the I/O worker's mount line.
     for (let i = 0; i < 60; i++) {
       const l = await b.eval(`atv.log.find((l) => l.includes('game folder ('))`);
@@ -93,10 +94,12 @@ try {
       await sleep(500);
     }
     if (argv.includes('--check-handle')) {
-      const h = await b.eval(`import('/host/loader.js').then(async (m) => {
-        const d = await (await navigator.storage.getDirectory()).getDirectoryHandle('atv2-game');
-        const e = await m.scanHandle(d); return { files: e.length, sha: await m.validate(e) }; })`);
-      console.log(`${el()} directory-handle path over the import: ${h.files} files, default.xbe SHA-256 ${h.sha}`);
+      // The profile's checks over the stored files (a stand-in for a picked directory handle).
+      const h = await b.eval(`import('/host/loader.js').then(async (l) => { const { localSource } = await import('/host/assetsource.js');
+        const src = await localSource(); const files = await src.files('/game');
+        const e = files.map((f) => ({ path: f.path, size: f.size, file: () => src.file('game/' + f.path) }));
+        return { files: e.length, sha: await l.validate(e) }; })`);
+      console.log(`${el()} the profile's checks over the stored import: ${h.files} files, default.xbe SHA-256 ${h.sha}`);
     }
   }
 } catch (e) {

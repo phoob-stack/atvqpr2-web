@@ -24,7 +24,7 @@ const GEN_WGSL = ['struct V', 'sC { c: array<vec4f, 192> };\n@group(0) @binding(
 function workspace(name) {
   const ws = join(TMP, name);
   rmSync(ws, { recursive: true, force: true });
-  for (const d of ['title', 'client', 'web', 'server', 'hub', 'pipeline']) cpSync(join(ROOT, d), join(ws, d), { recursive: true });
+  for (const d of ['profiles', 'title', 'titles', 'client', 'web', 'server', 'hub', 'pipeline']) cpSync(join(ROOT, d), join(ws, d), { recursive: true });
   cpSync(join(ROOT, 'LICENSE'), join(ws, 'LICENSE'));
   return ws;
 }

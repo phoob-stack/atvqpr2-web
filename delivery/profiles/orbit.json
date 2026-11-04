@@ -1,0 +1,15 @@
+{
+ "format": "game-profile/1",
+ "id": "orbit",
+ "title": "Orbit (second delivery test title)",
+ "comment": "A tiny independent title of ours (titles/orbit: orbit.c + procedural assets), added with a profile and its build only: no loader, launcher or pipeline code knows it.",
+ "derivedFromRetail": false,
+ "sources": ["remote"],
+ "remote": { "prefix": "games/orbit/" },
+ "entry": "orbit.wasm",
+ "app": "orbit",
+ "titleVersion": "1.0.0",
+ "required": ["orbit.wasm", "config/orbit.json", "palette.bin"],
+ "groups": { "sky": ["sky/stars.bin"] },
+ "build": { "dir": "titles/orbit" }
+}

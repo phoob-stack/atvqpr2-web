@@ -1,9 +1,13 @@
 // The filesystem behind wasi.js. Synchronous, so it runs in a worker.
 //
 //   /game  the player's own game folder, read-only. Two sources:
-//          - imported (the player's path, mountOpfsGame): loader.js copied
-//            the folder the player picked into OPFS (atv2-game/); every file
-//            is opened once with a SyncAccessHandle and read in place.
+//          - imported (the player's path, mountStore): assetsource.js stored
+//            the folder the player picked in the shared delivery store
+//            (OPFS delivery/<ns>/blobs/<sha256>, listed by catalog.json with
+//            each file's catalog path 'game/<disc path>'); the profile's
+//            mounts say which catalog prefix is /game. Every file is opened
+//            once with a SyncAccessHandle and read in place (files with the
+//            same contents share one blob and one handle).
 //          - dev server (developer option, mountGame): serve.mjs --game lists
 //            the folder at /data/manifest.json and serves its files at
 //            /data/<path> with Range support. Blocks of 1 MiB are fetched on
@@ -229,42 +233,47 @@ export class Vfs {
   }
 
   /**
-   * Mount the game folder the player imported into OPFS (loader.js; `dir` is
-   * its folder under the OPFS root, e.g. 'atv2-game') read-only at /game.
-   * The import's own list (.import.json) says which files are complete.
+   * Mount the files the player imported (assetsource.js LocalImportSource:
+   * the delivery store of namespace `ns`) read-only: for each of `mounts`
+   * ({ at: '/game', from: 'game/' }), the catalog's files under `from`.
+   * The catalog lists every file with its size and SHA-256; the blob of a
+   * file is blobs/<sha256> (checked by its mark before the start).
    */
-  async mountOpfsGame(dirName) {
+  async mountStore({ ns, mounts }) {
     const root = await navigator.storage.getDirectory();
-    let top;
-    try { top = await root.getDirectoryHandle(dirName); } catch { throw new Error('no imported game files in this browser'); }
-    const mf = await (await top.getFileHandle('.import.json')).getFile();
-    const manifest = JSON.parse(await mf.text());
-    if (!manifest.complete) throw new Error('the game files import did not finish; choose the game folder again');
-    const game = this.root.add(new Dir('game', { readOnly: true }));
-    let bytes = 0;
-    for (const f of manifest.files) {
-      const parts = f.path.split('/');
-      let d = game, h = top;
-      for (const p of parts.slice(0, -1)) {
-        d = d.get(p) ?? d.add(new Dir(p, { readOnly: true }));
-        h = await h.getDirectoryHandle(p);
-      }
-      // After a reload (a save import restarts the page) the previous page's
-      // I/O worker can hold the handles for a moment: retry for up to 10 s
-      // before calling it another tab.
-      let sync;
-      for (let tries = 0; ; tries++) {
-        try { sync = await (await h.getFileHandle(parts.at(-1))).createSyncAccessHandle(); break; } catch (e) {
-          if (e.name === 'NoModificationAllowedError' && tries < 100) { await new Promise((r) => setTimeout(r, 100)); continue; }
-          throw new Error(`${f.path}: ${e.name === 'NoModificationAllowedError' ? 'in use by another tab of this page' : e.message}`);
+    let top, catalog;
+    try {
+      top = await (await root.getDirectoryHandle('delivery')).getDirectoryHandle(ns);
+      catalog = JSON.parse(await (await (await top.getFileHandle('catalog.json')).getFile()).text());
+    } catch { throw new Error('no imported game files in this browser'); }
+    const blobs = await top.getDirectoryHandle('blobs');
+    const handles = new Map();          // sha256 -> SyncAccessHandle
+    let files = 0, bytes = 0;
+    for (const m of mounts) {
+      const mnt = this.root.get(m.at.slice(1)) ?? this.root.add(new Dir(m.at.slice(1), { readOnly: true }));
+      for (const f of catalog.files) {
+        if (!f.path.startsWith(m.from)) continue;
+        const parts = f.path.slice(m.from.length).split('/');
+        let d = mnt;
+        for (const p of parts.slice(0, -1)) d = d.get(p) ?? d.add(new Dir(p, { readOnly: true }));
+        let sync = handles.get(f.sha256);
+        // After a reload (a save import restarts the page) the previous page's
+        // I/O worker can hold the handles for a moment: retry for up to 10 s
+        // before calling it another tab.
+        for (let tries = 0; !sync; tries++) {
+          try { sync = await (await blobs.getFileHandle(f.sha256)).createSyncAccessHandle(); } catch (e) {
+            if (e.name === 'NoModificationAllowedError' && tries < 100) { await new Promise((r) => setTimeout(r, 100)); continue; }
+            throw new Error(`${f.path}: ${e.name === 'NoModificationAllowedError' ? 'in use by another tab of this page' : e.name === 'NotFoundError' ? 'missing from this browser storage; select the game files again' : e.message}`);
+          }
         }
+        handles.set(f.sha256, sync);
+        if (sync.getSize() !== f.size) throw new Error(`${f.path}: ${sync.getSize()} bytes in OPFS, ${f.size} expected; choose the game folder again`);
+        d.add(new OpfsGameFile(parts.at(-1), f, sync));
+        files++; bytes += f.size;
       }
-      if (sync.getSize() !== f.size) throw new Error(`${f.path}: ${sync.getSize()} bytes in OPFS, ${f.size} expected; choose the game folder again`);
-      d.add(new OpfsGameFile(parts.at(-1), f, sync));
-      bytes += f.size;
     }
-    return { files: manifest.files.length, bytes, note: `imported ${new Date(manifest.importedAt).toISOString().slice(0, 10)}` +
-      (manifest.skipMovies ? ', without movies' : '') };
+    return { files, bytes, note: `imported ${new Date(catalog.importedAt ?? Date.now()).toISOString().slice(0, 10)}` +
+      (catalog.skipMovies ? ', without movies' : '') + `, catalog ${catalog.version}` };
   }
 
   mountMem(name) { return this.root.add(new Dir(name)); }

@@ -1,6 +1,6 @@
 {
  "comment": "Written by tools/sync-play.mjs. The game page, copied from atvrecomp; our own code only.",
- "atvrecomp": "00e0aa98f0e4360b83ab80c9188819e346bb3ffd",
+ "atvrecomp": "c6acf14715bd4e44f8f89722a96f9f0bdd9f0ea4",
  "builds": [
   {
    "builder": "0.4.0",
@@ -35,6 +35,11 @@
    "sha256": "ba9b3e9479dc42a6b460b3f28c7a6b3a376559a383adcfcbe111ccac178a4a2e"
   },
   {
+   "path": "host/assetsource.js",
+   "size": 20852,
+   "sha256": "f48ccdd88b6b6aa987af7f9801b3cf47a4631f076f24329d8f414a2e282c9315"
+  },
+  {
    "path": "host/audio-worklet.js",
    "size": 4052,
    "sha256": "34095b20d5aaf3a856fec8b42374e244755e28233e94514a3ff8ddb6bd9115d5"
@@ -50,9 +55,34 @@
    "sha256": "aa51e09a74c4b18294c37d82d619dfd5deb9fd9bf7a1790e807dae6ddec3b856"
   },
   {
+   "path": "host/delivery/asset-worker.js",
+   "size": 27936,
+   "sha256": "8c85ededba251ffaa9fc1c544c978693f2b8dffde6b529eed7ef4ff1fc6ff3ea"
+  },
+  {
+   "path": "host/delivery/assets.js",
+   "size": 32638,
+   "sha256": "49fe9f8ac809b47fbc5cd846d24b2d2bc8b737c315bae05c3fb9b1c9ab49e710"
+  },
+  {
+   "path": "host/delivery/profile.js",
+   "size": 10353,
+   "sha256": "eb59f5ad1520cd5bf7f48b9258568c23406737407b7719656656a1e98feb33cc"
+  },
+  {
+   "path": "host/delivery/sha256.js",
+   "size": 5210,
+   "sha256": "f80e34a3ed588437f3b6564a56248d7f1f3f21764cd70c1de6d8602c6273f0b5"
+  },
+  {
+   "path": "host/delivery/sync.json",
+   "size": 863,
+   "sha256": "0b1fd1e8f5896de1b0c4c15a1b43328445432ff9b1eae1408543805cfdada22a"
+  },
+  {
    "path": "host/deploy.js",
    "size": 749,
-   "sha256": "b51a3a41e7fe68be6e8d089e96b65602391be82fa3e0f6a9fd8138d01c1275a6"
+   "sha256": "e27bfd43e56407bad66f0c61667d2dcab81b89e748a4cf2b6239caa3297e336a"
   },
   {
    "path": "host/early.js",
@@ -66,8 +96,8 @@
   },
   {
    "path": "host/gamebuild.js",
-   "size": 7632,
-   "sha256": "b14f51d66f06cfd3542823463a3d86f341ced955063450428aae9d1f71d1bc01"
+   "size": 5520,
+   "sha256": "d9ac216d24ef23a5219ec8cf0ae6e5e9710396e0614aeba21f63ecbf117eaee4"
   },
   {
    "path": "host/imports.js",
@@ -76,8 +106,8 @@
   },
   {
    "path": "host/index.html",
-   "size": 17841,
-   "sha256": "ce971f6e0824534400b35e4a7655af0a54ac5031a4c480de0b2cd97ead5f2b45"
+   "size": 18022,
+   "sha256": "79e78ddf997f4af0ea718e5ef13ba4682918ae3a0381ea2f318f1dd11d42fc17"
   },
   {
    "path": "host/input.js",
@@ -86,8 +116,8 @@
   },
   {
    "path": "host/io-worker.js",
-   "size": 2534,
-   "sha256": "bb3ef6ea69a93a3efbd97050130feef5f7de8da6bf81bc90f9a865795c9239d9"
+   "size": 2640,
+   "sha256": "baf19136529208805a6cb85854fff72b0045ab0236d925e88fb595de1daae6be"
   },
   {
    "path": "host/io.js",
@@ -96,18 +126,23 @@
   },
   {
    "path": "host/loader.js",
-   "size": 20667,
-   "sha256": "9f3858f8939b2493924df0c53b4e2e708edff340c9cca1192d5b74a5307c9cdd"
+   "size": 14314,
+   "sha256": "91786295490e303f9be16453a0c46ab1899cf99b63a1e21cd6cf7b599ca6d036"
   },
   {
    "path": "host/main.js",
-   "size": 26570,
-   "sha256": "5af8a407e2bf2856ea5d2f9e1945236029997f891d8e028869d9aef9dfa07951"
+   "size": 28027,
+   "sha256": "2adbf79e530349786606f3af02d26568dfb25219ea880d4c73c135893526871f"
   },
   {
    "path": "host/present.js",
    "size": 10632,
    "sha256": "a657b425683b783576da14c4f3a2cea45edb977923d0944892ebe8a02149b9f4"
+  },
+  {
+   "path": "host/profiles/atv2.json",
+   "size": 2088,
+   "sha256": "9ce871370ed8ac65ed12f6a14356c3a07110a81faeae381e2890b1bf499b9e17"
   },
   {
    "path": "host/roam.js",
@@ -131,13 +166,13 @@
   },
   {
    "path": "host/site/gamedata-page.js",
-   "size": 6103,
-   "sha256": "bdc5ff7b0fc067cb50ec5196bb1237bc9c2401bc20e42f52f4d66853c294a26d"
+   "size": 6218,
+   "sha256": "e0ff4f725a96620a993c843e23bfb2bc9a9dffa6ed7e0ca21bc250c68da9fe3a"
   },
   {
    "path": "host/site/gamedata.js",
-   "size": 3529,
-   "sha256": "0ea1212cedff4f81f65bb51c015eeb86272379a95af88102d9e991c2103d2b1d"
+   "size": 3231,
+   "sha256": "097429e099296b1b60c817f1572a33b80c382ee76fd47da0e61f412895cb2106"
   },
   {
    "path": "host/site/home.js",
@@ -201,8 +236,8 @@
   },
   {
    "path": "host/vfs.js",
-   "size": 13865,
-   "sha256": "0ab5e05e0104d738e6cc8b90d7b00e851637e2e6169ab8145d7a1971d18212a0"
+   "size": 14651,
+   "sha256": "94e917f84d2f5259805ad65c01a6337c29254284c0e72cf200afc9ac9b740f0c"
   },
   {
    "path": "host/wasi.js",

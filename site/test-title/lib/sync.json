@@ -1,21 +1,26 @@
 {
  "comment": "Written by tools/sync-delivery.mjs: the delivery client and the test title page code, copied from the delivery repository.",
- "delivery": "4d9e3bb61d8976e535d1e1b21c5153883ee59562",
+ "delivery": "d85eda545e6777845d68fede72c3cebec6fabd10",
  "shell": {
-  "version": "2c614fcd18c37828",
+  "version": "e68f9d2d4a6493a7",
   "files": [
    "index.html",
    "runner.js",
-   "app/title.js",
-   "app/hub.js",
    "lib/assets.js",
    "lib/asset-worker.js",
    "lib/launcher.js",
    "lib/sha256.js",
+   "lib/profile.js",
    "../js/common.js",
    "../js/config-model.js",
    "../js/keymap.js",
-   "../css/site.css"
+   "../css/site.css",
+   "app/hub.js",
+   "app/orbit.js",
+   "app/title.js",
+   "profiles/boxquad.json",
+   "profiles/index.json",
+   "profiles/orbit.json"
   ]
  },
  "files": [
@@ -26,28 +31,40 @@
    "sha256": "a58c03abe6746ebd240df1914448f8d49a9e07a3560e67cc5ba724cf745d86ec"
   },
   {
+   "path": "test-title/app/orbit.js",
+   "from": "web/app/orbit.js",
+   "size": 2926,
+   "sha256": "75b0b600b910d162933fdcb2334fac8f0dfef840936e930bbe094cf50fd3077c"
+  },
+  {
    "path": "test-title/app/title.js",
    "from": "web/app/title.js",
-   "size": 9422,
-   "sha256": "de9e1850da14b8b719d16c80702f3125772a8b911bd5d6892c1b80d5fd8dd86f"
+   "size": 9617,
+   "sha256": "a4d130441bfb7bf5f00c6e11632268a7e80e31c3eae8e9afeaf8c794bd96ef0c"
   },
   {
    "path": "test-title/lib/asset-worker.js",
    "from": "client/asset-worker.js",
-   "size": 24122,
-   "sha256": "41518a6eac4df60d24920da2817b0d005e1fd1a2c83cfb1d9df6f4cdc4cde816"
+   "size": 27936,
+   "sha256": "8c85ededba251ffaa9fc1c544c978693f2b8dffde6b529eed7ef4ff1fc6ff3ea"
   },
   {
    "path": "test-title/lib/assets.js",
    "from": "client/assets.js",
-   "size": 26234,
-   "sha256": "e7a365902f2be67f597442f3d0d795bb785619c7c1146c005dc8c193d91d2b91"
+   "size": 32638,
+   "sha256": "49fe9f8ac809b47fbc5cd846d24b2d2bc8b737c315bae05c3fb9b1c9ab49e710"
   },
   {
    "path": "test-title/lib/launcher.js",
    "from": "client/launcher.js",
-   "size": 5846,
-   "sha256": "c919ca427f1137b8b72688969be4770639d74ca19ee25310770cd2c164ef0000"
+   "size": 6420,
+   "sha256": "85ea96c716d045994146cb1bdfc38bddcffd4f6d5f86de23126f71a2feaa8c5a"
+  },
+  {
+   "path": "test-title/lib/profile.js",
+   "from": "client/profile.js",
+   "size": 10353,
+   "sha256": "eb59f5ad1520cd5bf7f48b9258568c23406737407b7719656656a1e98feb33cc"
   },
   {
    "path": "test-title/lib/sha256.js",
@@ -56,10 +73,28 @@
    "sha256": "f80e34a3ed588437f3b6564a56248d7f1f3f21764cd70c1de6d8602c6273f0b5"
   },
   {
+   "path": "test-title/profiles/boxquad.json",
+   "from": "profiles/boxquad.json",
+   "size": 761,
+   "sha256": "54750eb155ffa8bf1d6ef18ad7665189bbe009498b92fb09c58141faa444c722"
+  },
+  {
+   "path": "test-title/profiles/index.json",
+   "from": "profiles/*.json",
+   "size": 316,
+   "sha256": "7c1de8eb8ff9437e431067fa18036990eb14212b8468da2ba881f744ad0aa37f"
+  },
+  {
+   "path": "test-title/profiles/orbit.json",
+   "from": "profiles/orbit.json",
+   "size": 581,
+   "sha256": "fe45ab69988dc297dc2a9385c2f442fe0babb2127bff04522c405b9ddcb8eb81"
+  },
+  {
    "path": "test-title/sw.js",
    "from": "client/sw.js",
-   "size": 2768,
-   "sha256": "046423a6ca95b50fe4e67a1df1b3659edb25b0689e8a634b03773407225a8b35"
+   "size": 2868,
+   "sha256": "0b77645e70b619cd675adba3d9b2031d363b0b50eb8d7d6b6071bba815c149d1"
   }
  ]
 }

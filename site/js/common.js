@@ -168,10 +168,11 @@ export function initPlayBox(box, opts = {}) {
       set('unsupported', `This browser can't run the game here: it has no ${missing.join(', no ')}. Use a current Edge or Chrome on a desktop computer.`);
       steps.hidden = false; return;
     }
-    let ready = null, imported = null, kept = null;
+    let ready = null, imported = null, kept = null, reason = null;
     try {
       const { loader, build } = await load();
       [ready, imported, kept] = await Promise.all([loader.readyGame(), loader.importedGame(), build.storedBuild()]);
+      reason = (await loader.gameState?.())?.reason ?? null;
     } catch (e) { say(`The game page's code could not be loaded (${e.message}).`, 'error'); }
     if (ready) {
       const bytes = ready.files.reduce((a, f) => a + f.size, 0);
@@ -190,6 +191,7 @@ export function initPlayBox(box, opts = {}) {
     } else {
       const stale = imported && kept && !kept.ok;
       set(stale ? 'stale' : 'need', stale ? mod.build.STALE_TEXT()
+        : reason === 'damaged' && mod.loader.DAMAGED_TEXT ? mod.loader.DAMAGED_TEXT
         : imported ? 'Your game files are in this browser, but not your game build (atv2.wasm). Select your local game files again.'
           : 'Select the folder your builder made from your disc.');
       selectUI(!!(imported || kept));

@@ -1,0 +1,15 @@
+{
+ "comment": "Written by tools/sync-delivery.mjs: the test titles (delivery profiles with a remote source).",
+ "titles": [
+  {
+   "id": "boxquad",
+   "title": "Box Quad (delivery test title)",
+   "app": "title"
+  },
+  {
+   "id": "orbit",
+   "title": "Orbit (second delivery test title)",
+   "app": "orbit"
+  }
+ ]
+}

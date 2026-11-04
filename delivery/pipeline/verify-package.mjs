@@ -66,7 +66,10 @@
 //     default.xbe, no recomp_*.c, by name either.
 // --r2 (with --delivery): the folder is a versioned bucket tree (what
 //     pipeline/upload-r2.mjs uploads to R2):
-// 18. latest.json is required and well formed and points at an existing
+// 18. one tree per title under games/<id>/ (id a short [a-z0-9-] name, never
+//     an ATV 2 name: atv*, atvqpr*, quad-power*; the old single tree at the
+//     root is still accepted during the move). In each tree:
+//     latest.json is required and well formed and points at an existing
 //     v/<version>/manifest.json with that size and SHA-256; every
 //     v/<version>/manifest.json is well formed (rule 17's entry checks, url =
 //     path, version = its folder); every other file is v/<version>/<path> of
@@ -211,30 +214,53 @@ function assetsManifest(root, problems, declared, { rel = 'manifest.json', prefi
   return { files, byUrl: new Map(files.map((e) => [prefix === null ? e.url : `${prefix}${e.path}`, e])), json: m };
 }
 
-/** Rule 18: a versioned bucket tree. Returns { byUrl: tree path -> entry, extra: Set of allowed non-file paths }. */
+/** Rule 18: a versioned bucket tree: one tree per title under games/<id>/ (and,
+ *  during the move to prefixes, the old single tree at the root). Returns
+ *  { byUrl: tree path -> entry, extra: Set of allowed non-file paths }. */
+export const TITLE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+/** Prefixes that may never exist in the bucket: ATV 2 (retail-derived) by any name. */
+export const NEVER_TITLE = /^atv|atvqpr|quad-?power/i;
 function r2Tree(root, problems, declared) {
-  const byUrl = new Map(), extra = new Set(['latest.json']);
+  const byUrl = new Map(), extra = new Set();
   const bad = (file, why) => problems.push({ file, why });
-  const versions = existsSync(join(root, 'v')) ? readdirSync(join(root, 'v')) : [];
-  if (!versions.length) bad('v/', 'no versions');
+  const trees = [];
+  if (existsSync(join(root, 'games'))) {
+    for (const id of readdirSync(join(root, 'games'))) {
+      if (!TITLE_ID.test(id)) { bad(`games/${id}`, 'title folder name must be a short [a-z0-9-] id'); continue; }
+      if (NEVER_TITLE.test(id)) { bad(`games/${id}`, 'an ATV 2 prefix: ATV 2 is derived from the retail game and is never in the bucket'); continue; }
+      trees.push({ pre: `games/${id}/`, id });
+    }
+  }
+  if (existsSync(join(root, 'latest.json')) || existsSync(join(root, 'v'))) trees.push({ pre: '', id: null });
+  if (!trees.length) bad('games/', 'no titles');
+  for (const t of trees) r2Title(root, t, problems, declared, byUrl, extra);
+  return { byUrl, extra };
+}
+function r2Title(root, { pre, id }, problems, declared, byUrl, extra) {
+  const bad = (file, why) => problems.push({ file, why });
+  extra.add(`${pre}latest.json`);
+  const versions = existsSync(join(root, pre, 'v')) ? readdirSync(join(root, pre, 'v')) : [];
+  if (!versions.length) bad(`${pre}v/`, 'no versions');
   for (const v of versions) {
-    const rel = `v/${v}/manifest.json`;
-    if (!/^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{12}$/.test(v)) bad(`v/${v}`, 'version folder name must be <N.N.N>-<12 hex>');
+    const rel = `${pre}v/${v}/manifest.json`;
+    if (!/^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{12}$/.test(v)) bad(`${pre}v/${v}`, 'version folder name must be <N.N.N>-<12 hex>');
     extra.add(rel);
-    const m = assetsManifest(root, problems, declared, { rel, prefix: `v/${v}/` });
+    const m = assetsManifest(root, problems, declared, { rel, prefix: `${pre}v/${v}/` });
     if (m.json && m.json.version !== v) bad(rel, `version ${m.json.version} differs from its folder ${v}`);
+    if (m.json && id && m.json.title !== id) bad(rel, `title ${m.json.title} differs from its prefix games/${id}/`);
     for (const [k, e] of m.byUrl) byUrl.set(k, e);
   }
   let latest;
-  try { latest = JSON.parse(readFileSync(join(root, 'latest.json'), 'utf8')); } catch (e) { bad('latest.json', `missing or unreadable (${e.message})`); return { byUrl, extra }; }
+  const lrel = `${pre}latest.json`;
+  try { latest = JSON.parse(readFileSync(join(root, lrel), 'utf8')); } catch (e) { bad(lrel, `missing or unreadable (${e.message})`); return; }
   if (latest.format !== 'delivery-latest/1' || typeof latest.version !== 'string' || latest.manifest !== `v/${latest.version}/manifest.json` || !HEX64.test(latest.sha256 ?? ''))
-    bad('latest.json', 'not a version pointer ({ format: delivery-latest/1, version, manifest: v/<version>/manifest.json, sha256, size })');
-  else if (!existsSync(join(root, latest.manifest))) bad('latest.json', `points at ${latest.manifest}, which is not in the tree`);
+    bad(lrel, 'not a version pointer ({ format: delivery-latest/1, version, manifest: v/<version>/manifest.json, sha256, size })');
+  else if (!existsSync(join(root, pre, latest.manifest))) bad(lrel, `points at ${latest.manifest}, which is not in the tree`);
   else {
-    const body = readFileSync(join(root, latest.manifest));
-    if (sha256(body) !== latest.sha256 || body.length !== latest.size) bad('latest.json', `size/SHA-256 differ from ${latest.manifest}`);
+    const body = readFileSync(join(root, pre, latest.manifest));
+    if (sha256(body) !== latest.sha256 || body.length !== latest.size) bad(lrel, `size/SHA-256 differ from ${latest.manifest}`);
   }
-  return { byUrl, extra };
+  if (id && latest?.title !== undefined && latest.title !== id) bad(lrel, `title ${latest.title} differs from its prefix games/${id}/`);
 }
 
 function head(file, at, n) {

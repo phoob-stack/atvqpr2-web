@@ -1,4 +1,4 @@
-// Written by the site's tools/sync-delivery.mjs from delivery 4d9e3bb client/sw.js (do not edit).
+// Written by the site's tools/sync-delivery.mjs from delivery d85eda5 client/sw.js (do not edit).
 // sw.js - the launcher shell offline: the page and its code, cache-first.
 // The pipeline fills in SHELL (every shell file with its hash) and VERSION
 // (their combined hash), so a new release means a new sw.js, which the
@@ -6,8 +6,8 @@
 // Assets are NOT cached here: they live in OPFS (asset-worker.js), and every
 // request outside the shell (the manifest, objects, the hub) goes to the
 // network untouched.
-const VERSION = "2c614fcd18c37828";
-const SHELL = ["index.html","runner.js","app/title.js","app/hub.js","lib/assets.js","lib/asset-worker.js","lib/launcher.js","lib/sha256.js","../js/common.js","../js/config-model.js","../js/keymap.js","../css/site.css"];       // ['index.html', 'client/assets.js', ...] relative to this file
+const VERSION = "e68f9d2d4a6493a7";
+const SHELL = ["index.html","runner.js","lib/assets.js","lib/asset-worker.js","lib/launcher.js","lib/sha256.js","lib/profile.js","../js/common.js","../js/config-model.js","../js/keymap.js","../css/site.css","app/hub.js","app/orbit.js","app/title.js","profiles/boxquad.json","profiles/index.json","profiles/orbit.json"];       // ['index.html', 'client/assets.js', ...] relative to this file
 const CACHE = `delivery-shell-${VERSION}`;
 const scope = new URL(self.registration.scope);
 const shellUrls = new Set(SHELL.map((p) => new URL(p, scope).href));

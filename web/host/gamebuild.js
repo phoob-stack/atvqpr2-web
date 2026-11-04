@@ -16,12 +16,11 @@
 // checked when picked and again at every start (a newer site may need a newer
 // build).
 import { DEPLOY } from './deploy.js';
-import { memoryImportLimits } from './wasm-load.js';
 
+/** Where an earlier version of this page kept the build (migrated by assetsource.js); kept for the Game data names. */
 export const BUILD_DIR = 'atv2-build';
 export const WASM_NAME = 'atv2.wasm';
 export const MANIFEST_NAME = 'atv2-build.json';
-const RECORD = '.build.json';
 /** Top-level files of a play folder that are the build, not game files. */
 export const BUILD_FILES = /^(atv2\.wasm|atv2-build\.json|atv2-play\.txt)$/i;
 
@@ -73,64 +72,24 @@ export async function checkBuild(entries) {
   return { bytes, sha256, size: bytes.byteLength, manifest, match };
 }
 
-async function buildDir(create = false) {
-  return (await navigator.storage.getDirectory()).getDirectoryHandle(BUILD_DIR, { create });
-}
-
-/** Keep a checked build (checkBuild's result) in OPFS. */
-export async function storeBuild(b) {
-  const dir = await buildDir(true);
-  try { await dir.removeEntry(RECORD); } catch { /* none yet */ }
-  const w = await (await dir.getFileHandle(WASM_NAME, { create: true })).createWritable();
-  try { await w.write(b.bytes); await w.close(); } catch (e) { await w.abort().catch(() => {}); throw e; }
-  const rec = { version: 1, sha256: b.sha256, size: b.size, builder: b.match.builder, atvrecomp: b.match.atvrecomp,
-    xboxrecomp: b.match.xboxrecomp, manifest: b.manifest, storedAt: Date.now() };
-  const r = await (await dir.getFileHandle(RECORD, { create: true })).createWritable();
-  await r.write(JSON.stringify(rec)); await r.close();
-  return rec;
-}
-
 /**
  * The build kept in this browser: null when there is none, else
  * { ...record, ok } (ok false: kept for an earlier version of this page).
  */
 export async function storedBuild() {
-  try {
-    const dir = await buildDir();
-    const rec = JSON.parse(await (await (await dir.getFileHandle(RECORD)).getFile()).text());
-    const f = await (await dir.getFileHandle(WASM_NAME)).getFile();
-    return { ...rec, ok: f.size === rec.size && !!matchBuild(rec.size, rec.sha256) };
-  } catch { return null; }
+  const { localSource } = await import('./assetsource.js');
+  const src = await localSource();
+  const cat = await src.catalog().catch(() => null);
+  return cat ? src.buildOf(cat) : null;
 }
 
 export const STALE_TEXT = () => `The game build kept in this browser was made for another version of this site. ${rebuild()}`;
 
 /**
  * The kept module, the way wasm-load.js's loadWasm(url) gives a served one:
- * { module, limits, info() }. The bytes are hashed again (21 MB, a few tens
- * of ms) so that only a listed build ever runs, then compiled once; the
- * Module goes to every Worker by postMessage (threads.js).
+ * { module, limits, info() }, from the asset source (assetsource.js
+ * LocalImportSource.module(): the bytes are hashed again so that only a
+ * listed build ever runs, then compiled once; the Module goes to every
+ * Worker by postMessage, threads.js).
  */
-export function loadStoredWasm() {
-  const t0 = performance.now();
-  const info = { mode: 'from this browser\'s storage (OPFS)', ms: 0, bytes: 0, transfer: null, cache: 'OPFS' };
-  const bytes = (async () => {
-    const dir = await buildDir();
-    const rec = JSON.parse(await (await (await dir.getFileHandle(RECORD)).getFile()).text());
-    const buf = await (await (await dir.getFileHandle(WASM_NAME)).getFile()).arrayBuffer();
-    const sha = hex(await crypto.subtle.digest('SHA-256', buf));
-    if (sha !== rec.sha256 || !matchBuild(buf.byteLength, sha)) throw new BuildError('mismatch', STALE_TEXT());
-    info.bytes = buf.byteLength;
-    info.hashMs = performance.now() - t0;
-    return buf;
-  })();
-  const module = bytes.then((b) => WebAssembly.compile(b)).then((m) => { info.ms = performance.now() - t0; return m; });
-  const limits = bytes.then((b) => ({ ...memoryImportLimits(b), from: 'module' }));
-  module.catch(() => {}); limits.catch(() => {});
-  return { module, limits, info: () => info };
-}
-
-export async function forgetBuild() {
-  try { await (await navigator.storage.getDirectory()).removeEntry(BUILD_DIR, { recursive: true }); return true; }
-  catch (e) { if (e.name === 'NotFoundError') return false; throw e; }
-}
+export function loadStoredWasm(source) { return source.module(); }

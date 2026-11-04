@@ -25,12 +25,19 @@
 //
 // [siteplay] On the project site (deploy.js mode 'site', /play/host/) nothing
 // comes from a server but this page's code: the module is the player's own
-// build, kept in OPFS with the game files (gamebuild.js loadStoredWasm, read
+// build, kept in OPFS with the game files (the asset source's module(), read
 // once the game files are known to be there), and there is no /log, /data/ or
 // /wasm/pipelines.json to ask for. ?wasm= is ignored there.
+//
+// [assetsrc] Whatever the game comes from, it is one asset source
+// (assetsource.js: the player's import in the shared delivery store, or the
+// dev server's /data/), chosen by loader.js; the source hands over the module
+// (module()) and what the I/O worker mounts (ioGame()), and the same start-up
+// runs after that: memory, thread Workers, WASI and the I/O worker, GPU,
+// audio, input, saves, roam.
 import { Host, hostView, stageName } from './abi.js';
 import { SITE } from './deploy.js';
-import { loadStoredWasm, BuildError } from './gamebuild.js';
+import { BuildError } from './gamebuild.js';
 import { Presenter } from './present.js';
 import { Input } from './input.js';
 import { requestDevice } from '../gpu/layout.js';
@@ -126,7 +133,7 @@ async function boot() {
     : ((w) => (w.includes('/') ? w : `/wasm/${w}`))(q.get('wasm') ?? 'atv2.wasm');
   // The module downloads and compiles while the GPU and the game files are
   // set up (and while the player picks the game folder, the first time).
-  // [siteplay] On the site it is read from OPFS once the game is there (makeMemory).
+  // [siteplay] On the site it comes from the asset source once the game is there (makeMemory).
   let wasm = SITE ? null : loadWasm(wasmUrl);
   const args = ['atv2', ...(q.get('args') ?? '').split(',').filter(Boolean)];
   const env = { ...DEFAULT_ENV };
@@ -206,16 +213,21 @@ async function boot() {
   const host = { io };
   // Returns { mem: Promise<{ module, memory }>, pool: Promise<WasmThreads|null>,
   // io: Promise<Worker> (the I/O worker, ready) }.
-  const startThreads = (game) => {
-    const mem = makeMemory(game);
+  const startThreads = (source) => {
+    const mem = makeMemory(source);
     const pool = mem.then(startPool);
-    const io = mem.then(({ memory }) => startIo(memory, game));
+    const io = mem.then(({ memory }) => startIo(memory, source));
     for (const p of [mem, pool, io]) p.catch(() => {});
     return { mem, pool, io, stop: () => { pool.then((wt) => wt?.terminate(), () => {}); io.then((w) => w.terminate(), () => {}); } };
   };
   // The I/O worker: it owns the files and the fd table every thread uses.
   // It starts while the thread Workers instantiate and must be up before _start.
-  const startIo = (memory, game) => new Promise((resolve, reject) => {
+  // The game files are mounted only once the source's check of them (status()) says they are all there and good.
+  const startIo = (memory, source) => source.status().then((st) => {
+    if (!st.ready) throw new Error(`the stored game files are not ready (${st.reason})`);
+    return startIoWorker(memory, source);
+  });
+  const startIoWorker = (memory, source) => new Promise((resolve, reject) => {
     const ioWorker = new Worker(new URL('./io-worker.js', import.meta.url), { type: 'module', name: 'io' });
     ioWorker.onmessage = ({ data: m }) => {
       if (m.type === 'ready') { log(`[page] ${m.note}`); mark('ioReady'); resolve(ioWorker); }
@@ -225,12 +237,13 @@ async function boot() {
       else if (m.type === 'saves') saves.apply(m.ops);
     };
     ioWorker.postMessage({ type: 'init', memory, io, traceWasi: q.get('trace') === '1', saves: saves.mode,
-      game: game.source === 'opfs' ? { source: 'opfs', dir: game.dir } : { source: 'server', base: game.base } });
+      game: source.ioGame() });
   });
-  const makeMemory = async (game) => {
-    if (game.manifest?.skipMovies && !('RECOMP_SKIP_MOVIES' in env)) env.RECOMP_SKIP_MOVIES = '1';
+  const makeMemory = async (source) => {
+    wasm ??= source.module(wasmUrl);          // read, hashed and compiled while the stored files are checked
+    // The memory and the thread Workers do not wait for that check: only the I/O worker's mount does (startIo).
+    if ((await source.meta?.())?.skipMovies && !('RECOMP_SKIP_MOVIES' in env)) env.RECOMP_SKIP_MOVIES = '1';
     let module;
-    wasm ??= loadStoredWasm();
     try { module = await wasm.module; } catch (e) {
       if (e instanceof BuildError)
         throw fail('Your game build does not match this page', [{ what: e.message,
@@ -242,6 +255,7 @@ async function boot() {
         : 'Is the local server still running?' }], e.message, 'Could not load:');
     }
     mark('wasmCompiled');
+    if (wasm.info().hashMs) timings.wasmHashed = Math.round(wasm.info().hashMs);
     const lim = await wasm.limits;
     if (!lim?.shared) throw new Error('the module does not import a shared memory');
     let memory;
@@ -276,6 +290,13 @@ async function boot() {
   };
   // Already imported (or the dev server's /data/): the threads start now.
   const early = await peekGame(q).catch(() => null);
+  mark('peek');
+  // The stored files' check (assetsource.js status()), timed for the log and web/tools/loadtime.mjs.
+  early?.status?.().then((st) => {
+    mark('verified');
+    if (st.verify) log(`[page] stored files checked: ${st.verify.ok} by their marks in ${st.verify.ms} ms` +
+      `${st.verify.hashedBytes ? ` (${(st.verify.hashedBytes / 1048576).toFixed(0)} MB hashed again: marks did not match)` : ''}`);
+  }, () => {});
   let threadsP = early ? startThreads(early) : null;
   let gpu;
   try { gpu = await gpuP; } catch (e) { threadsP?.stop(); throw e; }
@@ -284,8 +305,10 @@ async function boot() {
   // is none yet), or the dev server's /data/.
   const game = await prepareGame({ q, log });
   mark('game');
-  if (early && (early.source !== game.source || early.dir !== game.dir || early.base !== game.base)) {
-    // Changed in between (should not happen): start over with what prepareGame found.
+  // Changed in between, or the early start found the stored files not ready (its I/O worker refused to mount
+  // them; the import panel ran): start over.
+  if (early && (early.id !== game.id || await threadsP.io.then(() => false, () => true))) {
+    if (SITE) wasm = null;
     threadsP.stop();
     threadsP = null;
   }

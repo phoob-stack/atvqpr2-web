@@ -3,7 +3,7 @@
 export const DEPLOY = {
   "mode": "site",
   "host": {
-    "atvrecomp": "00e0aa98f0e4360b83ab80c9188819e346bb3ffd"
+    "atvrecomp": "c6acf14715bd4e44f8f89722a96f9f0bdd9f0ea4"
   },
   "builds": [
     {

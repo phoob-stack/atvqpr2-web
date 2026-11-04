@@ -1,0 +1,30 @@
+{
+ "comment": "Written by web/tools/sync-delivery.mjs from the delivery repository (client/). Do not edit these files by hand.",
+ "delivery": "ea1806ead33035cac46dd0c46ad392d0c2152223",
+ "files": [
+  {
+   "path": "assets.js",
+   "from": "client/assets.js",
+   "size": 32638,
+   "sha256": "49fe9f8ac809b47fbc5cd846d24b2d2bc8b737c315bae05c3fb9b1c9ab49e710"
+  },
+  {
+   "path": "asset-worker.js",
+   "from": "client/asset-worker.js",
+   "size": 27936,
+   "sha256": "8c85ededba251ffaa9fc1c544c978693f2b8dffde6b529eed7ef4ff1fc6ff3ea"
+  },
+  {
+   "path": "sha256.js",
+   "from": "client/sha256.js",
+   "size": 5210,
+   "sha256": "f80e34a3ed588437f3b6564a56248d7f1f3f21764cd70c1de6d8602c6273f0b5"
+  },
+  {
+   "path": "profile.js",
+   "from": "client/profile.js",
+   "size": 10353,
+   "sha256": "eb59f5ad1520cd5bf7f48b9258568c23406737407b7719656656a1e98feb33cc"
+  }
+ ]
+}
