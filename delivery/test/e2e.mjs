@@ -31,7 +31,7 @@ const T = join(ROOT, '.test');
 const E = join(T, 'e2e');
 const OUT = join(E, 'out');
 const SHOTS = join(E, 'shots');
-const PROFILE = join(T, 'edge-profile');
+const PROFILE = process.argv.includes('--profile') ? resolve(process.argv[process.argv.indexOf('--profile') + 1]) : join(T, 'edge-profile');
 const argv = process.argv.slice(2);
 const only = argv.includes('--only') ? new Set(argv[argv.indexOf('--only') + 1].split(',')) : null;
 const want = (s) => !only || only.has(s);

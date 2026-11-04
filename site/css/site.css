@@ -85,6 +85,12 @@ h3 { font-weight: 600; font-size: 15px; line-height: 1.4; margin: 0 0 6px; }
 .play-msg { margin: 6px 0; overflow-wrap: anywhere; }
 .play-action label { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
 .steps { padding-left: 22px; margin: 8px 0; }
+.play-src { margin: 10px 0 4px; }
+.play-test { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 6px; }
+.play-test .row { margin: 6px 0 0; }
+.tt canvas { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel2); margin: 12px 0 6px; }
+.tt pre { white-space: pre-wrap; margin: 0; }
+.tt-files { margin: 6px 0; padding-left: 20px; }
 .steps li { margin: 4px 0; }
 
 /* ---- cards and blocks --------------------------------------------------------------- */

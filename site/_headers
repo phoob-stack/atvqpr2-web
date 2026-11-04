@@ -1,5 +1,5 @@
 /*
-  Content-Security-Policy: default-src 'none'; script-src 'self' 'sha256-c/DujqC+zoqel3UnuU9HNVVpO3cfOfzKKrwJhoWmzlA=' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://hub.atvqpr2.com wss://hub.atvqpr2.com; worker-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'sha256-c/DujqC+zoqel3UnuU9HNVVpO3cfOfzKKrwJhoWmzlA=' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://hub.atvqpr2.com wss://hub.atvqpr2.com https://assets.atvqpr2.com; worker-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: no-referrer

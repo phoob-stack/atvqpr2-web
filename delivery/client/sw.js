@@ -11,10 +11,21 @@ const CACHE = `delivery-shell-${VERSION}`;
 const scope = new URL(self.registration.scope);
 const shellUrls = new Set(SHELL.map((p) => new URL(p, scope).href));
 
+// A response that followed a redirect (hosts that serve /dir/index.html as a redirect to /dir/) may not
+// answer a navigation: the browser shows an error page. Keep and serve a plain copy of its body instead.
+const plain = async (res) => (res.redirected
+  ? new Response(await res.blob(), { status: res.status, statusText: res.statusText, headers: res.headers })
+  : res);
+
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
     const c = await caches.open(CACHE);
-    await c.addAll(SHELL.map((p) => new Request(new URL(p, scope).href, { cache: 'no-cache' })));
+    await Promise.all(SHELL.map(async (p) => {
+      const url = new URL(p, scope).href;
+      const res = await fetch(new Request(url, { cache: 'no-cache' }));
+      if (!res.ok) throw new Error(`shell file ${p}: HTTP ${res.status}`);
+      await c.put(url, await plain(res));
+    }));
     await self.skipWaiting();
   })());
 });
@@ -37,8 +48,8 @@ self.addEventListener('fetch', (e) => {
   e.respondWith((async () => {
     const c = await caches.open(CACHE);
     const hit = await c.match(key);
-    if (hit) return hit;
-    const res = await fetch(req);
+    if (hit) return plain(hit);
+    const res = await plain(await fetch(req));
     if (res.ok) c.put(key, res.clone());
     return res;
   })());

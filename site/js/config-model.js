@@ -62,6 +62,11 @@ export const SETTINGS = [
   { key: 'roam_server', section: 'online', label: 'Free roam server', type: 'text', def: 'wss://hub.atvqpr2.com/room/freeride', max: 200, siteOnly: true,
     check: /^wss:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._~\/-]*)?$/, checkText: 'a wss:// address',
     help: 'The online free roam server. Leave it as it is.' },
+  // The test title (our own placeholder, not ATV 2): where its files stream from. The only place this address is written;
+  // resolveAssetBase() below picks it (or, on a local copy of the site only, ?assets=).
+  { key: 'assets_base', section: 'test', label: 'Test title file server', type: 'text', def: 'https://assets.atvqpr2.com', max: 200, siteOnly: true,
+    check: /^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._~\/-]*)?$/, checkText: 'an https:// address',
+    help: 'Where the test title (Box Quad, not ATV 2) is streamed from. Leave it as it is.' },
   { key: 'show_status', section: 'page', label: 'Status bar and log under the game', type: 'bool', def: false, page: true,
     help: 'For testing. F2 toggles it while playing.' },
   { key: 'extra_env', section: 'advanced', label: 'Extra environment', type: 'env', def: '',
@@ -71,7 +76,7 @@ for (const a of ACTIONS) SETTINGS.push({ key: `key_${a.id}`, section: 'controls'
 for (const c of PAD_CONTROLS) SETTINGS.push({ key: `pad_${c.id}`, section: 'gamepad', label: c.label, type: 'pad', def: String(c.button), control: c.id });
 
 export const BY_KEY = Object.fromEntries(SETTINGS.map((s) => [s.key, s]));
-export const SECTIONS = { display: 'Display', audio: 'Audio and movies', game: 'Game', online: 'Online free roam', page: 'Page', advanced: 'Advanced',
+export const SECTIONS = { display: 'Display', audio: 'Audio and movies', game: 'Game', online: 'Online free roam', test: 'Test title', page: 'Page', advanced: 'Advanced',
   controls: 'Keyboard', gamepad: 'Gamepad' };
 export const RESERVED_CODES = new Set(['F1', 'F2', 'F5', 'F11', 'F12']);
 
@@ -127,6 +132,30 @@ export function parseValue(s, text) {
 }
 export const showValue = (s, v) => (s.type === 'bool' ? bool.show(v) : String(v));
 export const defaults = () => Object.fromEntries(SETTINGS.map((s) => [s.key, s.def]));
+
+// ---- the test title's file server ---------------------------------------------------
+
+export const LOCAL_HOSTS = /^(localhost|127\.0\.0\.1|\[::1\])$/;
+/**
+ * The base URL the test title streams from: the assets_base setting (default
+ * https://assets.atvqpr2.com); on a local copy of the site only (the page's
+ * host is localhost, 127.0.0.1 or [::1]), ?assets=<http(s) URL> overrides it
+ * for tests. href: the page's address. Returns { base, from, ignored }.
+ */
+export function resolveAssetBase(values, href) {
+  const u = new URL(href);
+  const q = u.searchParams.get('assets');
+  const local = LOCAL_HOSTS.test(u.hostname);
+  if (q && local) {
+    try {
+      const a = new URL(q);
+      if (/^https?:$/.test(a.protocol) && !a.search && !a.hash && !a.username) return { base: a.href.replace(/\/$/, ''), from: 'address (?assets=, local copy only)', ignored: null };
+    } catch { /* not a URL: fall through */ }
+  }
+  const def = BY_KEY.assets_base.def;
+  const v = values?.assets_base || def;
+  return { base: v.replace(/\/$/, ''), from: v === def ? 'default' : 'setting', ignored: q && !local ? q : null };
+}
 
 // ---- storage (this site's own origin) -------------------------------------------
 

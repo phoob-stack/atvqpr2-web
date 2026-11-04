@@ -1,6 +1,8 @@
 // Shared by every page: the theme switch, a tiny DOM helper, downloads, and the
-// Play panel (select the local game files, then play in this site's game page).
-import { LOCAL_PAGE } from './config-model.js';
+// Play panel with its two content sources: ATV 2 (select the local game files,
+// then play in this site's game page) and the test title (streamed from the
+// asset server, played on its own page, test-title/).
+import { LOCAL_PAGE, loadConfig, resolveAssetBase } from './config-model.js';
 
 export const $ = (id) => document.getElementById(id);
 
@@ -50,6 +52,15 @@ export function download(name, data, type = 'application/json') {
 
 // ---- the Play panel -----------------------------------------------------------------
 //
+// Two content sources, one panel:
+//   ATV 2       "Select local game files" (below). Always the player's own files;
+//               nothing of the game is ever downloaded from this site.
+//   Test title  Box Quad, our own placeholder (not ATV 2), streamed from the asset
+//               server (setting assets_base, default https://assets.atvqpr2.com) by
+//               the delivery client (test-title/lib/) into OPFS; it runs on
+//               test-title/. The panel shows what this browser keeps of it, with
+//               no network request.
+//
 // The game runs in this site's own game page (play/host/, a copy of the local
 // build's page made by tools/sync-play.mjs), from files on the player's own
 // computer: the play folder their builder made (the game files plus the
@@ -63,10 +74,13 @@ export function download(name, data, type = 'application/json') {
 // pages never load them.
 
 const PLAY_PAGE = 'play/host/';
+export const TEST_TITLE_PAGE = 'test-title/';
+export const TEST_TITLE_NS = 'boxquad';       // the OPFS namespace of the test title (delivery/boxquad)
 const MBs = (n) => `${(n / 1048576).toFixed(0)} MB`;
 
 export function playBoxMarkup() {
   return `<h2>Play</h2>
+    <h3 class="play-src" data-source="atv2">ATV 2 <span class="small muted">· from your own files</span></h3>
     <p class="small">Runs in this page from the play folder the builder made from your disc. Nothing is downloaded or uploaded.</p>
     <div class="play-state" role="status" aria-live="polite" data-state="checking">Looking in this browser's storage…</div>
     <div class="play-action"></div>
@@ -81,7 +95,41 @@ export function playBoxMarkup() {
       </ol>
       <p class="small"><a href="setup.html#builder">Full setup guide</a></p>
     </div>
-    <p class="small muted play-pc">Running the PC launcher instead? <a class="play-local" href="${LOCAL_PAGE}" target="_blank" rel="noopener">Open http://127.0.0.1:8460</a></p>`;
+    <p class="small muted play-pc">Running the PC launcher instead? <a class="play-local" href="${LOCAL_PAGE}" target="_blank" rel="noopener">Open http://127.0.0.1:8460</a></p>
+    <div class="play-test" data-source="test">
+      <h3 class="play-src">Test title <span class="small muted">· streamed from <span class="test-host">the asset server</span></span></h3>
+      <p class="small">Box Quad, our own small placeholder title for testing downloads and offline play. It is not ATV 2 and holds nothing from the game.</p>
+      <div class="test-state small muted" role="status" aria-live="polite" data-state="checking">Looking in this browser's storage…</div>
+      <div class="row"><a class="btn ghost" id="test-play" href="${TEST_TITLE_PAGE}">Play the test title</a></div>
+    </div>`;
+}
+
+/** The test title's part of the panel: its server, and what this browser keeps of it (no network). */
+async function initTestSource(box) {
+  const el = box.querySelector('.play-test');
+  if (!el) return;
+  const st = el.querySelector('.test-state');
+  const show = (state, text) => { st.dataset.state = state; st.textContent = text; };
+  const src = resolveAssetBase(loadConfig().values, location.href);
+  el.querySelector('.test-host').textContent = new URL(src.base).host;
+  // a local copy of the site passes its ?assets= on to the test title's page
+  if (src.from.startsWith('address')) el.querySelector('#test-play').href = `${TEST_TITLE_PAGE}?assets=${encodeURIComponent(src.base)}`;
+  if (!navigator.storage?.getDirectory) { show('unsupported', 'This browser has no file storage for sites (OPFS), which the test title needs.'); return; }
+  let m = null;
+  try {
+    const { AssetManager } = await import('../test-title/lib/assets.js');
+    const storedOnly = { kind: 'http', async catalog(store) { const c = await store.loadCatalog(); if (!c) throw new Error('none'); return { catalog: c, offline: true }; } };
+    m = new AssetManager({ ns: TEST_TITLE_NS, backend: storedOnly });
+    let cat = null;
+    try { cat = await m.open(); } catch { /* nothing kept yet */ }
+    if (!cat) { show('none', 'Not in this browser yet: the first start downloads it (about 7 MB).'); return; }
+    const s = await m.status();
+    const req = cat.files.filter((f) => f.required);
+    const reqOk = (await Promise.all(req.map((f) => m.isStored(f.path)))).every(Boolean);
+    show(reqOk ? 'ready' : 'partial', `Kept in this browser: version ${s.version}, ${s.stored} of ${s.stored + s.missing} files (${(s.storedBytes / 1048576).toFixed(1)} MB).` +
+      (reqOk ? ' It starts without downloading, also offline.' : ' The rest is downloaded when it starts.'));
+  } catch (e) { show('error', `The test title's files could not be checked (${e.message}).`); }
+  finally { m?.close(); }
 }
 
 /** Fill a .playbox element (playBoxMarkup). opts.launchUrl: the PC launcher link (default: its start page). */
@@ -197,6 +245,7 @@ export function initPlayBox(box, opts = {}) {
   }
 
   refresh();
+  initTestSource(box);
   return { refresh };
 }
 

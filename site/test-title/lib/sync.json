@@ -1,0 +1,65 @@
+{
+ "comment": "Written by tools/sync-delivery.mjs: the delivery client and the test title page code, copied from the delivery repository.",
+ "delivery": "4d9e3bb61d8976e535d1e1b21c5153883ee59562",
+ "shell": {
+  "version": "2c614fcd18c37828",
+  "files": [
+   "index.html",
+   "runner.js",
+   "app/title.js",
+   "app/hub.js",
+   "lib/assets.js",
+   "lib/asset-worker.js",
+   "lib/launcher.js",
+   "lib/sha256.js",
+   "../js/common.js",
+   "../js/config-model.js",
+   "../js/keymap.js",
+   "../css/site.css"
+  ]
+ },
+ "files": [
+  {
+   "path": "test-title/app/hub.js",
+   "from": "web/app/hub.js",
+   "size": 3206,
+   "sha256": "a58c03abe6746ebd240df1914448f8d49a9e07a3560e67cc5ba724cf745d86ec"
+  },
+  {
+   "path": "test-title/app/title.js",
+   "from": "web/app/title.js",
+   "size": 9422,
+   "sha256": "de9e1850da14b8b719d16c80702f3125772a8b911bd5d6892c1b80d5fd8dd86f"
+  },
+  {
+   "path": "test-title/lib/asset-worker.js",
+   "from": "client/asset-worker.js",
+   "size": 24122,
+   "sha256": "41518a6eac4df60d24920da2817b0d005e1fd1a2c83cfb1d9df6f4cdc4cde816"
+  },
+  {
+   "path": "test-title/lib/assets.js",
+   "from": "client/assets.js",
+   "size": 26234,
+   "sha256": "e7a365902f2be67f597442f3d0d795bb785619c7c1146c005dc8c193d91d2b91"
+  },
+  {
+   "path": "test-title/lib/launcher.js",
+   "from": "client/launcher.js",
+   "size": 5846,
+   "sha256": "c919ca427f1137b8b72688969be4770639d74ca19ee25310770cd2c164ef0000"
+  },
+  {
+   "path": "test-title/lib/sha256.js",
+   "from": "client/sha256.js",
+   "size": 5210,
+   "sha256": "f80e34a3ed588437f3b6564a56248d7f1f3f21764cd70c1de6d8602c6273f0b5"
+  },
+  {
+   "path": "test-title/sw.js",
+   "from": "client/sw.js",
+   "size": 2768,
+   "sha256": "046423a6ca95b50fe4e67a1df1b3659edb25b0689e8a634b03773407225a8b35"
+  }
+ ]
+}

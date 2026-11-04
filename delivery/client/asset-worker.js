@@ -216,10 +216,13 @@ async function download(dir, msg, post, cachedBad) {
       if (res.status === 416) { stat.lastError = 'HTTP 416'; await restartFromZero(); continue; }
       if (res.status === 200) {
         if (offset > 0) await restartFromZero();                 // the server sent the whole file (no range, or If-Range did not match)
-        meta = { etag: res.headers.get('etag') };
+        // An ETag is a validator for ranges only if it names the identity bytes: a compressed answer
+        // (Content-Length is not the file's size) has its own ETag, which If-Range would never match.
+        meta = { etag: Number(res.headers.get('content-length')) === size ? res.headers.get('etag') : null };
       } else if (res.status === 206) {
         const cr = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(res.headers.get('content-range') ?? '');
         if (!cr || Number(cr[1]) !== offset || Number(cr[3]) !== size) { stat.lastError = `bad Content-Range ${res.headers.get('content-range')}`; await restartFromZero(); continue; }
+        if (!meta.etag) meta = { etag: res.headers.get('etag') };   // a range is always identity bytes
       } else throw new Fail('http', `${entry.path}: HTTP ${res.status} from ${url}`);
       stat.ranges.push(offset);
       const reader = res.body.getReader();
@@ -297,8 +300,9 @@ async function verify(msg) {
  * Start-up clean-up of the blobs folder against the current catalog:
  * - a .part of a file not in the catalog, of a file without a chunk list (its
  *   bytes cannot be checked before the end, and it is small), or longer than
- *   the file: deleted; a chunked .part is checked chunk by chunk and cut back
- *   to its last good chunk (resumed later);
+ *   the file: deleted; a chunked .part has its complete chunks checked and is
+ *   cut back before the first bad one (an unfinished last chunk stays: the
+ *   resumed download checks it when it completes it);
  * - .part.json without its .part, .ok without its blob, browser swap files
  *   (*.crswap) left by a crash, unknown names, and the old partial/ folder: deleted.
  * Files another tab is downloading (held lock) are left alone.
@@ -331,21 +335,22 @@ async function scrub(msg) {
         out.removed.push(`${n} (${!e ? 'not in the catalog' : has.has(sha) ? 'the file is already stored' : !chunked ? 'not checkable before its end' : 'bad length'})`);
         return;
       }
-      let good = 0;
+      // every complete chunk is checked; the first bad one and everything after it goes.
+      // An unfinished last chunk is kept: it is checked when the resumed download completes it.
+      let good = 0, bad = false;
       const complete = f.size === e.size ? e.chunks.length : Math.floor(f.size / e.chunkSize);
       for (let k = 0; k < complete; k++) {
         const buf = await f.slice(k * e.chunkSize, Math.min(e.size, (k + 1) * e.chunkSize)).arrayBuffer();
-        if (await digest(buf) !== e.chunks[k]) break;
+        if (await digest(buf) !== e.chunks[k]) { bad = true; break; }
         good = Math.min(e.size, (k + 1) * e.chunkSize);
       }
-      if (good < f.size) {
-        // cut back to the last good chunk boundary (an unfinished last chunk is re-fetched with the rest)
-        if (good === 0) { await remove(dir, n); await remove(dir, `${sha}.part.json`); out.removed.push(`${n} (no good chunk)`); return; }
+      if (bad) {
+        if (good === 0) { await remove(dir, n); await remove(dir, `${sha}.part.json`); out.removed.push(`${n} (its first chunk is bad)`); return; }
         const w = await (await dir.getFileHandle(n)).createWritable({ keepExistingData: true });
         await w.truncate(good); await w.close();
         out.truncated.push({ name: n, from: f.size, to: good });
       }
-      out.kept.push({ name: n, bytes: good });
+      out.kept.push({ name: n, bytes: bad ? good : f.size });
     }, { ifAvailable: true });
   }
   return out;

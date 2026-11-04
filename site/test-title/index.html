@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test title · ATV 2 Port</title>
+<meta name="description" content="Box Quad, the project's own small test title (not ATV 2): streamed from the asset server, checked, kept in this browser and playable offline.">
+<link rel="stylesheet" href="../css/site.css">
+<script>try{var t=localStorage.getItem('atv2.site.theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="../index.html" aria-label="ATV 2 port: home">
+    <span class="name"><b>ATV 2</b><small>PC &amp; browser port</small></span>
+  </a>
+  <nav class="nav" aria-label="Site">
+    <a href="../index.html">Home</a><a href="../configs.html">Configs</a><a href="../stats.html">Stats</a><a href="../setup.html">Setup</a><a href="../about.html">About</a><a href="https://discord.gg/hw5rVfk4gS" rel="noopener">Discord</a>
+    <button id="theme-btn" class="theme-btn" type="button">Theme</button>
+  </nav>
+</header>
+<main id="main" class="tt">
+  <h1>Test title: Box Quad</h1>
+  <p class="small">Our own small placeholder title, made for testing how files are delivered: a box quad on a flat track. It is <strong>not ATV 2</strong> and holds nothing from the game.
+    Its files stream from <code id="tt-host">the asset server</code>, are checked (SHA-256) and kept in this browser, so later starts download nothing and also work offline.</p>
+
+  <div class="playbox" id="tt-box">
+    <div class="play-state" id="tt-state" role="status" aria-live="polite" data-state="idle">Loading the launcher…</div>
+    <progress class="play-bar" id="tt-bar" value="0" max="1" hidden aria-label="Downloading the test title"></progress>
+    <div class="play-stats small muted" id="tt-stats"></div>
+    <ul class="tt-files small muted" id="tt-files" hidden></ul>
+    <button class="play-btn" type="button" id="tt-play" disabled>Play the test title</button>
+    <div class="row">
+      <a class="btn ghost" href="../index.html">Back to ATV 2</a>
+      <button class="btn ghost" type="button" id="tt-forget">Forget the test title's files</button>
+    </div>
+    <div class="play-msg small" id="tt-msg" role="alert"></div>
+  </div>
+
+  <section id="tt-game" hidden aria-label="Test title">
+    <canvas id="tt-view" width="960" height="600"></canvas>
+    <pre id="tt-hud" class="small"></pre>
+    <p class="small muted">Arrow keys or WASD to drive. North of the start the ground turns to sand: its texture is fetched the first time you get near.</p>
+  </section>
+  <p class="small muted" id="tt-foot"></p>
+</main>
+<footer class="site">
+  <p>Unofficial fan project. ATV Quad Power Racing 2 belongs to its owners; no game content is hosted here.</p>
+  <p><a href="https://discord.gg/hw5rVfk4gS" rel="noopener">Join the Discord</a></p>
+</footer>
+<script type="module" src="runner.js"></script>
+</body>
+</html>

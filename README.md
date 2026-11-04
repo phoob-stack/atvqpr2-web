@@ -12,6 +12,12 @@ chip and USB controllers. Nothing is interpreted instruction by instruction.
 - **Browser:** WebAssembly with threads, plus WebGPU, in a current Edge or
   Chrome. Project site: https://atvqpr2.com
 
+## Community
+
+Questions, bug reports and news are on the project's Discord:
+https://discord.gg/hw5rVfk4gS. Please don't share game files or anything made
+from them there.
+
 ## The game is not included
 
 This repository contains only this project's own code. It contains no game
