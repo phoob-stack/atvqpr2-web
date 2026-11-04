@@ -7,7 +7,7 @@ are ever in it: a profile derived from retail content cannot have a remote
 source (see 4 and 5), and the gate refuses an ATV 2 prefix.
 
 ```
-games/<id>/latest.json                    no-cache                         the pointer: which version is current
+games/<id>/latest.json                    public, max-age=30               the pointer: which version is current
 games/<id>/v/<version>/manifest.json      public, max-age=31536000, immutable
 games/<id>/v/<version>/<path>             public, max-age=31536000, immutable   one object per file, by its path
 ```
@@ -106,7 +106,7 @@ cacheControl }]`, per title in upload order (files, manifest, `latest.json`).
 
 ## How a client reads it (`client/assets.js HttpBackend`)
 
-1. `GET <assets>/games/<id>/latest.json` (no-cache, CORS, no credentials);
+1. `GET <assets>/games/<id>/latest.json` (public, max-age=30, CORS, no credentials);
    offline: the catalog stored last time;
 2. same version as stored: done (no manifest request); else
    `GET .../v/<version>/manifest.json` (immutable: the HTTP cache may answer),

@@ -31,7 +31,7 @@
 // title that is still in the bucket. Its manifest is read from --from (an
 // out/r2 folder that has it) or from the public URL
 // (<publicBase>/games/<id>/v/<version>/manifest.json, plain HTTPS GET),
-// checked, and games/<id>/latest.json is put again (no-cache). The file it
+// checked, and games/<id>/latest.json is put again (public, max-age=30). The file it
 // puts is written to <out>/rollback/<id>/latest.json first.
 //
 // --dry-run prints the commands and runs nothing. No credentials are read or
@@ -153,8 +153,9 @@ async function rollback(version) {
   if (!from && !argv.includes('--no-check')) {
     // every file of that version must still be there
     for (const e of m.files) {
+      // identity: Cloudflare compresses small files and then leaves out Content-Length
       const u = `${base}/${prefix}v/${version}/${e.path}`;
-      const r = await fetch(u, { method: 'HEAD', cache: 'no-store' }).catch(() => null);
+      const r = await fetch(u, { method: 'HEAD', cache: 'no-store', headers: { 'accept-encoding': 'identity' } }).catch(() => null);
       if (!r?.ok || Number(r.headers.get('content-length')) !== e.size) die(`${u} is missing or has the wrong size: not rolling back to ${version}`);
     }
   }
@@ -175,7 +176,7 @@ async function checkPublic() {
   let bad = 0;
   for (const o of plan.objects) {
     if (TITLE && o.title !== TITLE) continue;
-    const r = await fetch(`${base}/${o.key}`, { method: 'HEAD', cache: 'no-store', headers: { origin: 'https://atvqpr2.com' } }).catch((e) => ({ ok: false, status: e.message, headers: new Headers() }));
+    const r = await fetch(`${base}/${o.key}`, { method: 'HEAD', cache: 'no-store', headers: { origin: 'https://atvqpr2.com', 'accept-encoding': 'identity' } }).catch((e) => ({ ok: false, status: e.message, headers: new Headers() }));
     const h = r.headers;
     const why = [];
     if (!r.ok) why.push(`HTTP ${r.status}`);
@@ -183,7 +184,8 @@ async function checkPublic() {
       if (!o.key.endsWith('/latest.json') && Number(h.get('content-length')) !== o.size) why.push(`size ${h.get('content-length')}`);
       if (h.get('cache-control') !== o.cacheControl) why.push(`cache-control ${h.get('cache-control')}`);
       if (!String(h.get('content-type')).startsWith(o.contentType.split(';')[0])) why.push(`content-type ${h.get('content-type')}`);
-      if (h.get('access-control-allow-origin') !== 'https://atvqpr2.com') why.push(`no CORS for https://atvqpr2.com (${h.get('access-control-allow-origin')})`);
+      if (!['https://atvqpr2.com', '*'].includes(h.get('access-control-allow-origin')))   // '*': the zone's response header rule (cache-safe)
+      why.push(`no CORS for https://atvqpr2.com (${h.get('access-control-allow-origin')})`);
     }
     console.log(`${why.length ? 'FAIL' : 'ok  '} ${o.key}${why.length ? `: ${why.join(', ')}` : ''}`);
     bad += why.length ? 1 : 0;

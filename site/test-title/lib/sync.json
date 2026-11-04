@@ -1,8 +1,8 @@
 {
  "comment": "Written by tools/sync-delivery.mjs: the delivery client and the test title page code, copied from the delivery repository.",
- "delivery": "d85eda545e6777845d68fede72c3cebec6fabd10",
+ "delivery": "1dd5b322e5d458785ca8aa0e457ed6530cd9aa5a",
  "shell": {
-  "version": "e68f9d2d4a6493a7",
+  "version": "811210aef99e05d1",
   "files": [
    "index.html",
    "runner.js",
@@ -75,8 +75,8 @@
   {
    "path": "test-title/profiles/boxquad.json",
    "from": "profiles/boxquad.json",
-   "size": 761,
-   "sha256": "54750eb155ffa8bf1d6ef18ad7665189bbe009498b92fb09c58141faa444c722"
+   "size": 705,
+   "sha256": "37c45521213b62df808ea1fb2e9faf7dec9c30a28c583e3929ed65ebccd91faf"
   },
   {
    "path": "test-title/profiles/index.json",
@@ -94,7 +94,7 @@
    "path": "test-title/sw.js",
    "from": "client/sw.js",
    "size": 2868,
-   "sha256": "0b77645e70b619cd675adba3d9b2031d363b0b50eb8d7d6b6071bba815c149d1"
+   "sha256": "64c04fd2f8a58c3ba171b0b614b1568e38870e94b530fc37dd4bca5ee0a7961d"
   }
  ]
 }

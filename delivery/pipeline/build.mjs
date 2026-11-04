@@ -199,7 +199,7 @@ try {
   for (const p of titles) {
     const out = join(STAGE, '.titles', p.id);
     const { buildTitle } = await import(new URL(`file:///${join(ROOT, p.build.dir, 'build.mjs').replace(/\\/g, '/')}`).href);
-    const r = buildTitle(out, { variant: VARIANT, wasiSdk: WASI_SDK });
+    const r = buildTitle(out, { variant: VARIANT || (p.build.variant ?? 0), wasiSdk: WASI_SDK });   // the profile may fix a variant (a release's asset change)
     for (const [name, a] of Object.entries(r.artifacts)) {
       const got = sha(readFileSync(join(out, name)));
       if (got !== a.sha256) throw new Error(`${p.id}/${name}: built file and its record differ`);

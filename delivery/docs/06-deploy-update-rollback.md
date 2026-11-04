@@ -75,6 +75,6 @@ node pipeline/upload-r2.mjs --rollback 1.1.0-c230f2d0b4ba --title boxquad
 It reads that version's manifest from the bucket (or `--from <out/r2>`),
 checks every file of the version is still there (HEAD, sizes), writes
 `out/rollback/<id>/latest.json` and puts it as `games/<id>/latest.json`
-(no-cache). Clients follow on their next start (tested on the stand-in: a
+(public, max-age=30: browsers and the edge pick up a change within 30 s). Clients follow on their next start (tested on the stand-in: a
 second release picked up with only its one changed file downloaded, then the
 rollback followed with 0 file downloads).

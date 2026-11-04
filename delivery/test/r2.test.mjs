@@ -69,7 +69,7 @@ test('the pipeline writes the versioned tree and the upload plan, reproducibly',
     const mine = plan.objects.filter((o) => o.title === t.id);
     assert.ok(mine.every((o) => o.key.startsWith(t.prefix)));
     assert.equal(mine.at(-1).key, `${t.prefix}latest.json`);
-    assert.equal(mine.at(-1).cacheControl, 'no-cache');
+    assert.equal(mine.at(-1).cacheControl, 'public, max-age=30');
     assert.equal(mine.at(-2).key, `${t.prefix}v/${t.version}/manifest.json`);
     for (const o of mine.slice(0, -1)) assert.equal(o.cacheControl, 'public, max-age=31536000, immutable');
   }
@@ -119,7 +119,7 @@ test('upload-r2.mjs --dry-run: the commands for a clean build; refusals print no
   const cmds = ok.out.split('\n').filter((l) => l.startsWith('$ '));
   assert.equal(cmds.length, JSON.parse(readFileSync(join(OUT, 'r2-upload-plan.json'), 'utf8')).objects.length);
   assert.match(cmds[0], /^\$ npx wrangler r2 object put atvqpr2-assets\/games\/boxquad\/v\/[^ ]+ --file "?[^"]+"? --cache-control "public, max-age=31536000, immutable" --content-type [^ ]+ --remote$/);
-  assert.match(cmds.at(-1), /atvqpr2-assets\/games\/orbit\/latest\.json .*--cache-control no-cache --content-type application\/json --remote$/);
+  assert.match(cmds.at(-1), /atvqpr2-assets\/games\/orbit\/latest\.json .*--cache-control "public, max-age=30" --content-type application\/json --remote$/);
   // one title only
   const one = node([join(ROOT, 'pipeline', 'upload-r2.mjs'), '--out', OUT, '--title', 'orbit', '--dry-run']);
   assert.equal(one.status, 0, one.out);
@@ -149,7 +149,7 @@ test('upload-r2.mjs --dry-run: the commands for a clean build; refusals print no
   // rollback from a local copy of a kept version
   const rb = node([join(ROOT, 'pipeline', 'upload-r2.mjs'), '--out', join(TMP, 'rb'), '--rollback', v, '--title', 'boxquad', '--from', join(OUT, 'r2'), '--dry-run']);
   assert.equal(rb.status, 0, rb.out);
-  assert.match(rb.out, /\$ npx wrangler r2 object put atvqpr2-assets\/games\/boxquad\/latest\.json .*--cache-control no-cache/);
+  assert.match(rb.out, /\$ npx wrangler r2 object put atvqpr2-assets\/games\/boxquad\/latest\.json .*--cache-control "public, max-age=30"/);
   assert.equal(readFileSync(join(TMP, 'rb', 'rollback', 'boxquad', 'latest.json'), 'utf8'), readFileSync(join(OUT, BQ, 'latest.json'), 'utf8'));
   // a rollback names its title, and only that title's versions
   assert.notEqual(node([join(ROOT, 'pipeline', 'upload-r2.mjs'), '--out', join(TMP, 'rb'), '--rollback', v, '--from', join(OUT, 'r2'), '--dry-run']).status, 0);
@@ -166,7 +166,7 @@ test('R2 stand-in: CORS from deploy/r2-cors.json, preflights, ranges, Cache-Cont
     assert.equal(r.status, 200);
     assert.equal(r.headers.get('access-control-allow-origin'), 'https://atvqpr2.com');
     assert.match(r.headers.get('access-control-expose-headers'), /Content-Range.*ETag/);
-    assert.equal(r.headers.get('cache-control'), 'no-cache');
+    assert.equal(r.headers.get('cache-control'), 'public, max-age=30');
     r = await fetch(u('games/boxquad/latest.json'), { headers: { origin: 'https://evil.example' } });
     assert.equal(r.headers.get('access-control-allow-origin'), null);
     r = await fetch(u(`games/boxquad/v/${v}/textures/grass.rgba`), { headers: { origin: 'https://www.atvqpr2.com', range: 'bytes=100-199' } });

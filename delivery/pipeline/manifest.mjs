@@ -20,7 +20,7 @@
 // 2. Versioned bucket layout (writeVersionedTree; what goes to R2), one per
 //    title under its profile's prefix games/<id>/ (client/profile.js):
 //      latest.json                   { format: 'delivery-latest/1', title, version,
-//                                      manifest: 'v/<version>/manifest.json', sha256, size }   (no-cache)
+//                                      manifest: 'v/<version>/manifest.json', sha256, size }   (public, max-age=30)
 //      v/<version>/manifest.json     the catalog of that version (immutable)
 //      v/<version>/<path>            every file by its path (immutable; url = <path>)
 //    A release uploads v/<version>/ first and latest.json last; older v/ trees
@@ -36,7 +36,7 @@ export const LATEST_FORMAT = 'delivery-latest/1';
 export const DEFAULT_CHUNK = 1 << 20;
 // Cache-Control of the bucket's objects: versioned ones never change; the pointer is revalidated on every visit.
 export const CACHE_IMMUTABLE = 'public, max-age=31536000, immutable';
-export const CACHE_POINTER = 'no-cache';
+export const CACHE_POINTER = 'public, max-age=30';   // short: updates and rollbacks reach browsers and the edge within 30 s
 export const VERSION_RE = /^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{12}$/;
 const TYPES = { '.wasm': 'application/wasm', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8',
   '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html; charset=utf-8' };

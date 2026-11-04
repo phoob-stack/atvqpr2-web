@@ -353,7 +353,10 @@ try {
   }
 
   // ---- the move to games/boxquad/: the old root layout first (fallback), then the prefix --------------------------
-  if (want('transition')) {
+  // Only while a profile still has a fallback (the move is done for Box Quad: its profile has none now).
+  const bqFallback = JSON.parse(readFileSync(join(ROOT, 'profiles', 'boxquad.json'), 'utf8')).remote?.fallbackPrefix === '';
+  if (want('transition') && !bqFallback) log('skip transition: profiles/boxquad.json has no fallbackPrefix (the root copies are gone)');
+  if (want('transition') && bqFallback) {
     // a bucket with Box Quad at the root only (as before the move)
     const OUTR = join(ROOT, '.test', 'r2e2e-root');
     rmSync(OUTR, { recursive: true, force: true });
@@ -387,7 +390,7 @@ try {
   // ---- two versions, then a rollback (upload-r2.mjs --rollback --title boxquad --dry-run writes the pointer) ------
   if (want('rollback')) {
     const OUT2 = join(ROOT, '.test', 'r2e2e-out2'), OUTM = join(ROOT, '.test', 'r2e2e-merged');
-    log(`pipeline (variant 1): ${execFileSync(process.execPath, [join(ROOT, 'pipeline', 'build.mjs'), '--out', OUT2, '--no-site', '--variant', '1'], { encoding: 'utf8' }).trim().split('\n').at(-2)}`);
+    log(`pipeline (variant 2, a release differing from the profile's own): ${execFileSync(process.execPath, [join(ROOT, 'pipeline', 'build.mjs'), '--out', OUT2, '--no-site', '--variant', '2'], { encoding: 'utf8' }).trim().split('\n').at(-2)}`);
     const p1 = JSON.parse(readFileSync(join(OUT, 'r2-upload-plan.json'), 'utf8')), p2 = JSON.parse(readFileSync(join(OUT2, 'r2-upload-plan.json'), 'utf8'));
     const v1 = p1.titles.find((t) => t.id === 'boxquad').version, v2 = p2.titles.find((t) => t.id === 'boxquad').version;
     // the bucket after a second release: both versions kept, latest.json -> v2
