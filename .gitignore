@@ -96,3 +96,18 @@ node_modules/
 
 # Compiled shaders (RECOMP_GPU_SHADER_CACHE): derived from the game's shader programs
 shadercache/
+
+# Made from the game or from a run on this machine: never committed.
+*.wasm
+*.wgsl
+pipelines.json
+*.memory.json
+saves*/
+logs/
+*.zip
+
+# Credentials and local tool state.
+.env
+.env.*
+!.env.example
+.wrangler/
