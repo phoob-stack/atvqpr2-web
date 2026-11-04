@@ -9,13 +9,20 @@
  * writes it in wasm memory (WebHost.reserved[0] holds its address); the
  * layout is mirrored in web/host/roam.js. */
 #define ROAM_MB_MAGIC    0x4D414F52u  /* "ROAM" */
-#define ROAM_MB_VERSION  1u
+#define ROAM_MB_VERSION  2u   /* 2: label flags (ghost cue) */
 #define ROAM_OUT_CAP     16384u
 #define ROAM_IN_CAP      65536u
 
 #define ROAM_KIND_TEXT   1   /* WebSocket text frame (JSON control)    */
 #define ROAM_KIND_BINARY 2   /* WebSocket binary frame (snapshots)     */
 #define ROAM_KIND_EVENT  3   /* transport event: "open" / "close"      */
+
+#define ROAM_LABEL_GHOST 1   /* collisions on, this rider is a ghost now */
+#define ROAM_LABEL_SOLID 2   /* collisions on, this rider is solid       */
+
+/* Largest frames either transport accepts from the hub (bigger: dropped). */
+#define ROAM_MAX_TEXT    4096u
+#define ROAM_MAX_BINARY  16384u
 
 typedef struct RoamMailbox {
     uint32_t magic, version, size;
@@ -25,7 +32,7 @@ typedef struct RoamMailbox {
     volatile uint32_t out_head, out_tail, in_head, in_tail;
     volatile uint32_t stat_tx_bytes, stat_rx_bytes;   /* transport, wire bytes  */
     volatile uint32_t nlabels;        /* browser overlay: labels below           */
-    struct { float x, y, z; char name[20]; } labels[8];
+    struct { float x, y, z; char name[19]; uint8_t flags; } labels[8];  /* flags: ROAM_LABEL_* */
     volatile uint8_t out[ROAM_OUT_CAP];
     volatile uint8_t in[ROAM_IN_CAP];
 } RoamMailbox;

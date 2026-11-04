@@ -1672,8 +1672,9 @@ static void roam_overlay(Res *best)
 {
     static ID3D11DeviceContext1 *ctx1;
     static int tried;
-    static RoamRects fg, bg;
+    static RoamRects fg, bg, fgg, fgs;
     static const float white[4] = { 1, 1, 1, 1 }, black[4] = { 0, 0, 0, 1 };
+    static const float ghost[4] = { 0.55f, 0.78f, 1, 1 }, solid[4] = { 1, 0.82f, 0.25f, 1 };  /* collisions on */
     RoamMailbox *m = &atv2_roam_mb;
     uint32_t i, n = m->nlabels;
     int px;
@@ -1681,19 +1682,23 @@ static void roam_overlay(Res *best)
     if (!tried) { tried = 1; ID3D11DeviceContext_QueryInterface(s_ctx, &IID_ID3D11DeviceContext1, (void **)&ctx1); }
     if (!ctx1) return;
     px = (int)(best->sh / 240u); if (px < 1) px = 1;
-    fg.n = bg.n = 0;
+    fg.n = bg.n = fgg.n = fgs.n = 0;
     for (i = 0; i < n && i < 8; i++) {
-        char name[21];
+        char name[20];
         int len, x, y;
-        memcpy(name, (const void *)m->labels[i].name, 20); name[20] = 0;
+        uint8_t fl = m->labels[i].flags;
+        memcpy(name, (const void *)m->labels[i].name, 19); name[19] = 0;
         len = (int)strlen(name);
         x = (int)(m->labels[i].x * best->sw) - len * 3 * px;
         y = (int)(m->labels[i].y * best->sh) - 7 * px;
         roam_text_rects(name, x, y, px, px > 1 ? px / 2 : 1, roam_emit, &bg);
-        roam_text_rects(name, x, y, px, 0, roam_emit, &fg);
+        roam_text_rects(name, x, y, px, 0, roam_emit,
+                        fl & ROAM_LABEL_GHOST ? &fgg : fl & ROAM_LABEL_SOLID ? &fgs : &fg);
     }
     ID3D11DeviceContext1_ClearView(ctx1, (ID3D11View *)best->rtv, black, bg.r, bg.n);
-    ID3D11DeviceContext1_ClearView(ctx1, (ID3D11View *)best->rtv, white, fg.r, fg.n);
+    if (fg.n) ID3D11DeviceContext1_ClearView(ctx1, (ID3D11View *)best->rtv, white, fg.r, fg.n);
+    if (fgg.n) ID3D11DeviceContext1_ClearView(ctx1, (ID3D11View *)best->rtv, ghost, fgg.r, fgg.n);
+    if (fgs.n) ID3D11DeviceContext1_ClearView(ctx1, (ID3D11View *)best->rtv, solid, fgs.r, fgs.n);
 }
 
 int gp_d3d11_present_frame(void *hwnd, uint32_t fb_va, uint32_t aw, uint32_t ah)

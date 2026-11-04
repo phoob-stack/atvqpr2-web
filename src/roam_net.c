@@ -33,6 +33,7 @@ static char     s_hub_port[16];
 static SOCKET   s_sock = INVALID_SOCKET;
 static uint8_t  s_rx[1 << 17];
 static int      s_rx_n;
+static unsigned s_oversize;
 
 static void ev(const char *what)
 {
@@ -155,8 +156,15 @@ static int ws_parse(void)
         if ((uint64_t)(s_rx_n - at - h) < len) break;
         pl = s_rx + at + h;
         if (masked) for (i = 0; i < len; i++) pl[i] ^= mk[i & 3];
-        if (op == 1 || op == 2)
-            atv2_roam_in_put(op == 1 ? ROAM_KIND_TEXT : ROAM_KIND_BINARY, pl, (unsigned)len);
+        if (op == 1 || op == 2) {
+            /* frame size limits (roam.h): a bigger frame is not ours -- dropped */
+            if (len > (op == 1 ? ROAM_MAX_TEXT : ROAM_MAX_BINARY)) {
+                if (s_oversize++ < 5)
+                    fprintf(stderr, "[ROAM] dropped a %s frame of %u bytes (limit %u)\n", op == 1 ? "text" : "binary",
+                            (unsigned)len, op == 1 ? ROAM_MAX_TEXT : ROAM_MAX_BINARY);
+            } else
+                atv2_roam_in_put(op == 1 ? ROAM_KIND_TEXT : ROAM_KIND_BINARY, pl, (unsigned)len);
+        }
         else if (op == 8)
             return 0;
         else if (op == 9)
