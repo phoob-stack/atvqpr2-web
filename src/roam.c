@@ -486,12 +486,28 @@ static int slot_taken(int slot)
     return 0;
 }
 
+static uint32_t part(int i);
+
+/* A free slot whose rider and ATV are already built as this look, or 0. */
+static int slot_built_as(int rider, int atv)
+{
+    int s;
+    for (s = 1; s <= s_slots && s < RT_MAX; s++) {
+        uint32_t p = part(s);
+        if (p && rd32(p + 0x3C) && !slot_taken(s) && (int)rd32(p + 0x40) == rider && (int)rd32(p + 0x38) == atv)
+            return s;
+    }
+    return 0;
+}
+
 static void rem_assign(Remote *r)
 {
     int s;
     if (r->slot)
         return;
-    for (s = 1; s <= s_slots && s < RT_MAX; s++)
+    if (r->rider >= 0 && r->atv >= 0)
+        r->slot = slot_built_as(r->rider, r->atv);   /* a slot already built as this rider */
+    for (s = 1; !r->slot && s <= s_slots && s < RT_MAX; s++)
         if (!slot_taken(s)) { r->slot = s; break; }
     fprintf(stderr, "[ROAM] %s (id %d) -> %s\n", r->name, r->id,
             r->slot ? "rider slot" : "no free slot (more players than slots)");
@@ -510,6 +526,22 @@ static void rem_drop(Remote *r, const char *why)
     fflush(stderr);
     r->used = 0;
     r->slot = 0;
+    {   /* a slot came free: anyone shown on another rider's slot moves to a slot built as its own */
+        int i;
+        for (i = 0; i < MAXP; i++) {
+            Remote *o = &s_rem[i];
+            uint32_t p = o->used && o->slot && o->rider >= 0 ? part(o->slot) : 0;
+            int s2;
+            if (!p || !rd32(p + 0x3C) || ((int)rd32(p + 0x40) == o->rider && (int)rd32(p + 0x38) == o->atv))
+                continue;
+            if ((s2 = slot_built_as(o->rider, o->atv)) != 0) {
+                fprintf(stderr, "[ROAM] %s moves from slot %d to slot %d (built as its rider and ATV)\n", o->name, o->slot, s2);
+                o->slot = s2;
+                o->shown = 0;
+            }
+        }
+        fflush(stderr);
+    }
 }
 
 static void rem_look(Remote *r, int rider, int atv, int skin)
@@ -521,8 +553,19 @@ static void rem_look(Remote *r, int rider, int atv, int skin)
     r->rider = rider; r->atv = atv; r->skin = skin;
     fprintf(stderr, "[ROAM] %s (id %d) rides rider %d, ATV %d\n", r->name, r->id, rider, atv);
     fflush(stderr);
-    if (r->slot)
-        slot_want(r->slot, rider, atv);
+    if (r->slot) {
+        uint32_t p = part(r->slot);
+        int s2 = 0;
+        if (p && rd32(p + 0x3C) && ((int)rd32(p + 0x40) != rider || (int)rd32(p + 0x38) != atv))
+            s2 = slot_built_as(rider, atv);
+        if (s2) {                     /* another free slot is built as this rider: move there */
+            fprintf(stderr, "[ROAM] %s moves from slot %d to slot %d (built as its rider and ATV)\n", r->name, r->slot, s2);
+            fflush(stderr);
+            r->slot = s2;
+            r->shown = 0;
+        } else
+            slot_want(r->slot, rider, atv);
+    }
 }
 
 static void rem_push(Remote *r, const Snap *s, uint32_t seq, double recv)
@@ -822,7 +865,7 @@ static int repoint(uint32_t oldr, uint32_t oldu, uint32_t newr, uint32_t newu)
             (va >= newr && va < newr + 0x9F0u) || (va >= newu && va < newu + 0x1144u) || (va >= lo && va < g_esp))
             continue;
         if (n < 12) fprintf(stderr, "[ROAM]   %08X: %s %08X -> %08X\n", va, v == oldr ? "R" : "U", v, v == oldr ? newr : newu);
-        MEM32(va) = v == oldr ? newr : newu;
+        wr32(va, v == oldr ? newr : newu);
         n++;
     }
     return (int)n;
@@ -850,7 +893,7 @@ static int slot_respawn(int slot, uint32_t p)
     snprintf(path, sizeof path, "characters/%s", rn);
     g_esp -= 128;                     /* the pack name on the guest stack */
     buf = g_esp;
-    for (i = 0; i <= (int)strlen(path); i++) MEM8(buf + (uint32_t)i) = (uint8_t)path[i];
+    for (i = 0; i <= (int)strlen(path); i++) { uint8_t ch = (uint8_t)path[i]; memcpy((void *)XBOX_PTR(buf + (uint32_t)i), &ch, 1); }
     /* the sound thread (0x87CC0) walks its streams under the mutex [0x1D934C] */
     mtx = rd32(0x001D934Cu);
     if (mtx) gcall(sub_000C9B9F, 0, 1, 2, mtx, 0xFFFFFFFFu);
@@ -1215,6 +1258,9 @@ static uint32_t s_l_tentry, s_l_tphase;
 static uint8_t  s_l_tseq;
 static double   s_l_tstart;
 static uint32_t s_l_tricks;
+static int      s_autotrick = -1;     /* RECOMP_ROAM_AUTOTRICK (test aid) */
+static double   s_autotrick_t;
+static int      s_autotrick_phase;
 static float    s_l_lastpos[3];
 static int      s_l_havepos;
 
@@ -1290,6 +1336,24 @@ static void local_tick(uint32_t p0)
         return;
     if (!s_qchecked)
         check_quat_convention(u);
+    if (r && s_autotrick >= 0) {
+        /* test aid (RECOMP_ROAM_AUTOTRICK=N), no ramp needed: every 8 s put
+         * the local rider 9 m up (a position write; the fall is the game's
+         * own, so the body really is in the air) and 0.2 s later start
+         * trick N with the call the game's own trick input ends in (0x2A7E0).
+         * The rider is awake only while driving: hold the throttle. */
+        if (!s_autotrick_t) s_autotrick_t = now;
+        if (s_autotrick_phase == 0 && now - s_autotrick_t > 8000 && rd32(r + R_STATE) == 0 &&
+            fabsf(rdf(u + B_VEL)) + fabsf(rdf(u + B_VEL + 8)) > 4.0f) {         /* driving: awake */
+            wrf(u + B_POS + 4, pos[1] + 9.0f);
+            s_autotrick_t = now;
+            s_autotrick_phase = 1;
+        } else if (s_autotrick_phase == 1 && now - s_autotrick_t > 200) {
+            if (rd32(r + R_STATE) == 0)
+                gcall(sub_0002A7E0, r, 1, 1, (uint32_t)s_autotrick, 0);
+            s_autotrick_phase = 0;
+        }
+    }
     if (r) local_trick(r, now);
     if (++s_tick & 1)
         goto stat;                   /* 60 Hz ticks -> 30 Hz snapshots */
@@ -1365,8 +1429,12 @@ static void puppet_trick(Remote *rm, uint32_t p, const Snap *s)
             fflush(stderr);
         }
     }
-    if (s->tseq != rm->tseq_done && s->tms > 600)
+    if (s->tseq != rm->tseq_done && s->tms > 600) {
+        fprintf(stderr, "[ROAM] %s: trick %d not shown (puppet rider state %X phase %u)\n", rm->name, s->trick,
+                rd32(r + R_STATE), rd32(r + R_PHASE));
+        fflush(stderr);
         rm->tseq_done = s->tseq;      /* the puppet could not take it in time */
+    }
 }
 
 /* A puppet slot's participant update: the unit's own step (control mode 0:
@@ -1702,6 +1770,7 @@ void atv2_roam_init(void)
         else if (!strchr(tok, '=') && !s_addr[0]) snprintf(s_addr, sizeof s_addr, "%s", tok);
     }
     if (getenv("RECOMP_ROAM_TRACE")) s_trace = 1;
+    if (getenv("RECOMP_ROAM_AUTOTRICK")) s_autotrick = clampi(atoi(getenv("RECOMP_ROAM_AUTOTRICK")), 0, 0x1B);
     if (getenv("RECOMP_ROAM_NAME")) snprintf(s_name, sizeof s_name, "%s", getenv("RECOMP_ROAM_NAME"));
     if (s_slots < 1) s_slots = 1;
     if (s_slots > RT_MAX - 1) s_slots = RT_MAX - 1;
