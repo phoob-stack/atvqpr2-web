@@ -33,8 +33,9 @@
 // names, rider / ATV choices, poses -- never anything from the game.
 //
 // GET / (no upgrade): "atv2 roamhub v2: N players, M rooms" (text/plain, no
-// names or addresses). Loopback binds also serve /status.json and the /drop
-// test aid.
+// names or addresses). GET /status.json: the same counts as JSON for the
+// project site's status line (CORS for the allowed origins only); loopback
+// binds serve a detailed /status.json instead, and the /drop test aid.
 //
 // Rooms: a hello names its room (else the URL path /room/<name>, else
 // "freeride"). --collide 1 turns collisions on for every room.
@@ -297,6 +298,16 @@ const srv = createServer((req, res) => {
       rooms: [...rooms.values()].map((r) => ({ name: r.name, stats: r.stats,
         players: [...r.players.values()].map((p) => ({ id: p.id, name: p.name, connected: !!p.conn, rider: p.look.rider, atv: p.look.atv, v: p.v, bad: p.bad })) })),
     }));
+    return;
+  }
+  if (u.pathname === '/status.json') {
+    // The site's status line: counts only (no names, no addresses), readable by the allowed origins.
+    const origin = req.headers.origin;
+    const head = { 'content-type': 'application/json', 'cache-control': 'public, max-age=5', vary: 'Origin' };
+    if (origin && ORIGIN_LIST && ORIGIN_LIST.includes(origin)) head['access-control-allow-origin'] = origin;
+    res.writeHead(200, head);
+    res.end(JSON.stringify({ online: true, hub: 'atv2 roam', v: PROTO.version, players: totalPlayers(), rooms: rooms.size,
+      uptime: Math.round(process.uptime()), roomPlayers: [...rooms.values()].map((r) => r.size) }));
     return;
   }
   // "Is it up?" -- counts only (no names, no addresses).

@@ -320,7 +320,13 @@ function fakeHub(opt = {}) {
     await sleep(150);
     const st = await (await fetch(`http://127.0.0.2:${PORT2}/`)).text();
     ok(/^atv2 roamhub v2: 1 players, 1 rooms/.test(st), `hosted: GET / status line (${st.trim()})`);
-    ok((await fetch(`http://127.0.0.2:${PORT2}/status.json`)).status === 404, 'hosted: no details on a public bind');
+    const sj = await fetch(`http://127.0.0.2:${PORT2}/status.json`, { headers: { Origin: good.Origin ?? good.origin } });
+    const sjText = await sj.text(), sjBody = JSON.parse(sjText);
+    ok(sj.status === 200 && sjBody.online === true && sjBody.players === 1 && sjBody.rooms === 1 && !/"name"|\d+\.\d+\.\d+\.\d+/.test(sjText),
+      `hosted: /status.json has counts only (${sjText})`);
+    ok(sj.headers.get('access-control-allow-origin') === (good.Origin ?? good.origin), 'hosted: /status.json CORS for an allowed origin');
+    const sjBad = await fetch(`http://127.0.0.2:${PORT2}/status.json`, { headers: { Origin: 'https://evil.example' } });
+    ok(sjBad.headers.get('access-control-allow-origin') === null, 'hosted: /status.json no CORS for other origins');
     const idle = closeCode(c4.sock);
     ok(await idle === 4004, 'hosted: idle connection closed');
     const noHello = closeCode(c1.sock);
