@@ -5,7 +5,7 @@
 // unchanged: `atvctl.py --port <ctl> route race dunes_lagoon`.
 //
 //   node web/tools/ctlbridge.mjs --ctl <port> [--port n] [--profile dir] [--opfs]
-//        [--env K=V,...] [--out dir] [--movies] [--wasm url] [--headed]
+//        [--env K=V,...] [--qs a=b&c=d] [--out dir] [--movies] [--wasm url] [--headed]
 //
 // Commands: ping info frame fps press hold release clear wait(ms|frames|input|
 // mem|value|fps|draws) peek read color screenshot state log quit. Input goes
@@ -39,6 +39,7 @@ await new Promise((r) => srv.stdout.once('data', r));
 const qs = new URLSearchParams();
 if (env) qs.set('env', env);
 if (opt('--wasm')) qs.set('wasm', opt('--wasm'));
+for (const [k, v] of new URLSearchParams(opt('--qs', ''))) qs.set(k, v);   // --qs 'roam=wss://..&roam_name=..': more page parameters
 const b = await launch(`http://127.0.0.1:${port}/host/index.html?${qs}`, { profile: opt('--profile'), headless: !argv.includes('--headed') });
 const t0 = Date.now();
 

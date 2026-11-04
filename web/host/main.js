@@ -121,6 +121,17 @@ async function boot() {
   const env = { ...DEFAULT_ENV };
   // [site] the player's settings (site/settings.js via site/shell.js), between the defaults and ?env=; null unsets.
   for (const [k, v] of Object.entries(window.atvSite?.env ?? {})) { if (v === null) delete env[k]; else env[k] = v; }
+  // Free roam's hub (src/roam.c, web/host/roam.js): ?roam=<ws(s) URL>[&roam_name=..]
+  // or the settings roam_url / roam_name (atv2.settings.v1), as RECOMP_ROAM.
+  // No hub set: Free Ride stays single-player and offline. ?env= still wins.
+  {
+    let st = null;
+    try { st = JSON.parse(localStorage.getItem('atv2.settings.v1') ?? 'null')?.values ?? null; } catch { st = null; }
+    const url = String(q.get('roam') ?? st?.roam_url ?? '').trim();
+    const name = String(q.get('roam_name') ?? st?.roam_name ?? '').replace(/[^\x20-\x7e]|[;,"\\=]/g, '').trim().slice(0, 20);
+    if (/^wss?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9_\/-]*)?$/.test(url)) env.RECOMP_ROAM = name ? `${url};name=${name}` : url;
+    else if (url) log(`[page] roam: "${url}" is not a ws:// or wss:// address; playing offline`, 'err');
+  }
   for (const kv of (q.get('env') ?? '').split(',').filter(Boolean)) {
     if (kv[0] === '-') { delete env[kv.slice(1)]; continue; }   // -NAME unsets
     const i = kv.indexOf('=');

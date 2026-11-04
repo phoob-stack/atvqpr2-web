@@ -44,6 +44,9 @@ export function startRoam({ memory, hostPtr, env, canvas, log, display }) {
   const spec = env.RECOMP_ROAM;
   if (!spec || spec === '0') return null;
   const addr = spec.split(/[;,]/).find((t) => !t.includes('=')) ?? '';
+  // A full ws:// or wss:// URL (a hosted hub: wss://hub.atvqpr2.com/), else host:port (a local hub).
+  const url = /^wss?:\/\//.test(addr) ? addr : `ws://${addr}/roam`;
+  let backoff = 1000;          // reconnect: 1 s, doubling to 15 s while the hub is unreachable
   const st = { ws: null, mb: 0, open: false, tx: 0, rx: 0, txMsgs: 0, rxMsgs: 0, connects: 0, oversize: 0 };
   let u8, i32, dv;
   const views = () => {
@@ -80,12 +83,13 @@ export function startRoam({ memory, hostPtr, env, canvas, log, display }) {
 
   function connect() {
     let ws;
-    try { ws = new WebSocket(`ws://${addr}/roam`); } catch (e) { log(`[roam] ${e.message}`); setTimeout(connect, 1000); return; }
+    try { ws = new WebSocket(url); } catch (e) { log(`[roam] ${e.message}`); setTimeout(connect, backoff); return; }
     ws.binaryType = 'arraybuffer';
     st.ws = ws; setU32(MB.state, 1);
     ws.onopen = () => {
       st.open = true; st.connects++; setU32(MB.state, 2);
-      log(`[roam] connected to ws://${addr}/`);
+      log(`[roam] connected to ${url}`);
+      backoff = 1000;
       inPut(KIND_EVENT, new TextEncoder().encode('open'));
     };
     ws.onmessage = (e) => {
@@ -99,7 +103,8 @@ export function startRoam({ memory, hostPtr, env, canvas, log, display }) {
     ws.onclose = () => {
       if (st.open) { log('[roam] connection lost; reconnecting'); inPut(KIND_EVENT, new TextEncoder().encode('close')); }
       st.open = false; st.ws = null; setU32(MB.state, 1);
-      setTimeout(connect, 1000);
+      setTimeout(connect, backoff);
+      backoff = Math.min(15000, backoff * 2);
     };
     ws.onerror = () => {};
   }
@@ -152,7 +157,7 @@ export function startRoam({ memory, hostPtr, env, canvas, log, display }) {
     st.mb = p; views();
     if (u32(MB.magic) !== MAGIC) { log(`[roam] mailbox at 0x${p.toString(16)} has a bad magic`); return; }
     if (u32(MB.version) !== 2) { log(`[roam] mailbox version ${u32(MB.version)}; this page knows version 2`); return; }
-    log(`[roam] mailbox at 0x${p.toString(16)}; hub ws://${addr}/`);
+    log(`[roam] mailbox at 0x${p.toString(16)}; hub ${url}`);
     connect();
     setInterval(() => {
       for (let m; (m = outGet());) {

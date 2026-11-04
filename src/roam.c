@@ -2,7 +2,12 @@
  * roam.c -- multiplayer free roam for Free Ride (Freestyle, Unlimited Time,
  * Stadium: Main Event).
  *
- *   RECOMP_ROAM=host:port[,name=NAME][,room=ROOM][,slots=N][,collide=1][,ghost=SECS][,test=1|2]
+ *   RECOMP_ROAM=<hub>[,name=NAME][,room=ROOM][,slots=N][,collide=1][,ghost=SECS][,respawn=1][,test=1|2[,testlook=R:A]]
+ *   <hub>: host:port (a local hub), ws://host[:port]/path or wss://host[:port]/path
+ *   (wss://hub.atvqpr2.com/; a /room/<name> path names the room). respawn=1:
+ *   rebuild a slot in the ride for a late joiner (experimental, see slot_respawn).
+ *   Test aids: RECOMP_ROAM_AUTOTRICK=N (a trick in the air every 8 s while
+ *   driving), RECOMP_ROAM_TRACE=1, RECOMP_ICALL_STACK=1.
  *
  * (',' or ';' between options; work\roam\ROAM-RE.md and work\roam2\ROAM2-RE.md
  * have the reverse engineering).
@@ -158,7 +163,7 @@ static int  s_test;               /* test=1: echo own snapshots as a remote */
 static int  s_test_rider = -1, s_test_atv = -1;   /* testlook=R:A: the echo's look */
 static char s_name[24] = "PLAYER";
 static char s_room[24] = "freeride";
-static char s_addr[64];
+static char s_addr[128];
 static int  s_collide_opt;        /* collide=1                           */
 static int  s_collide_room;       /* the hub's room setting (welcome)    */
 static double s_ghost_ms = 3000;  /* ghost=SECS                          */
@@ -800,13 +805,17 @@ static int guest_str(uint32_t va, char *out, int max)
 /* ---- the remote's rider and ATV ------------------------------------------------------
  * Before the stadium is built (participants made by BB4B0, units not yet
  * spawned) the choice is written into the slot's participant and the race
- * load (0xA1D30) builds it like any rider. Afterwards the slot is respawned:
- * the rider's pack ("characters/<name>") and the ATV's pack loaded (0xF7410),
- * the participant's own despawn (vt+0x50: frees its rider R and unit U) and
- * spawn (vt+0x4C(track): rider R with the rider model, unit U with the ATV),
- * its path objects again (vt+0x6C), and the packs unloaded (0xF6E60) -- the
- * steps the race load does for each participant. The participant (and its
- * progress object +0x48) stays, so the slot keeps its index. */
+ * load (0xA1D30) builds it like any rider; the menus pump the hub, so every
+ * player already in the room when the stadium is built is built right, and a
+ * free slot already built as a newcomer's rider and ATV is reused for it.
+ * A late joiner otherwise rides the slot's model until Free Ride is entered
+ * again. respawn=1 (experimental) rebuilds the slot in the ride: the rider's
+ * pack ("characters/<name>") and the ATV's pack loaded (0xF7410), the
+ * participant's own despawn (vt+0x50) and spawn (vt+0x4C(track)) inside the
+ * renderer's loading mode (as 0x27120 does), its path objects (vt+0x6C), the
+ * packs unloaded (0xF6E60), the wheel-trail handles zeroed, references to the
+ * old R / U moved (repoint). It still crashes a little later in the sound
+ * stream thread (0x87CC0: a stream entry overwritten), so it stays off. */
 static int slot_look_prespawn(int slot);
 static int s_respawn_opt;         /* respawn=1: change a built slot in the ride (experimental) */
 
@@ -1064,7 +1073,14 @@ static void on_binary(const uint8_t *p, int n, double now)
 static void pump_in(double now)
 {
     static uint8_t buf[0x10000];
+    static double last_ping;
     int kind, n;
+    /* keepalive: a hosted hub closes a connection silent for its idle
+     * timeout, and in the menus nothing else is sent */
+    if (s_connected && s_my_id >= 0 && now - last_ping > 10000) {
+        last_ping = now;
+        atv2_roam_out_put(ROAM_KIND_TEXT, "{\"t\":\"ping\"}", 12);
+    }
     while ((n = in_get(&kind, buf, sizeof buf - 1)) >= 0) {
         s_recv_bytes += n;
         if (kind == ROAM_KIND_EVENT) {
@@ -1143,12 +1159,15 @@ static void poll_local_look(void)
  *         ghost period (its flag);
  *       . it no longer overlaps the local rider (an overlap when the ghost
  *         period ends keeps both ghosts until they are apart, 3 m);
- *       . its shown pose is interpolated (not an extrapolated guess) and had
- *         no big correction in the last 0.3 s (lag, loss);
+ *       . lag guard, per tick and not held: its shown pose is interpolated
+ *         (not an extrapolated guess) and had no big correction (>= 1 m/tick^2)
+ *         in the last 0.25 s;
  *   - and after a contact with a puppet the local rider's velocity change per
  *     tick is capped (6 m/s, 3 m/s upward; 5 rad/s spin), so a late, deep
  *     overlap cannot launch it. Each game resolves only its own rider: both
- *     see the other as an unmovable (kinematic) body moving at its speed. */
+ *     see the other as an unmovable (kinematic) body moving at its speed (the
+ *     engine skips pairs of two resting bodies: a parked rider hit by a remote
+ *     is not pushed on its own screen; the remote stops against it on its). */
 #define RET_PAIR    0x00070B17u
 #define OVERLAP_M   3.0f
 #define DV_MAX      6.0f
@@ -1158,7 +1177,7 @@ static uint32_t s_ghost[2 * RT_MAX], s_solid[2 * RT_MAX], s_local_col[2];
 static int s_nghost, s_nsolid;
 static double s_local_ghost_until;
 static int s_contact_tick = -100;
-static uint32_t s_ghost_skips, s_solid_pairs, s_solid_contacts, s_dv_clamps;
+static uint32_t s_ghost_skips, s_solid_pairs, s_solid_contacts, s_dv_clamps, s_lag_ghost;
 static uint32_t s_pair_va;
 
 static Remote *slot_remote(int slot)
@@ -1182,11 +1201,13 @@ static void ghost_refresh(double now, const float *lpos)
             int k, g;
             for (k = 0; k < 3; k++) d += (rm->lastpos[k] - lpos[k]) * (rm->lastpos[k] - lpos[k]);
             d = sqrtf(d);
+            /* spawn / respot ghost (either side): held while the two overlap */
             g = now - rm->shown_at < s_ghost_ms || now < s_local_ghost_until ||
-                (rm->cur.ext && (rm->cur.flags & SNAPF_GHOST)) || rm->kind != 1 || now < rm->snap_until;
+                (rm->cur.ext && (rm->cur.flags & SNAPF_GHOST));
             if (g) { rm->ghost_hold = d < OVERLAP_M; ghost = 1; }
             else if (rm->ghost_hold) { if (d >= OVERLAP_M) rm->ghost_hold = 0; ghost = rm->ghost_hold; }
-            else ghost = 0;
+            /* lag guard: a guessed (extrapolated) pose or a fresh correction is not solid, this tick only */
+            else { ghost = rm->kind != 1 || now < rm->snap_until; s_lag_ghost += ghost; }
         }
         if (rm) rm->ghost = ghost;
         if (ghost) { s_ghost[ng++] = rd32(r + 0x1C); s_ghost[ng++] = rd32(u + 0x1C); }
@@ -1282,9 +1303,9 @@ static void stats(double now)
 {
     double dt = (now - s_stat_t0) / 1000.0;
     int i;
-    fprintf(stderr, "[ROAM] ghost: %u puppet pairs skipped; collisions %s: %u solid pairs, %u with contacts, %u velocity caps; "
+    fprintf(stderr, "[ROAM] ghost: %u puppet pairs skipped; collisions %s: %u solid pairs, %u with contacts, %u velocity caps, %u lag-guard ticks; "
             "%u name tags (first at %.2f %.2f, %.0f m)\n",
-            s_ghost_skips, collide_on() ? "on" : "off", s_solid_pairs, s_solid_contacts, s_dv_clamps,
+            s_ghost_skips, collide_on() ? "on" : "off", s_solid_pairs, s_solid_contacts, s_dv_clamps, s_lag_ghost,
             atv2_roam_mb.nlabels, atv2_roam_mb.labels[0].x, atv2_roam_mb.labels[0].y, atv2_roam_mb.labels[0].z);
     fprintf(stderr, "[ROAM] stats: sent %u snaps (%.1f/s, %.0f B/s payload), recv %u snaps (%.1f/s, %.0f B/s), %u bad records; local tricks %u\n",
             s_sent_snaps, s_sent_snaps / dt, s_sent_bytes / dt, s_recv_snaps, s_recv_snaps / dt, s_recv_bytes / dt,
@@ -1416,6 +1437,9 @@ static void puppet_trick(Remote *rm, uint32_t p, const Snap *s)
     if (s->tseq == rm->tseq_done)
         return;
     if (s->rstate != 4 || s->trick < 0 || s->tphase >= 7) {
+        fprintf(stderr, "[ROAM] %s: trick seq %u over before it was shown (state %X, trick %d, phase %u)\n",
+                rm->name, s->tseq, s->rstate, s->trick, s->tphase);
+        fflush(stderr);
         rm->tseq_done = s->tseq;      /* over before we got to it */
         return;
     }
@@ -1484,7 +1508,7 @@ static void puppet_tick(uint32_t p, int slot)
                 j = sqrt(j);
                 r->jerk_sum += j; r->jerk_n++;
                 if (j > r->jerk_max) r->jerk_max = j;
-                if (j > 0.5) r->snap_until = now + 300;   /* a correction: not solid for a moment */
+                if (j > 1.0) r->snap_until = now + 250;   /* a correction (>= 1 m/tick^2): not solid for a moment */
             }
             memcpy(r->prevpos, r->lastpos, sizeof r->prevpos);
             memcpy(r->lastpos, s.pos, sizeof r->lastpos);
@@ -1767,7 +1791,11 @@ void atv2_roam_init(void)
         else if (!strncmp(tok, "ghost=", 6)) { double g = atof(tok + 6); if (g >= 0 && g <= 60) s_ghost_ms = g * 1000.0; }
         else if (!strncmp(tok, "respawn=", 8)) s_respawn_opt = atoi(tok + 8) == 1;
         else if (!strncmp(tok, "testlook=", 9)) sscanf(tok + 9, "%d:%d", &s_test_rider, &s_test_atv);
-        else if (!strchr(tok, '=') && !s_addr[0]) snprintf(s_addr, sizeof s_addr, "%s", tok);
+        else if (!strchr(tok, '=') && !s_addr[0]) snprintf(s_addr, sizeof s_addr, "%s", tok);   /* host:port or ws(s)://host[:port]/path */
+    }
+    {   /* a URL's /room/<name> path names the room (a room= option still wins) */
+        const char *rp = strstr(s_addr, "/room/");
+        if (rp && !strstr(e, "room=")) snprintf(s_room, sizeof s_room, "%.*s", (int)strcspn(rp + 6, "/?"), rp + 6);
     }
     if (getenv("RECOMP_ROAM_TRACE")) s_trace = 1;
     if (getenv("RECOMP_ROAM_AUTOTRICK")) s_autotrick = clampi(atoi(getenv("RECOMP_ROAM_AUTOTRICK")), 0, 0x1B);

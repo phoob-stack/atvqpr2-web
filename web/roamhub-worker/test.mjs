@@ -250,12 +250,99 @@ function fakeHub(opt = {}) {
       ws.onclose = (e) => res(e.code);
     });
     ok(big === 1009 || big === 1006, `hub: oversized frame closes (${big})`);
-    const info = await (await fetch(`http://127.0.0.1:${PORT}/`)).json();
+    const info = await (await fetch(`http://127.0.0.1:${PORT}/status.json`)).json();
     ok(info.rooms[0].players.length === 3 && info.rooms[0].stats.badRecords === 1, 'hub: status page');
     c.close();
     a.close(); b.close();
   } finally {
     hub.kill();
+  }
+}
+
+// ---- 5. the Node hub as hosted (deploy\pterodactyl's command line), on loopback ----------------
+{
+  const http = await import('node:http');
+  // A raw upgrade with chosen headers: resolves { status, sock } (sock: after a 101).
+  const upgrade = (port, headers, path = '/') => new Promise((res) => {
+    const rq = http.request({ host: '127.0.0.1', port, path, headers: { Connection: 'Upgrade', Upgrade: 'websocket',
+      'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==', ...headers } });
+    rq.on('upgrade', (r, sock) => res({ status: r.statusCode, sock }));
+    rq.on('response', (r) => { r.resume(); res({ status: r.statusCode }); });
+    rq.on('error', () => res({ status: 0 }));
+    rq.end();
+  });
+  const wsText = (sock, s) => {     // one masked client text frame
+    const p = Buffer.from(s), mask = Buffer.from([1, 2, 3, 4]);
+    const h = p.length < 126 ? Buffer.from([0x81, 0x80 | p.length]) : Buffer.from([0x81, 0x80 | 126, p.length >> 8, p.length & 255]);
+    sock.write(Buffer.concat([h, mask, Buffer.from(p.map((x, i) => x ^ mask[i & 3]))]));
+  };
+  const closeCode = (sock) => new Promise((res) => {
+    let buf = Buffer.alloc(0);
+    sock.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      for (let at = 0; at + 2 <= buf.length;) {
+        const op = buf[at] & 15, len = buf[at + 1] & 127, h = len === 126 ? 4 : 2, n = len === 126 ? buf.readUInt16BE(at + 2) : len;
+        if (at + h + n > buf.length) break;
+        if (op === 8) { res(n >= 2 ? buf.readUInt16BE(at + h) : 1005); return; }
+        at += h + n;
+      }
+    });
+    sock.on('close', () => res(-1));
+  });
+  const PORT2 = PORT + 1;
+  const lines = [];
+  const hub = spawn(process.execPath, [join(here, '..', 'tools', 'roamhub.mjs'), '--port', String(PORT2), '--bind', '127.0.0.2',
+    '--trust-proxy', 'cf', '--origins', 'https://atvqpr2.com,https://www.atvqpr2.com', '--max-players', '3', '--max-rooms', '2',
+    '--max-conns-per-ip', '2', '--idle-timeout', '2', '--allow-no-origin', '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  hub.stdout.on('data', (d) => lines.push(...String(d).split('\n')));
+  hub.stderr.on('data', (d) => lines.push(...String(d).split('\n')));
+  try {
+    await sleep(600);
+    ok(lines.some((l) => /WARNING: bound to 127\.0\.0\.2/.test(l)), 'hosted: warning for a non-loopback bind');
+    ok(lines.some((l) => / roamhub on ws:\/\/127\.0\.0\.2:/.test(l) || /^\[[\d.]+\] roamhub on /.test(l)), 'hosted: ready line "roamhub on "');
+    const up = (headers, path) => new Promise((res) => {
+      const rq = http.request({ host: '127.0.0.2', port: PORT2, path: path ?? '/', headers: { Connection: 'Upgrade', Upgrade: 'websocket',
+        'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==', ...headers } });
+      rq.on('upgrade', (r, sock) => res({ status: r.statusCode, sock }));
+      rq.on('response', (r) => { r.resume(); res({ status: r.statusCode }); });
+      rq.on('error', () => res({ status: 0 }));
+      rq.end();
+    });
+    void upgrade;
+    const good = { Origin: 'https://atvqpr2.com', 'CF-Connecting-IP': '203.0.113.7' };
+    ok((await up({ Origin: 'https://evil.example', 'CF-Connecting-IP': '203.0.113.9' })).status === 403, 'hosted: other origin refused');
+    ok((await up({ 'CF-Connecting-IP': '203.0.113.9' })).status === 403, 'hosted: missing Origin refused (allow-no-origin 0)');
+    const c1 = await up(good), c2 = await up(good), c3 = await up(good);
+    ok(c1.status === 101 && c2.status === 101 && c3.status === 429, 'hosted: per-IP limit from CF-Connecting-IP');
+    const c4 = await up({ ...good, 'CF-Connecting-IP': '198.51.100.4' }, '/room/lobby');
+    ok(c4.status === 101, 'hosted: another IP gets in');
+    wsText(c4.sock, JSON.stringify({ t: 'hello', name: 'X' }));
+    await sleep(150);
+    const st = await (await fetch(`http://127.0.0.2:${PORT2}/`)).text();
+    ok(/^atv2 roamhub v2: 1 players, 1 rooms/.test(st), `hosted: GET / status line (${st.trim()})`);
+    ok((await fetch(`http://127.0.0.2:${PORT2}/status.json`)).status === 404, 'hosted: no details on a public bind');
+    const idle = closeCode(c4.sock);
+    ok(await idle === 4004, 'hosted: idle connection closed');
+    const noHello = closeCode(c1.sock);
+    ok([4003, 4004].includes(await noHello), 'hosted: a connection that never says hello is closed');
+    c2.sock.destroy();
+    hub.kill('SIGTERM');
+    const code = await new Promise((r) => hub.on('exit', (c, sig) => r(c ?? sig)));
+    ok(code === 0 || code === 'SIGTERM', `hosted: stops on SIGTERM (${code})`);
+  } finally {
+    hub.kill();
+  }
+  // --allow-no-origin 1: the native game (no Origin) gets in
+  const hub2 = spawn(process.execPath, [join(here, '..', 'tools', 'roamhub.mjs'), '--port', String(PORT2), '--origins', 'https://atvqpr2.com',
+    '--allow-no-origin', '1', '--quiet'], { stdio: 'ignore' });
+  try {
+    await sleep(500);
+    const n = await upgrade(PORT2, {});
+    const e = await upgrade(PORT2, { Origin: 'https://evil.example' });
+    ok(n.status === 101 && e.status === 403, 'hosted: --allow-no-origin 1 lets the native client in, still checks origins');
+    n.sock?.destroy();
+  } finally {
+    hub2.kill();
   }
 }
 
